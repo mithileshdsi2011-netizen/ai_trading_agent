@@ -1,0 +1,33 @@
+# Core dependencies
+yfinance==0.2.44
+pandas==2.2.2
+numpy==1.26.4
+requests==2.31.0
+python-dotenv==1.0.1
+
+# Technical analysis
+# ta-lib==0.4.28  # Optional - install via: brew install ta-lib && pip install ta-lib
+# pandas-ta  # Not compatible with Python 3.11 - using manual implementation
+
+# AI/ML
+openai==1.35.14
+langchain==0.2.11
+langchain-openai==0.1.20
+langgraph==0.1.6
+
+# Broker integration
+kiteconnect==5.0.0
+
+# Data processing
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# Testing
+pytest==8.2.2
+pytest-asyncio==0.23.7
+pytest-mock==3.14.0
+responses==0.25.3
+
+# Utilities
+pytz==2024.1
+schedule==1.2.1
