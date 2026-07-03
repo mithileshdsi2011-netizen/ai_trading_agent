@@ -23,8 +23,8 @@ class Config:
     TRADING_MODE: str = os.getenv("TRADING_MODE", "swing")  # Default swing for small capital
     
     # Trading Parameters
-    TRADING_AMOUNT: float = float(os.getenv("TRADING_AMOUNT", "5000"))
-    MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "5"))
+    TRADING_AMOUNT: float = float(os.getenv("TRADING_AMOUNT", "7000"))
+    MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "7"))
     RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
     
     # Intraday parameters (used when TRADING_MODE=intraday)
