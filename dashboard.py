@@ -188,6 +188,8 @@ tr:last-child td{border:none}
 <div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px" class="flex gap-2">
   <button class="tab-btn active" onclick="switchTab('dashboard',this)">🏠 Dashboard</button>
   <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
+  <button class="tab-btn" onclick="switchTab('positions',this)">📋 Positions</button>
+  <button class="tab-btn" onclick="switchTab('history',this)">🕒 History</button>
   <button class="tab-btn" onclick="switchTab('signals',this)">🤖 AI Signals</button>
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
   <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
@@ -406,6 +408,101 @@ tr:last-child td{border:none}
 </div><!-- /tab-portfolio -->
 
 
+<!-- ===== TAB: POSITIONS ===== -->
+<div id="tab-positions" class="tab-content">
+
+  <!-- Summary row -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+    <div class="card"><div class="stat-label">Open Positions</div><div class="stat-value blue" id="pos-count">—</div></div>
+    <div class="card"><div class="stat-label">Total Invested</div><div class="stat-value" id="pos-invested">₹—</div></div>
+    <div class="card"><div class="stat-label">Unrealised P&amp;L</div><div class="stat-value" id="pos-pnl">₹—</div></div>
+    <div class="card"><div class="stat-label">Re-entries Active</div><div class="stat-value yellow" id="pos-reentries">—</div></div>
+  </div>
+
+  <!-- Position cards grid -->
+  <div id="pos-cards" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="card" style="color:#4b5563;text-align:center;padding:40px">No open positions</div>
+  </div>
+
+  <!-- Full detail table -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
+      📋 All Positions — Full Detail
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left;min-width:130px">Symbol</th>
+        <th>Qty</th>
+        <th>First Entry</th>
+        <th>Avg Price</th>
+        <th>CMP</th>
+        <th>P&amp;L</th>
+        <th>P&amp;L %</th>
+        <th>Days Held</th>
+        <th>Trail SL</th>
+        <th>▼ to SL</th>
+        <th>Target</th>
+        <th>▲ to Tgt</th>
+        <th>Re-entry</th>
+      </tr></thead>
+      <tbody id="pos-table"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+
+<!-- ===== TAB: HISTORY ===== -->
+<div id="tab-history" class="tab-content">
+
+  <!-- Wallet Breakdown -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+    <div class="card"><div class="stat-label">Available Cash</div><div class="stat-value green" id="h-cash">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Free to trade</div></div>
+    <div class="card"><div class="stat-label">Invested in Stocks</div><div class="stat-value blue" id="h-invested">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Current positions</div></div>
+    <div class="card"><div class="stat-label">Holdings Value</div><div class="stat-value" id="h-holdings-val">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">At market price</div></div>
+    <div class="card"><div class="stat-label">Total Portfolio</div><div class="stat-value yellow" id="h-total">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Cash + stocks</div></div>
+  </div>
+
+  <!-- Stock-wise Breakdown -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">💼 Where Your Money Is</div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left">Stock</th><th>Qty</th><th>Avg Buy</th><th>Current Price</th>
+        <th>Invested</th><th>Current Value</th><th>P&amp;L</th><th>Return</th>
+      </tr></thead>
+      <tbody id="h-stock-breakdown"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Loading...</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- All Time Buy/Sell History -->
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">📋 Complete Buy / Sell History</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="filterHistory('ALL')" id="hf-all" style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;background:#1d4ed8;color:#fff;border:none;cursor:pointer">All</button>
+        <button onclick="filterHistory('BUY')" id="hf-buy" style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;background:#1f2937;color:#9ca3af;border:none;cursor:pointer">Buys</button>
+        <button onclick="filterHistory('SELL')" id="hf-sell" style="padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;background:#1f2937;color:#9ca3af;border:none;cursor:pointer">Sells</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left">Date &amp; Time</th>
+        <th style="text-align:left">Stock</th>
+        <th>Type</th><th>Qty</th><th>Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
+      </tr></thead>
+      <tbody id="h-history-table"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+</div><!-- /tab-history -->
+
+
 <!-- ===== TAB: AI SIGNALS ===== -->
 <div id="tab-signals" class="tab-content">
 
@@ -418,14 +515,15 @@ tr:last-child td{border:none}
 
   <!-- Ranked Opportunities -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🏆 Ranked Opportunities</div>
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">📈 All Scanned Signals</div>
+    <div style="font-size:11px;color:#4b5563;margin-bottom:12px">Bot only buys signals where Action=BUY and the full 5-gate pipeline passes (score≥70, MTF aligned, R:R≥1.5, no negative news, capital available). SELL signals are <b>not</b> short-sells — they just mean the bot won’t buy that stock.</div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
         <th style="text-align:left">Stock</th><th>Action</th><th>Score</th><th>Trend</th>
-        <th>Entry</th><th>Target</th><th>SL</th><th>R:R</th><th>Confidence</th>
+        <th>Entry</th><th>Target</th><th>SL</th><th>R:R</th><th>Confidence</th><th>Bot Decision</th>
       </tr></thead>
-      <tbody id="s-signals-table"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">Scanning market...</td></tr></tbody>
+      <tbody id="s-signals-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Scanning market...</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -560,6 +658,7 @@ tr:last-child td{border:none}
       <thead><tr>
         <th style="text-align:left">Date</th>
         <th style="text-align:left">Symbol</th>
+        <th>Status</th>
         <th>Score</th>
         <th>Regime</th>
         <th>Sector</th>
@@ -572,7 +671,7 @@ tr:last-child td{border:none}
         <th>Exit Reason</th>
         <th>Net P&amp;L</th>
       </tr></thead>
-      <tbody id="j-trade-log"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No closed trades yet — journal will populate after first trade exits</td></tr></tbody>
+      <tbody id="j-trade-log"><tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">Loading journal…</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -678,10 +777,13 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Trading Amount</div><div style="font-size:14px;font-weight:600" id="bs-cfg-amount">—</div></div>
       <div class="card-sm"><div class="stat-label">Max Positions</div><div style="font-size:14px;font-weight:600" id="bs-cfg-maxpos">—</div></div>
       <div class="card-sm"><div class="stat-label">Min Confidence</div><div style="font-size:14px;font-weight:600" id="bs-cfg-conf">—</div></div>
+      <div class="card-sm"><div class="stat-label">Risk Per Trade</div><div style="font-size:14px;font-weight:600" id="bs-cfg-risk">—</div></div>
       <div class="card-sm"><div class="stat-label">Stop Loss %</div><div style="font-size:14px;font-weight:600" id="bs-cfg-sl">—</div></div>
       <div class="card-sm"><div class="stat-label">Target %</div><div style="font-size:14px;font-weight:600" id="bs-cfg-tgt">—</div></div>
       <div class="card-sm"><div class="stat-label">Max Capital Use</div><div style="font-size:14px;font-weight:600" id="bs-cfg-cap">—</div></div>
       <div class="card-sm"><div class="stat-label">Daily Loss Limit</div><div style="font-size:14px;font-weight:600" id="bs-cfg-loss">—</div></div>
+      <div class="card-sm"><div class="stat-label">Max Hold Days</div><div style="font-size:14px;font-weight:600" id="bs-cfg-holddays">—</div></div>
+      <div class="card-sm"><div class="stat-label">Re-entry Cooldown</div><div style="font-size:14px;font-weight:600" id="bs-cfg-reentry">—</div></div>
       <div class="card-sm"><div class="stat-label">Scan Interval</div><div style="font-size:14px;font-weight:600">15 min</div></div>
     </div>
   </div>
@@ -707,6 +809,149 @@ function switchTab(id,btn){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('tab-'+id).classList.add('active');
   btn.classList.add('active');
+}
+
+function renderPositionsTab(d){
+  const positions = d.positions || [];
+  const totalInvested = positions.reduce((s,p)=>s+(parseFloat(p.average_price||0)*parseInt(p.quantity||0)),0);
+  const totalPnl = positions.reduce((s,p)=>s+parseFloat(p.pnl||0),0);
+  const reentryCount = positions.filter(p=>p.is_reentry).length;
+  document.getElementById('pos-count').textContent = positions.length;
+  document.getElementById('pos-invested').textContent = rupee(totalInvested);
+  const pnlEl = document.getElementById('pos-pnl');
+  pnlEl.textContent = pnlStr(totalPnl);
+  pnlEl.className = 'stat-value ' + (totalPnl >= 0 ? 'green' : 'red');
+  document.getElementById('pos-reentries').textContent = reentryCount;
+
+  const cardsEl = document.getElementById('pos-cards');
+  const tableEl = document.getElementById('pos-table');
+  if (!positions.length) {
+    cardsEl.innerHTML = '<div class="card" style="color:#4b5563;text-align:center;padding:40px;grid-column:1/-1">No open positions</div>';
+    tableEl.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+    return;
+  }
+
+  const now = new Date();
+  cardsEl.innerHTML = positions.map(p => {
+    const sym = p.tradingsymbol || '—';
+    const qty = parseInt(p.quantity || 0);
+    const avg = parseFloat(p.average_price || 0);
+    const ltp = parseFloat(p.last_price || avg);
+    const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
+    const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
+    const firstEntry = parseFloat(p.first_entry_price || avg);
+    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const target = parseFloat(p.target || 0);
+    const days = parseInt(p.days_held || 0);
+    const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100) : null;
+    const distToTgt = target > 0 ? ((target - ltp) / ltp * 100) : null;
+    const reentryN = parseInt(p.reentry_count || 0);
+    const isReentry = p.is_reentry;
+    const reentryLabel = isReentry
+      ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700">🔄 Re-entry #${reentryN}</span>`
+      : (reentryN > 0 ? `<span style="background:#1f2937;color:#a78bfa;font-size:10px;padding:2px 7px;border-radius:10px">${reentryN}× traded</span>` : '');
+    const pnlColor = pnl >= 0 ? '#22c55e' : '#ef4444';
+    const slPct = distToSL !== null ? `<span style="color:#ef4444">▼ ${distToSL.toFixed(1)}%</span>` : '—';
+    const tgtPct = distToTgt !== null ? `<span style="color:#22c55e">▲ ${distToTgt.toFixed(1)}%</span>` : '—';
+    return `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <div style="font-size:17px;font-weight:800;color:#f9fafb">${sym}</div>
+          <div style="margin-top:3px">${reentryLabel}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:700;color:${pnlColor}">${pnlStr(pnl)}</div>
+          <div style="font-size:12px;color:${pnlColor}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+        <div><div style="color:#6b7280">Qty</div><div style="font-weight:600;color:#e2e8f0">${qty}</div></div>
+        <div><div style="color:#6b7280">CMP</div><div style="font-weight:600;color:#e2e8f0">${rupee(ltp)}</div></div>
+        <div><div style="color:#6b7280">First Entry</div><div style="font-weight:600;color:#60a5fa">${rupee(firstEntry)}</div></div>
+        <div><div style="color:#6b7280">Avg Price</div><div style="font-weight:600;color:#e2e8f0">${rupee(avg)}</div></div>
+        <div><div style="color:#6b7280">Days Held</div><div style="font-weight:600;color:#e2e8f0">${days}d</div></div>
+        <div><div style="color:#6b7280">Trail SL</div><div style="font-weight:600;color:#ef4444">${trailSL > 0 ? rupee(trailSL) : '—'}</div></div>
+        <div><div style="color:#6b7280">▼ to SL</div><div style="font-weight:600">${slPct}</div></div>
+        <div><div style="color:#6b7280">▲ to Target</div><div style="font-weight:600">${tgtPct}</div></div>
+      </div>
+      ${p.prev_exit_reason ? `<div style="margin-top:8px;font-size:11px;color:#a78bfa">Prev exit: ${p.prev_exit_reason}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  tableEl.innerHTML = positions.map(p => {
+    const sym = p.tradingsymbol || '—';
+    const qty = parseInt(p.quantity || 0);
+    const avg = parseFloat(p.average_price || 0);
+    const ltp = parseFloat(p.last_price || avg);
+    const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
+    const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
+    const firstEntry = parseFloat(p.first_entry_price || avg);
+    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const target = parseFloat(p.target || 0);
+    const days = parseInt(p.days_held || 0);
+    const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100).toFixed(1) + '%' : '—';
+    const distToTgt = target > 0 ? ((target - ltp) / ltp * 100).toFixed(1) + '%' : '—';
+    const reentryN = parseInt(p.reentry_count || 0);
+    const reentryCell = p.is_reentry
+      ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px">🔄 #${reentryN}</span>`
+      : (reentryN > 0 ? `<span style="color:#a78bfa;font-size:11px">${reentryN}×</span>` : '<span style="color:#374151">—</span>');
+    return `<tr>
+      <td style="font-weight:700;color:#f9fafb">${sym}</td>
+      <td style="text-align:center">${qty}</td>
+      <td style="color:#60a5fa">${rupee(firstEntry)}</td>
+      <td>${rupee(avg)}</td>
+      <td style="font-weight:600">${rupee(ltp)}</td>
+      <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+      <td class="${pnlClass(pnlPct)}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</td>
+      <td style="text-align:center">${days}d</td>
+      <td style="color:#ef4444">${trailSL > 0 ? rupee(trailSL) : '—'}</td>
+      <td style="color:#ef4444">${distToSL}</td>
+      <td style="color:#22c55e">${target > 0 ? rupee(target) : '—'}</td>
+      <td style="color:#22c55e">${distToTgt}</td>
+      <td>${reentryCell}</td>
+    </tr>`;
+  }).join('');
+}
+
+function filterHistory(type){
+  window._historyFilter=type;
+  ['ALL','BUY','SELL'].forEach(t=>{
+    const el=document.getElementById('hf-'+t.toLowerCase()==='hf-all'?'hf-all':('hf-'+t.toLowerCase()));
+    if(el) el.style.background=t===type?'#1d4ed8':'#1f2937';
+    if(el) el.style.color=t===type?'#fff':'#9ca3af';
+  });
+  renderHistory(type);
+}
+
+function renderHistory(filter){
+  const rows=window._historyData||[];
+  const filtered=filter==='ALL'?rows:rows.filter(o=>(o.transaction_type||'').toUpperCase()===filter);
+  const el=document.getElementById('h-history-table');
+  if(!el) return;
+  if(!filtered.length){
+    el.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
+    return;
+  }
+  el.innerHTML=filtered.map(o=>{
+    const isBuy=(o.transaction_type||'').toUpperCase()==='BUY';
+    const price=parseFloat(o.average_price||o.price||0);
+    const qty=parseInt(o.quantity||0);
+    const val=price*qty;
+    const pnl=parseFloat(o.pnl||0);
+    const ts=String(o.order_timestamp||'').slice(0,16).replace('T',' ');
+    const src=o._source==='journal'?'<span style="font-size:10px;color:#a78bfa;background:#1f2937;padding:2px 6px;border-radius:4px">Bot</span>':'<span style="font-size:10px;color:#60a5fa;background:#1f2937;padding:2px 6px;border-radius:4px">Kite</span>';
+    const pnlCell=isBuy?'<td style="color:#4b5563">—</td>':`<td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>`;
+    return `<tr>
+      <td style="font-size:12px;color:#9ca3af;white-space:nowrap">${ts}</td>
+      <td style="font-weight:700;color:#f9fafb">${o.tradingsymbol||'—'}</td>
+      <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}">${o.transaction_type||'—'}</span></td>
+      <td style="text-align:center">${qty}</td>
+      <td>${rupee(price)}</td>
+      <td style="font-weight:600">${rupee(val)}</td>
+      ${pnlCell}
+      <td>${src}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ─── Chart Instances ──────────────────────────────────────────────────────────
@@ -775,10 +1020,10 @@ async function load(){
     retEl.innerHTML='<span class="'+(dpnl>=0?'green':'red')+'">'+pct(dret)+' today</span>';
     const cashEl=document.getElementById('d-cash');
     cashEl.textContent=rupee(d.cash||0);
-    document.getElementById('d-cash-pct').textContent=Math.round((d.cash||0)/budget*100)+'% of budget';
+    document.getElementById('d-cash-pct').textContent=Math.round((d.cash||0)/(d.cfg_trading_amount||15000)*100)+'% of budget';
     const op=parseInt(d.open_positions||0);
     document.getElementById('d-open-pos').textContent=op;
-    document.getElementById('d-pos-detail').textContent=op+' / 3 max';
+    document.getElementById('d-pos-detail').textContent=op+' / '+(d.cfg_max_positions||5)+' max';
 
     // Risk monitor
     const an=d.analytics||{};
@@ -989,6 +1234,51 @@ async function load(){
       thEl.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4b5563;padding:20px">No trade history yet</td></tr>';
     }
 
+    // ── TAB: POSITIONS ───────────────────────────────────────────
+    renderPositionsTab(d);
+
+    // ── TAB: HISTORY ─────────────────────────────────────────────
+    const hCash=parseFloat(d.cash||0);
+    const hHeld=parseFloat(d.holdings_value||0);
+    const hPositions=d.positions||[];
+    const hInvested=hPositions.reduce((s,p)=>s+parseFloat(p.average_price||0)*parseInt(p.quantity||0),0);
+    const hCurrentVal=hPositions.reduce((s,p)=>s+parseFloat(p.last_price||p.average_price||0)*parseInt(p.quantity||0),0);
+    const hTotal=hCash+hCurrentVal;
+    document.getElementById('h-cash').textContent=rupee(hCash);
+    document.getElementById('h-invested').textContent=rupee(hInvested);
+    document.getElementById('h-holdings-val').textContent=rupee(hCurrentVal);
+    document.getElementById('h-total').textContent=rupee(hTotal);
+
+    // Stock breakdown
+    const sbEl=document.getElementById('h-stock-breakdown');
+    if(hPositions.length){
+      sbEl.innerHTML=hPositions.map(p=>{
+        const avg=parseFloat(p.average_price||0);
+        const ltp=parseFloat(p.last_price||avg);
+        const qty=parseInt(p.quantity||0);
+        const invested=avg*qty;
+        const curVal=ltp*qty;
+        const pnl=curVal-invested;
+        const retPct=avg>0?((ltp-avg)/avg*100):0;
+        return `<tr>
+          <td style="font-weight:700;color:#f9fafb">${p.tradingsymbol}</td>
+          <td style="text-align:center">${qty}</td>
+          <td>${rupee(avg)}</td>
+          <td>${rupee(ltp)}</td>
+          <td>${rupee(invested)}</td>
+          <td>${rupee(curVal)}</td>
+          <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+          <td class="${pnlClass(retPct)}">${retPct.toFixed(2)}%</td>
+        </tr>`;
+      }).join('');
+    } else {
+      sbEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+    }
+
+    // History filter + render
+    window._historyData=d.all_orders||[];
+    renderHistory(window._historyFilter||'ALL');
+
     // Allocation Chart
     const cash2=parseFloat(d.cash||0);
     const invested2=parseFloat(d.invested||0);
@@ -1034,11 +1324,24 @@ async function load(){
 
     const stEl2=document.getElementById('s-signals-table');
     if(allSigs.length){
+      const minConf=d.cfg_min_confidence||0.52;
       stEl2.innerHTML=allSigs.map(s=>{
         const sc=Math.round((s.confidence||0)*100);
         const rr3=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
         const trend2=s.trend||(sc>=70?'Bullish':sc>=50?'Neutral':'Bearish');
-        return `<tr>
+        // Determine bot decision + reason
+        let botDecision;
+        if(s.action==='BUY'&&(s.confidence||0)>=minConf){
+          botDecision='<span style="color:#22c55e;font-weight:700;font-size:11px">✅ Will buy*</span>';
+        } else if(s.action==='SELL'){
+          botDecision='<span style="color:#ef4444;font-size:11px">❌ SELL signal — not buying</span>';
+        } else if(s.action==='BUY'&&(s.confidence||0)<minConf){
+          botDecision=`<span style="color:#eab308;font-size:11px">⚠️ Low confidence (${sc}% < ${Math.round(minConf*100)}%)</span>`;
+        } else {
+          botDecision='<span style="color:#4b5563;font-size:11px">HOLD — no action</span>';
+        }
+        const rowStyle=s.action==='SELL'?'opacity:0.55':'';
+        return `<tr style="${rowStyle}">
           <td style="font-weight:700;color:#f9fafb">${s.symbol}</td>
           <td><span class="badge ${s.action==='BUY'?'badge-buy':'badge-sell'}">${s.action}</span></td>
           <td style="color:${scoreColor(sc)};font-weight:700">${sc}</td>
@@ -1053,10 +1356,11 @@ async function load(){
             </div>
             <span style="font-size:11px;margin-left:4px">${sc}%</span>
           </td>
+          <td>${botDecision}</td>
         </tr>`;
       }).join('');
     } else {
-      stEl2.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No signals yet — next scan in a few minutes</td></tr>';
+      stEl2.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No signals yet — next scan in a few minutes</td></tr>';
     }
 
     // Confidence meters
@@ -1163,6 +1467,9 @@ async function load(){
     document.getElementById('bs-cfg-tgt').textContent=((d.cfg_tgt_pct||0.10)*100).toFixed(1)+'%';
     document.getElementById('bs-cfg-cap').textContent=((d.cfg_max_capital||0.95)*100).toFixed(0)+'%';
     document.getElementById('bs-cfg-loss').textContent=((d.cfg_daily_loss||0.05)*100).toFixed(1)+'%';
+    document.getElementById('bs-cfg-risk').textContent=((d.cfg_risk_per_trade||0.02)*100).toFixed(1)+'% of capital';
+    document.getElementById('bs-cfg-holddays').textContent=(d.cfg_swing_max_hold_days||15)+' days';
+    document.getElementById('bs-cfg-reentry').textContent=(d.cfg_reentry_cooldown_hours||4)+'h cooldown';
 
     prevData=d;
 
@@ -1173,11 +1480,11 @@ async function load(){
 async function loadJournal(){
   try{
     const j=await fetch('/api/journal').then(r=>r.json());
-    if(!j.total_trades){return;}
 
-    // KPIs
+    // KPIs — show closed trade stats; fall back to '—' if no closed trades yet
     const np=j.total_net_pnl||0;
-    document.getElementById('j-total').textContent=j.total_trades||0;
+    const hasClosed=j.total_trades>0;
+    document.getElementById('j-total').textContent=(j.total_trades||0)+' closed / '+(j.open_trades_count||0)+' open';
     const wrEl=document.getElementById('j-winrate');
     wrEl.textContent=(j.win_rate||0).toFixed(1)+'%';
     wrEl.className='stat-value '+(j.win_rate>=60?'green':j.win_rate>=40?'yellow':'red');
@@ -1276,34 +1583,47 @@ async function loadJournal(){
       if(jChartRegime){jChartRegime.data=cfg.data;jChartRegime.update();}else{jChartRegime=new Chart(regCtx,cfg);}
     }
 
-    // Trade log table
-    const trades=j.recent_trades||[];
+    // Trade log table — merge open + closed trades, newest first
+    const closedTrades=j.recent_trades||[];
+    const openTrades=j.open_trade_log||[];
+    // Mark open trades so we can badge them
+    openTrades.forEach(t=>{t._is_open=true;});
+    const allTrades=[...openTrades,...closedTrades];
     const jTbl=document.getElementById('j-trade-log');
-    if(trades.length){
-      jTbl.innerHTML=trades.map(t=>{
+    if(allTrades.length){
+      jTbl.innerHTML=allTrades.map(t=>{
+        const isOpen=t._is_open||t.status==='OPEN';
         const pnl=parseFloat(t.net_pnl||0);
         const sc=parseFloat(t.trade_score||0);
-        const sentiment=t.sentiment||'—';
+        const sentiment=(t.sentiment||'').toUpperCase();
         const sentCol=sentiment==='POSITIVE'?'#22c55e':sentiment==='NEGATIVE'?'#ef4444':'#9ca3af';
         const regCol=t.market_regime==='BULL'?'#22c55e':t.market_regime==='BEAR'?'#ef4444':'#eab308';
+        const reentryBadge=t.is_reentry?'<span style="background:#7c3aed;color:#fff;font-size:9px;padding:1px 5px;border-radius:6px;margin-left:4px">RE-ENTRY</span>':'';
+        const statusCell=isOpen
+          ? '<span style="background:#1d4ed8;color:#fff;font-size:10px;padding:2px 6px;border-radius:6px;font-weight:700">📂 OPEN</span>'
+          : '<span style="background:#166534;color:#fff;font-size:10px;padding:2px 6px;border-radius:6px">✅ CLOSED</span>';
+        const pnlCell=isOpen
+          ? '<td style="color:#60a5fa;font-weight:700">holding</td>'
+          : `<td class="${pnlClass(pnl)}" style="font-weight:700">${(pnl>=0?'+':'')+rupee(pnl)}</td>`;
         return `<tr>
-          <td style="color:#6b7280;white-space:nowrap">${t.exit_date||t.date||'—'}</td>
-          <td style="font-weight:700;color:#f9fafb">${t.symbol}</td>
-          <td style="color:${scoreColor(sc)};font-weight:700;text-align:center">${sc}</td>
+          <td style="color:#6b7280;white-space:nowrap">${isOpen?(t.date||'—'):(t.exit_date||t.date||'—')}</td>
+          <td style="font-weight:700;color:#f9fafb">${t.symbol}${reentryBadge}</td>
+          <td>${statusCell}</td>
+          <td style="color:${scoreColor(sc)};font-weight:700;text-align:center">${sc||'—'}</td>
           <td style="color:${regCol};font-size:11px;text-align:center">${t.market_regime||'—'}</td>
           <td style="color:#9ca3af;font-size:12px">${t.sector||'—'}</td>
           <td>${rupee(t.entry_price||0)}</td>
-          <td>${t.exit_price?rupee(t.exit_price):'—'}</td>
-          <td style="text-align:center">${t.holding_days!=null?t.holding_days:'—'}</td>
-          <td style="color:${sentCol};font-size:11px;text-align:center">${sentiment}</td>
+          <td>${isOpen?'<span style="color:#4b5563">—</span>':(t.exit_price?rupee(t.exit_price):'—')}</td>
+          <td style="text-align:center">${isOpen?((t.holding_days!=null?t.holding_days:0)+'d ongoing'):(t.holding_days!=null?t.holding_days+'d':'—')}</td>
+          <td style="color:${sentCol};font-size:11px;text-align:center">${sentiment||'—'}</td>
           <td style="text-align:center;font-size:12px">${t.rsi?t.rsi.toFixed(0):'—'}</td>
           <td style="font-size:11px">${t.trend||'—'}</td>
-          <td style="font-size:11px;color:#9ca3af;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${t.exit_reason||''}">${t.exit_reason||'—'}</td>
-          <td class="${pnlClass(pnl)}" style="font-weight:700">${pnl===0?'OPEN':(pnl>=0?'+':'')+rupee(pnl)}</td>
+          <td style="font-size:11px;color:#9ca3af;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${t.exit_reason||t.buy_reason||''}">${isOpen?'<span style="color:#4b5563">holding</span>':(t.exit_reason||'—')}</td>
+          ${pnlCell}
         </tr>`;
       }).join('');
     }else{
-      jTbl.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No closed trades yet</td></tr>';
+      jTbl.innerHTML='<tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No trades yet — journal will populate after the first order executes</td></tr>';
     }
   }catch(e){console.error('Journal error:',e);}
 }
@@ -1456,6 +1776,9 @@ def api_data():
         "cfg_tgt_pct": config.SWING_TARGET_PERCENTAGE if config.TRADING_MODE == 'swing' else config.TARGET_PERCENTAGE,
         "cfg_max_capital": config.MAX_CAPITAL_USAGE,
         "cfg_daily_loss": config.DAILY_MAX_LOSS_PCT,
+        "cfg_risk_per_trade": config.RISK_PER_TRADE,
+        "cfg_swing_max_hold_days": config.SWING_MAX_HOLD_DAYS,
+        "cfg_reentry_cooldown_hours": config.REENTRY_COOLDOWN_HOURS,
         "positions": [],
         "signals": [],
         "orders": [],
@@ -1549,28 +1872,36 @@ def api_data():
         data['account_balance'] = account_balance
         data['margin_blocked'] = margin_blocked
         data['net_portfolio_value'] = account_balance
-        data['budget'] = min(cash, config.TRADING_AMOUNT) if cash > 0 else config.TRADING_AMOUNT
+        data['budget'] = config.TRADING_AMOUNT
     except Exception:
         pass
 
-    # Positions (intraday + swing/delivery + holdings merged)
+    # Positions (intraday — separate try so holdings still load if positions() fails)
+    net_pos = []
     try:
         pos_data = kite.positions()
         net_pos = [p for p in pos_data.get('net', []) if p.get('quantity', 0) != 0]
-        # Normalise holdings to same shape as positions so JS can render them uniformly
+    except Exception:
+        pass
+
+    # Holdings (delivery CNC — merged into positions list for unified display)
+    try:
         holdings_raw = kite.holdings()
+        data['holdings'] = holdings_raw
         holdings_as_pos = []
         pos_symbols = {p.get('tradingsymbol') for p in net_pos}
         for h in holdings_raw:
-            if h.get('quantity', 0) == 0:
+            effective_qty = h.get('quantity', 0) or h.get('opening_quantity', 0)
+            if effective_qty == 0:
                 continue
+            h['quantity'] = effective_qty  # normalise so JS sees correct qty
             if h.get('tradingsymbol') in pos_symbols:
                 continue  # already in net positions
             holdings_as_pos.append({
                 'tradingsymbol':  h.get('tradingsymbol'),
                 'exchange':       h.get('exchange', 'BSE'),
                 'product':        h.get('product', 'CNC'),
-                'quantity':       h.get('quantity', 0),
+                'quantity':       effective_qty,
                 'average_price':  h.get('average_price', 0),
                 'last_price':     h.get('last_price', h.get('close_price', 0)),
                 'close_price':    h.get('close_price', 0),
@@ -1578,15 +1909,47 @@ def api_data():
                 'day_change':     h.get('day_change', 0),
                 'day_change_percentage': h.get('day_change_percentage', 0),
                 'overnight_quantity': h.get('opening_quantity', 0),
-                'value':          h.get('average_price', 0) * h.get('quantity', 0),
+                'value':          h.get('average_price', 0) * effective_qty,
                 '_source':        'holding',
             })
         all_positions = net_pos + holdings_as_pos
         data['positions'] = all_positions
-        data['holdings'] = holdings_raw
         data['open_positions'] = len(all_positions)
         data['daily_pnl'] = sum(p.get('pnl', 0) for p in all_positions)
         data['invested'] = sum(p.get('average_price', 0) * p.get('quantity', 0) for p in all_positions)
+
+        # Enrich positions with re-entry metadata from trade journal
+        try:
+            _jpath = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
+            with open(_jpath) as _jf:
+                _jentries = json.load(_jf)
+            _buy_entries = [e for e in _jentries if e.get('action') == 'BUY']
+            for pos in all_positions:
+                sym = pos.get('tradingsymbol')
+                sym_buys = [e for e in _buy_entries if e.get('symbol') == sym]
+                if sym_buys:
+                    sym_buys_sorted = sorted(sym_buys, key=lambda x: x.get('timestamp', ''))
+                    first = sym_buys_sorted[0]
+                    last  = sym_buys_sorted[-1]
+                    reentry_count = sum(1 for e in sym_buys if e.get('is_reentry'))
+                    pos['first_entry_price']  = first.get('entry_price', pos.get('average_price', 0))
+                    pos['entry_date']         = first.get('date', '')
+                    pos['reentry_count']      = reentry_count
+                    pos['is_reentry']         = last.get('is_reentry', False)
+                    pos['prev_exit_reason']   = last.get('prev_exit_reason', '')
+                    pos['reentry_score']      = last.get('reentry_score', 0)
+                    pos['reentry_confidence'] = last.get('reentry_confidence', 0)
+                    if pos['entry_date']:
+                        from datetime import date as _date
+                        try:
+                            _entry_dt = datetime.strptime(pos['entry_date'], '%Y-%m-%d').date()
+                            pos['days_held'] = (datetime.now().date() - _entry_dt).days
+                        except Exception:
+                            pos['days_held'] = 0
+                    else:
+                        pos['days_held'] = 0
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1638,6 +2001,28 @@ def api_data():
         
         # All completed orders (for trade history tab) + today's orders
         all_completed = [o for o in orders if o.get('status') == 'COMPLETE']
+        # Merge journal entries for orders not already in Kite's list (covers manual buys + past sessions)
+        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
+        try:
+            with open(journal_path) as _jf:
+                journal_entries = json.load(_jf)
+            kite_ids = {o.get('order_id') for o in all_completed}
+            for je in journal_entries:
+                ts = str(je.get('date', '')) + ' 09:00:00'
+                if je.get('kite_order_id') not in kite_ids:
+                    all_completed.append({
+                        'tradingsymbol': je.get('symbol'),
+                        'transaction_type': je.get('action', 'BUY'),
+                        'quantity': je.get('quantity', 0),
+                        'average_price': je.get('entry_price', 0),
+                        'order_timestamp': ts,
+                        'status': 'COMPLETE',
+                        'pnl': je.get('net_pnl') or 0.0,
+                        'order_id': je.get('kite_order_id', ''),
+                        '_source': 'journal',
+                    })
+        except Exception:
+            pass
         data['all_orders'] = sorted(all_completed, key=lambda x: str(x.get('order_timestamp', '')), reverse=True)
         # Today's orders
         data['orders'] = [o for o in orders if str(o.get('order_timestamp', '')).startswith(today_str)]
@@ -1719,6 +2104,7 @@ def api_data():
         data['holdings'] = holdings
         holdings_value = sum(h.get('quantity', 0) * h.get('last_price', 0) for h in holdings)
         data['holdings_value'] = holdings_value
+        # True portfolio = Kite net margin (cash+collateral) + current market value of stocks
         data['net_portfolio_value'] = data.get('account_balance', 0) + holdings_value
     except Exception:
         pass
@@ -2120,9 +2506,15 @@ def api_journal():
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
         from trade_journal import TradeJournal
         j = TradeJournal()
-        return jsonify(j.analytics())
+        analytics = j.analytics()
+        all_entries = j.all_entries()
+        open_trades = [e for e in all_entries if e.get('action') == 'BUY' and e.get('status') == 'OPEN']
+        analytics['open_trades_count'] = len(open_trades)
+        analytics['open_trade_log'] = sorted(open_trades, key=lambda x: x.get('timestamp',''), reverse=True)[:20]
+        analytics['all_entries_count'] = len(all_entries)
+        return jsonify(analytics)
     except Exception as e:
-        return jsonify({'error': str(e), 'total_trades': 0})
+        return jsonify({'error': str(e), 'total_trades': 0, 'open_trades_count': 0, 'open_trade_log': []})
 
 
 if __name__ == '__main__':
