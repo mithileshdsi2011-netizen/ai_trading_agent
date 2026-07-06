@@ -2,8 +2,21 @@
 Configuration module for AI Trading Agent
 """
 import os
+import socket as _socket
 from dotenv import load_dotenv
 from typing import Optional
+
+# ── IPv4-only patch (applied once, covers all modules) ───────────────────────
+# Kite Connect API (api.kite.trade) is hosted on Cloudflare and resolves to
+# IPv6 on modern macOS. Zerodha only whitelists IPv4 IPs in the developer
+# console, so any IPv6 connection is rejected regardless of the actual network
+# (WiFi, mobile hotspot, etc.). This patch forces the entire process to use
+# IPv4 only — dynamically, without hardcoding any IP address.
+_orig_getaddrinfo = _socket.getaddrinfo
+def _force_ipv4(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
+    return _orig_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+_socket.getaddrinfo = _force_ipv4
+# ─────────────────────────────────────────────────────────────────────────────
 
 load_dotenv()
 
@@ -53,6 +66,9 @@ class Config:
 
     # Capital utilization guard
     MAX_CAPITAL_USAGE: float = float(os.getenv("MAX_CAPITAL_USAGE", "0.95"))  # 95% max deployed
+
+    # Re-entry cooldown: minimum hours to wait after selling before buying same stock again
+    REENTRY_COOLDOWN_HOURS: float = float(os.getenv("REENTRY_COOLDOWN_HOURS", "4.0"))
     
     # Trailing stop loss
     TRAILING_STOP_ENABLED: bool = os.getenv("TRAILING_STOP_ENABLED", "True").lower() == "true"

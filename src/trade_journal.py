@@ -68,6 +68,13 @@ class TradeJournal:
         mtf_aligned: bool = False,
         mtf_strict: bool = False,
         confidence: float = 0,
+        # Re-entry fields (filled when this BUY is a re-entry)
+        is_reentry: bool = False,
+        prev_exit_reason: str = '',
+        prev_pnl: float = 0.0,
+        time_since_exit_hours: float = 0.0,
+        reentry_score: float = 0.0,
+        reentry_confidence: float = 0.0,
         # Exit fields (filled on SELL)
         exit_reason: str = '',
         entry_price: float = 0,
@@ -106,6 +113,13 @@ class TradeJournal:
                 'mtf_aligned':     mtf_aligned,
                 'mtf_strict':      mtf_strict,
                 'confidence':      round(confidence, 3),
+                # re-entry fields
+                'is_reentry':            is_reentry,
+                'prev_exit_reason':      prev_exit_reason,
+                'prev_pnl':              round(prev_pnl, 2),
+                'time_since_exit_hours': round(time_since_exit_hours, 2),
+                'reentry_score':         round(reentry_score, 1),
+                'reentry_confidence':    round(reentry_confidence, 3),
                 # exit fields — filled later
                 'exit_price':      None,
                 'exit_date':       None,

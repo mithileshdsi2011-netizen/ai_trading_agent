@@ -121,6 +121,7 @@ class OrderExecutor:
                     'SUNPHARMA':'Pharma','DRREDDY':'Pharma','MARUTI':'Auto',
                     'TATAMOTORS':'Auto','BHARTIARTL':'Telecom',
                 }
+                _rm = signal.get('_reentry_meta') or {}
                 self.journal.log_entry(
                     symbol=signal['symbol'],
                     action='BUY',
@@ -141,6 +142,12 @@ class OrderExecutor:
                     atr=signal.get('atr', 0),
                     mtf_aligned=signal.get('mtf_aligned', False),
                     confidence=signal.get('confidence', 0),
+                    is_reentry=bool(_rm),
+                    prev_exit_reason=_rm.get('prev_exit_reason', ''),
+                    prev_pnl=_rm.get('prev_pnl', 0.0),
+                    time_since_exit_hours=_rm.get('time_since_exit_hours', 0.0),
+                    reentry_score=_rm.get('reentry_score', 0.0),
+                    reentry_confidence=_rm.get('reentry_confidence', 0.0),
                 )
             except Exception as je:
                 logger.warning(f"Journal BUY log failed: {je}")

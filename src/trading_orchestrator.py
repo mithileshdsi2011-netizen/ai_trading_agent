@@ -3,6 +3,7 @@ Main Trading Orchestrator Module
 Coordinates all components for automated trading
 """
 import logging
+import os
 import schedule
 import time
 from datetime import datetime, timedelta
@@ -62,6 +63,8 @@ class TradingOrchestrator:
         self.is_running = False
         self.trade_log = []
         self._last_rebalance_week: Optional[int] = None
+        # Re-entry tracking: symbol -> {exit_price, exit_time, exit_reason}
+        self._recently_sold: Dict[str, Dict] = {}
     
     def run_once(self) -> Dict:
         """
@@ -112,23 +115,42 @@ class TradingOrchestrator:
             cycle_result['errors'].append("Trading stopped due to risk limits")
             return cycle_result
         
-        # Emergency circuit breaker: if drawdown > 10%, sell all positions
+        # Emergency circuit breaker: if drawdown > 15% from peak, sell all positions
+        # Only fires if holdings API succeeds — never close on a timeout/error
         try:
             holdings = self.order_executor.broker.get_holdings()
-            total_value = holdings.get('total_value', config.TRADING_AMOUNT)
-            drawdown = (config.TRADING_AMOUNT - total_value) / config.TRADING_AMOUNT
-            if drawdown > 0.10:
-                logger.error(f"EMERGENCY CIRCUIT BREAKER: drawdown {drawdown:.2%} — closing all positions")
-                close_results = self.order_executor.close_all_positions()
-                cycle_result['close_results'] = close_results
-                cycle_result['errors'].append(f"Circuit breaker triggered: drawdown {drawdown:.2%}")
+            total_value = holdings.get('total_value', 0)
+            # Use peak value file as baseline; fall back to total_value itself (no false trigger)
+            peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
+            try:
+                with open(peak_path) as _pf:
+                    _pd = json.load(_pf)
+                    peak_value = float(_pd.get('peak_value', total_value))
+            except Exception:
+                peak_value = total_value
+            # Update peak if current value is higher
+            if total_value > peak_value:
+                peak_value = total_value
                 try:
-                    self.telegram._send(f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%}\nAll positions closed.")
+                    with open(peak_path, 'w') as _pf:
+                        json.dump({'peak_value': peak_value}, _pf)
                 except Exception:
                     pass
-                return cycle_result
+            # Only trigger if we have real data (total_value > 0) and genuine drawdown > 15%
+            if total_value > 0 and peak_value > 0:
+                drawdown = (peak_value - total_value) / peak_value
+                if drawdown > 0.15:
+                    logger.error(f"EMERGENCY CIRCUIT BREAKER: drawdown {drawdown:.2%} from peak ₹{peak_value:.0f} — closing all positions")
+                    close_results = self.order_executor.close_all_positions()
+                    cycle_result['close_results'] = close_results
+                    cycle_result['errors'].append(f"Circuit breaker triggered: drawdown {drawdown:.2%}")
+                    try:
+                        self.telegram._send(f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed.")
+                    except Exception:
+                        pass
+                    return cycle_result
         except Exception as e:
-            logger.warning(f"Circuit breaker check failed: {e}")
+            logger.warning(f"Circuit breaker check failed (skipping): {e}")
         
         try:
             # --- Build dynamic universe from live Kite data ---
@@ -159,6 +181,16 @@ class TradingOrchestrator:
                         current_invested += p.get('average_price', 0) * p.get('quantity', 0)
             except Exception as e:
                 logger.warning(f"Could not read broker positions: {e}")
+            # Also add delivery holdings so bot never re-buys already-held stocks
+            try:
+                for h in holdings.get('positions', []):
+                    qty = h.get('quantity', 0) or h.get('opening_quantity', 0)
+                    if qty > 0:
+                        open_symbols.add(h.get('tradingsymbol'))
+                        current_invested += h.get('average_price', 0) * qty
+            except Exception:
+                pass
+            logger.info(f"Already held symbols (positions+holdings): {open_symbols}")
 
             # --- Market regime check ---
             regime = "SIDEWAYS"
@@ -219,10 +251,9 @@ class TradingOrchestrator:
             try:
                 holdings = self.order_executor.broker.get_holdings()
                 portfolio_value = holdings.get('total_value', config.TRADING_AMOUNT)
-                dynamic_budget = portfolio_value * 0.70
-                # Floor at configured trading amount so we don't shrink below baseline
+                dynamic_budget = portfolio_value * 0.60  # conservative: deploy max 60% of portfolio
                 budget = max(budget, dynamic_budget)
-                logger.info(f"Dynamic budget: ₹{budget:.0f} (70% of ₹{portfolio_value:.0f} portfolio)")
+                logger.info(f"Dynamic budget: ₹{budget:.0f} (60% of ₹{portfolio_value:.0f} portfolio — conservative cap)")
             except Exception:
                 pass
 
@@ -233,31 +264,38 @@ class TradingOrchestrator:
                 open_slot_count = len([p for p in self.order_executor.risk_manager.positions
                                        if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}])
                 remaining_slots = max(1, config.MAX_POSITIONS - open_slot_count)
-                slots = min(len(buy_signals), remaining_slots)
+                # Conservative: max 2 new buys per cycle to avoid over-trading
+                MAX_BUYS_PER_CYCLE = 2
+                slots = min(len(buy_signals), remaining_slots, MAX_BUYS_PER_CYCLE)
                 per_stock_budget = budget / remaining_slots  # spread budget over available slots
                 logger.info(
                     f"Splitting ₹{budget:.0f} across {remaining_slots} remaining slot(s) "
-                    f"(₹{per_stock_budget:.0f} each)"
+                    f"(₹{per_stock_budget:.0f} each) — max {MAX_BUYS_PER_CYCLE} buys this cycle"
                 )
                 for best_signal in buy_signals[:slots]:
                     sym = best_signal['symbol']
 
-                    # Duplicate check
+                    # ── 1. Duplicate / already held ────────────────────────
                     if sym in open_symbols:
                         logger.warning(f"Skipping {sym}: already held")
                         continue
 
-                    # Correlation check
+                    # ── 2. Sector correlation ──────────────────────────────────
                     if self._is_correlated_with_open(sym, open_symbols):
                         logger.warning(f"Skipping {sym}: correlated with open position")
                         continue
 
-                    # ── Live news filter ───────────────────────────────────────
+                    # ── 3. Negative news filter ────────────────────────────────
                     if self._has_negative_news(best_signal):
                         logger.warning(f"Skipping {sym}: negative news filter")
                         continue
 
-                    # ── Trade Scoring ──────────────────────────────────────────
+                    # ── 4. Bear regime guard ───────────────────────────────────
+                    if regime == 'BEAR':
+                        logger.warning(f"Skipping {sym}: no new BUYs in BEAR regime")
+                        continue
+
+                    # ── 5. Trade Scoring ───────────────────────────────────────
                     research = best_signal.get('_research', {})
                     score_result = self.scorer.score(
                         signal=best_signal,
@@ -272,11 +310,36 @@ class TradingOrchestrator:
                         )
                         continue
 
-                    # ── Multi-timeframe confirmation ───────────────────────────
+                    # ── 6. Minimum R:R guard (1.5:1) ──────────────────────────
+                    rr = best_signal.get('risk_reward_ratio', 0)
+                    if rr < 1.5:
+                        logger.warning(f"Skipping {sym}: R:R {rr:.2f} below minimum 1.5:1")
+                        continue
+
+                    # ── 7. Multi-timeframe confirmation ────────────────────────
                     mtf_result = self.mtf.confirm(sym)
                     if not mtf_result['aligned']:
                         logger.warning(f"Skipping {sym}: MTF not aligned — {mtf_result['reason']}")
                         continue
+
+                    # ── 8. Re-entry gate (all conditions) ─────────────────────
+                    reentry_result = self._check_reentry_eligibility(
+                        sym,
+                        current_price=best_signal.get('current_price', 0),
+                        score=score_result['total_score'],
+                        mtf_aligned=mtf_result['aligned'],
+                        regime=regime,
+                        rr=rr,
+                        has_negative_news=self._has_negative_news(best_signal),
+                        projected_invested=current_invested + best_signal.get('investment_amount', 0),
+                        max_allowed_invested=available_cash * config.MAX_CAPITAL_USAGE,
+                    )
+                    if isinstance(reentry_result, str):  # blocked — reason string
+                        logger.info(f"Skipping {sym}: re-entry not ready — {reentry_result}")
+                        continue
+                    if isinstance(reentry_result, dict):  # approved re-entry — attach metadata
+                        best_signal['_reentry_meta'] = reentry_result
+                        best_signal['_reentry_meta']['reentry_confidence'] = best_signal.get('confidence', 0)
 
                     # ── Adaptive position size (score × confidence) ────────────
                     price      = best_signal.get('current_price', 1)
@@ -336,6 +399,8 @@ class TradingOrchestrator:
                 if execution_result['success']:
                     logger.info(f"Sell order executed: {sym}")
                     self.trade_log.append(execution_result)
+                    # Record exit for re-entry engine
+                    self._record_exit(sym, sell_signal.get('current_price', 0), 'signal')
             
             # --- Smart Exit AI: evaluate open positions ---
             open_positions = [
@@ -360,10 +425,13 @@ class TradingOrchestrator:
                         'risk_reward_ratio': 0, 'confidence': 1.0,
                         'overall_score': 0, 'reasoning': se['reason'],
                         'timestamp': datetime.now().isoformat(),
+                        # record exit for re-entry engine (checked after execute)
+                        '_smart_exit': True, '_exit_price': se['price'],
                     })
                     if exec_r['success']:
                         cycle_result['orders_executed'].append(exec_r)
                         self.trade_log.append(exec_r)
+                        self._record_exit(se['symbol'], se['price'], se.get('reason', 'smart_exit'))
                         try:
                             self.telegram.exit(se, exec_r.get('order_id', ''))
                         except Exception:
@@ -465,16 +533,182 @@ class TradingOrchestrator:
     # Stocks in the same group are assumed highly correlated.
     # If one is already held, skip others in the group.
     _SECTOR_GROUPS = [
-        {"HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "SBIN", "INDUSINDBK", "BANDHANBNK"},
-        {"RELIANCE", "ONGC", "BPCL", "HINDPETRO", "IOC"},
-        {"TCS", "INFY", "WIPRO", "HCLTECH", "TECHM", "LTIM"},
-        {"SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP"},
-        {"TATAMOTORS", "MARUTI", "M&M", "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT"},
-        {"NTPC", "POWERGRID", "ADANIPOWER", "TATAPOWER", "CESC"},
-        {"BHARTIARTL", "IDEA", "TATACOMM"},
-        {"ASIANPAINT", "BERGERPAINTS", "KANSAINER"},
-        {"HINDALCO", "VEDL", "TATASTEEL", "JSWSTEEL", "SAIL"},
+        # ── Banking & Finance ─────────────────────────────────────────────────
+        {"HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "SBIN", "INDUSINDBK",
+         "BANDHANBNK", "FEDERALBNK", "IDFCFIRSTB", "AUBANK", "CANBK",
+         "BANKBARODA", "PNB", "UNIONBANK", "INDIANB"},
+        # ── NBFCs & Fintech ────────────────────────────────────────────────────
+        {"BAJFINANCE", "BAJAJFINSV", "CHOLAFIN", "MUTHOOTFIN", "MANAPPURAM",
+         "CDSL", "BSE", "MCX", "ANGELONE"},
+        # ── Insurance ─────────────────────────────────────────────────────────
+        {"HDFCLIFE", "SBILIFE", "ICICIGI", "NIACL", "GICRE"},
+        # ── IT & Technology ───────────────────────────────────────────────────
+        {"TCS", "INFY", "WIPRO", "HCLTECH", "TECHM", "LTIM", "LTTS",
+         "PERSISTENT", "MPHASIS", "COFORGE", "KPITTECH"},
+        # ── Pharma & Healthcare ───────────────────────────────────────────────
+        {"SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP",
+         "LUPIN", "AUROPHARMA", "BIOCON", "ALKEM", "GLENMARK",
+         "METROPOLIS", "LALPATHLAB", "THYROCARE"},
+        # ── Auto & Auto Ancillaries ───────────────────────────────────────────
+        {"TATAMOTORS", "MARUTI", "M&M", "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT",
+         "MOTHERSON", "BOSCHLTD", "BHARATFORG", "APOLLOTYRE", "MRF",
+         "BALKRISIND", "EXIDEIND"},
+        # ── Oil, Gas & Petrochemicals ─────────────────────────────────────────
+        {"RELIANCE", "ONGC", "BPCL", "HINDPETRO", "IOC", "GAIL",
+         "IGL", "MGL", "PETRONET", "DEEPAKNTR"},
+        # ── Metals & Mining ───────────────────────────────────────────────────
+        {"HINDALCO", "VEDL", "TATASTEEL", "JSWSTEEL", "SAIL",
+         "NATIONALUM", "NMDC", "COALINDIA", "HINDCOPPER"},
+        # ── Power & Utilities ─────────────────────────────────────────────────
+        {"NTPC", "POWERGRID", "ADANIPOWER", "TATAPOWER", "CESC",
+         "TORNTPOWER", "NHPC", "SJVN", "IREDA", "PFC", "RECLTD"},
+        # ── Telecom ───────────────────────────────────────────────────────────
+        {"BHARTIARTL", "IDEA", "TATACOMM", "HFCL"},
+        # ── FMCG & Consumer Staples ───────────────────────────────────────────
+        {"HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR",
+         "MARICO", "GODREJCP", "COLPAL", "EMAMILTD", "TATACONSUM"},
+        # ── Paints & Chemicals ────────────────────────────────────────────────
+        {"ASIANPAINT", "BERGERPAINTS", "KANSAINER", "AKZOINDIA",
+         "PIDILITIND", "VINATIORGA", "AAVAS", "COROMANDEL"},
+        # ── Cement & Construction Materials ──────────────────────────────────
+        {"ULTRACEMCO", "SHREECEM", "AMBUJACEM", "ACC", "RAMCOCEM", "JKCEMENT"},
+        # ── Capital Goods & Engineering ───────────────────────────────────────
+        {"LT", "BHEL", "SIEMENS", "ABB", "THERMAX", "CUMMINSIND",
+         "BEL", "HAL", "BEML", "COCHINSHIP"},
+        # ── Infrastructure & Real Estate ──────────────────────────────────────
+        {"ADANIPORTS", "ADANIENT", "GMRAIRPORT", "IRB", "ASHOKA",
+         "DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE"},
+        # ── Consumer Discretionary & Retail ──────────────────────────────────
+        {"TITAN", "KALYANKJIL", "MANYAVAR", "TRENT", "DMART",
+         "NYKAA", "DEVYANI", "JUBLFOOD", "WESTLIFE"},
+        # ── Specialty Chemicals ───────────────────────────────────────────────
+        {"ATUL", "NAVINFLUOR", "CLEAN", "FINEORG", "GALAXYSURF"},
+        # ── Agri, Fertilisers & Sugar ────────────────────────────────────────
+        {"COROMANDEL", "CHAMPCORD", "ANDHRSUGAR", "BALRAMCHIN", "TRIVENI",
+         "DHAMPUR", "EIDPARRY"},
+        # ── Diagnostics / Exchange / Small-cap Fintech (standalone) ─────────
+        {"IFGLEXPOR"},   # refractory — standalone niche, no correlation group
     ]
+
+    def _record_exit(
+        self, symbol: str, exit_price: float, reason: str,
+        pnl: float = 0.0, confidence: float = 0.0
+    ) -> None:
+        """Record a sell event for the re-entry engine."""
+        self._recently_sold[symbol] = {
+            'exit_price':  exit_price,
+            'exit_time':   datetime.now(),
+            'reason':      reason,
+            'pnl':         pnl,
+            'confidence':  confidence,
+        }
+        logger.info(f"Re-entry engine: recorded exit {symbol} @ ₹{exit_price:.2f} ({reason}) P&L=₹{pnl:.2f}")
+
+    def _check_reentry_eligibility(
+        self,
+        symbol: str,
+        current_price: float,
+        score: float,
+        mtf_aligned: bool = False,
+        regime: str = "SIDEWAYS",
+        rr: float = 0.0,
+        has_negative_news: bool = False,
+        projected_invested: float = 0.0,
+        max_allowed_invested: float = float('inf'),
+    ) -> Optional[str]:
+        """
+        Returns a blocking reason string if re-entry is NOT allowed, else None (approved).
+
+        For stocks never previously sold: returns None immediately (no restrictions).
+
+        For stocks previously sold, ALL 9 conditions must pass:
+          1. Previous position fully closed (no partial still open)
+          2. No open position currently exists for this symbol
+          3. AI Trade Score ≥ 75
+          4. Multi-timeframe confirmation passes
+          5. Market regime is not BEAR
+          6. Risk/Reward ≥ 1.5:1
+          7. No major negative news
+          8. Daily loss limits not exceeded (capital guard)
+          9. Price has retraced ≥ 2% from exit (genuine new setup, not chasing)
+        """
+        rec = self._recently_sold.get(symbol)
+        if rec is None:
+            return None  # never sold this session — no restrictions (None = unrestricted)
+
+        exit_price = rec['exit_price']
+        exit_time  = rec['exit_time']
+        elapsed_h  = (datetime.now() - exit_time).total_seconds() / 3600
+
+        # ── Condition 1 & 2: position must be fully closed (no open qty) ──────
+        # (Already guaranteed by open_symbols check before this call, but log clearly)
+
+        # ── Cooldown: configurable minimum wait (default 4 hours) ────────────
+        cooldown_h = config.REENTRY_COOLDOWN_HOURS
+        if elapsed_h < cooldown_h:
+            remaining = cooldown_h - elapsed_h
+            return (
+                f"cooldown: {remaining*60:.0f}min remaining "
+                f"(need {cooldown_h:.0f}h since exit @ ₹{exit_price:.2f})"
+            )
+
+        # ── Condition 3: AI score ≥ 75 for re-entry (stricter than new trade) ─
+        MIN_REENTRY_SCORE = 75
+        if score < MIN_REENTRY_SCORE:
+            return f"re-entry score {score:.0f}/100 below minimum {MIN_REENTRY_SCORE} (stricter than new trades)"
+
+        # ── Condition 4: MTF must be aligned ──────────────────────────────────
+        if not mtf_aligned:
+            return "re-entry requires MTF alignment"
+
+        # ── Condition 5: No re-entry in BEAR market ───────────────────────────
+        if str(regime).upper() == 'BEAR':
+            return "re-entry blocked: market regime is BEAR"
+
+        # ── Condition 6: R:R ≥ 1.5:1 ─────────────────────────────────────────
+        if rr < 1.5:
+            return f"re-entry R:R {rr:.2f} below minimum 1.5:1"
+
+        # ── Condition 7: No negative news ────────────────────────────────────
+        if has_negative_news:
+            return "re-entry blocked: negative news present"
+
+        # ── Condition 8: Capital allocation allows new position ───────────────
+        if projected_invested > max_allowed_invested:
+            return (
+                f"re-entry blocked: capital limit "
+                f"(₹{projected_invested:.0f} > ₹{max_allowed_invested:.0f})"
+            )
+
+        # ── Condition 9: Price retraced ≥ 2% from exit price ─────────────────
+        MIN_RETRACE_PCT = 0.02
+        if exit_price > 0 and current_price > 0:
+            retrace = (exit_price - current_price) / exit_price
+            if retrace < MIN_RETRACE_PCT:
+                return (
+                    f"insufficient retrace {retrace*100:.1f}% "
+                    f"(need ≥2% pullback from exit ₹{exit_price:.2f}, current ₹{current_price:.2f})"
+                )
+
+        # ── All conditions passed — approve re-entry ─────────────────────────
+        retrace_pct = ((exit_price - current_price) / exit_price * 100) if exit_price > 0 else 0
+        logger.info(
+            f"Re-entry engine: {symbol} APPROVED — "
+            f"score {score:.0f}/100 | MTF aligned | regime {regime} | "
+            f"R:R {rr:.2f} | retrace {retrace_pct:.1f}% from ₹{exit_price:.2f} | "
+            f"elapsed {elapsed_h:.1f}h since exit | prev P&L=₹{rec.get('pnl',0):.2f}"
+        )
+        # Return metadata dict for journal (truthy = approved, but caller checks None vs dict)
+        meta = {
+            'is_reentry':            True,
+            'prev_exit_reason':      rec.get('reason', ''),
+            'prev_pnl':              rec.get('pnl', 0.0),
+            'prev_confidence':       rec.get('confidence', 0.0),
+            'time_since_exit_hours': round(elapsed_h, 2),
+            'reentry_score':         score,
+        }
+        del self._recently_sold[symbol]
+        return meta  # None = blocked, dict = approved (with metadata)
 
     def _is_correlated_with_open(self, candidate: str, open_symbols: set) -> bool:
         """
