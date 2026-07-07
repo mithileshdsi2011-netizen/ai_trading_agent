@@ -68,7 +68,7 @@ class AIResearchAgent:
 
         # Sector momentum proxy: 5d return of stock vs Nifty
         try:
-            nifty = self.market_data.get_stock_data('^NSEI', period='10d', interval='1d')
+            nifty = self.market_data.get_stock_data('NIFTY 50', period='10d', interval='1d')
             if not nifty.empty and len(historical_data) >= 6:
                 stock_ret  = (historical_data['Close'].iloc[-1] / historical_data['Close'].iloc[-6]) - 1
                 nifty_ret  = (nifty['Close'].iloc[-1] / nifty['Close'].iloc[-6]) - 1

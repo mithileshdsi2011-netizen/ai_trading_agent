@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 app = Flask(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 
+# Dashboard signal cache: avoid rescanning 30 stocks on every 60-second UI refresh
+_SIGNAL_CACHE = {"signals": [], "recommendations": [], "stocks_scanned": 0, "timestamp": None}
+_SIGNAL_CACHE_TTL = timedelta(minutes=5)
+
 SECTOR_MAP = {
     "RELIANCE": "Energy/Oil",
     "TCS": "IT",
@@ -98,7 +102,7 @@ th{color:#4b5563;font-size:10px;text-transform:uppercase;letter-spacing:.08em;pa
 td{padding:9px 10px;border-bottom:1px solid #111827;font-size:13px;color:#d1d5db}
 tr:hover td{background:#0f1724}
 tr:last-child td{border:none}
-.stat-label{color:#4b5563;font-size:11px;margin-bottom:3px;text-transform:uppercase;letter-spacing:.05em}
+.stat-label{color:#9ca3af;font-size:12px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em}
 .stat-value{font-size:22px;font-weight:700;line-height:1.1}
 .stat-value-sm{font-size:16px;font-weight:700}
 .tab-btn{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .2s;color:#6b7280;background:transparent}
@@ -1414,9 +1418,10 @@ async function load(){
       if(chartWinrate){chartWinrate.data=wrCfg.data;chartWinrate.update();}else{chartWinrate=new Chart(wrCtx,wrCfg);}
     }
 
-    // Trade Calendar
+    // Trade Calendar (realized P&L per weekday, from backend)
     const calEl=document.getElementById('a-calendar');
-    const weekDays=[{d:'Mon',v:52},{d:'Tue',v:-10},{d:'Wed',v:84},{d:'Thu',v:12},{d:'Fri',v:dpnl}];
+    const wc=(d.weekly_calendar||[0,0,0,0,0]).map(v=>parseFloat(v||0));
+    const weekDays=[{d:'Mon',v:wc[0]},{d:'Tue',v:wc[1]},{d:'Wed',v:wc[2]},{d:'Thu',v:wc[3]},{d:'Fri',v:wc[4]}];
     calEl.innerHTML=weekDays.map(({d:day,v})=>`
       <div style="text-align:center;flex:1">
         <div style="font-size:11px;color:#4b5563;margin-bottom:4px">${day}</div>
@@ -1765,6 +1770,7 @@ def api_data():
         "monthly_pnl": 0,
         "weekly_win_rate": 0,
         "monthly_win_rate": 0,
+        "weekly_calendar": [0, 0, 0, 0, 0],
         "open_positions": 0,
         "win_rate": 0,
         "total_trades": 0,
@@ -1891,7 +1897,7 @@ def api_data():
         holdings_as_pos = []
         pos_symbols = {p.get('tradingsymbol') for p in net_pos}
         for h in holdings_raw:
-            effective_qty = h.get('quantity', 0) or h.get('opening_quantity', 0)
+            effective_qty = (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0)
             if effective_qty == 0:
                 continue
             h['quantity'] = effective_qty  # normalise so JS sees correct qty
@@ -2046,7 +2052,31 @@ def api_data():
         data['monthly_win_rate'] = len(m_sells) / len(m_buys) if m_buys else 0
         data['weekly_pnl'] = sum(o.get('pnl', 0) for o in w_sells)
         data['monthly_pnl'] = sum(o.get('pnl', 0) for o in m_sells)
-        
+
+        # Realized P&L per weekday for the trade calendar (Mon-Fri)
+        try:
+            weekday_pnl = [0.0, 0.0, 0.0, 0.0, 0.0]  # Mon..Fri
+            week_start = now_ist.date() - timedelta(days=now_ist.weekday())  # Monday of this week
+            for o in data.get('all_orders', []):
+                if o.get('transaction_type') != 'SELL':
+                    continue
+                ts = str(o.get('order_timestamp', ''))
+                try:
+                    if 'T' in ts:
+                        od = datetime.fromisoformat(ts.replace('Z', '+00:00')).date()
+                    elif ' ' in ts:
+                        od = datetime.strptime(ts[:10], '%Y-%m-%d').date()
+                    else:
+                        od = datetime.strptime(ts[:10], '%Y-%m-%d').date()
+                except Exception:
+                    continue
+                if week_start <= od <= (week_start + timedelta(days=4)):
+                    idx = od.weekday()  # Monday=0 .. Friday=4
+                    weekday_pnl[idx] += float(o.get('pnl', 0) or 0)
+            data['weekly_calendar'] = weekday_pnl
+        except Exception:
+            pass
+
         # Portfolio health
         positions_value = sum(p.get('last_price', 0) * p.get('quantity', 0) for p in data.get('positions', []))
         account_value = data.get('account_balance', 0) + positions_value + data.get('holdings_value', 0)
@@ -2101,6 +2131,9 @@ def api_data():
     # Delivery holdings
     try:
         holdings = kite.holdings()
+        # Normalize quantity to include T1 (stocks bought yesterday show qty=0 otherwise)
+        for h in holdings:
+            h['quantity'] = (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0)
         data['holdings'] = holdings
         holdings_value = sum(h.get('quantity', 0) * h.get('last_price', 0) for h in holdings)
         data['holdings_value'] = holdings_value
@@ -2181,39 +2214,53 @@ def api_data():
 
     # Live signals and recommendations (use swing or intraday parameters)
     try:
-        from dynamic_universe import DynamicUniverse
-        from technical_analysis import TechnicalAnalyzer
-        scanner  = DynamicUniverse(kite=kite)
-        ta       = TechnicalAnalyzer()
-        universe = scanner.get_candidates_with_details(top_n=30)
-        signals  = []
-        recommendations = []
-        sl_pct = config.SWING_STOP_LOSS_PERCENTAGE if config.TRADING_MODE == "swing" else config.STOP_LOSS_PERCENTAGE
-        tgt_pct = config.SWING_TARGET_PERCENTAGE if config.TRADING_MODE == "swing" else config.TARGET_PERCENTAGE
-        for c in universe[:15]:
-            sym = c['symbol']
-            try:
-                hist = mdf.get_stock_data(sym, period="1mo", interval="1d")
-                if hist.empty or len(hist) < 20:
+        now = datetime.now(IST)
+        cache_age = (now - _SIGNAL_CACHE["timestamp"]) if _SIGNAL_CACHE["timestamp"] else timedelta.max
+        if cache_age < _SIGNAL_CACHE_TTL:
+            data['signals'] = _SIGNAL_CACHE["signals"]
+            data['recommendations'] = _SIGNAL_CACHE["recommendations"]
+            data['stocks_scanned'] = _SIGNAL_CACHE["stocks_scanned"]
+        else:
+            from dynamic_universe import DynamicUniverse
+            from technical_analysis import TechnicalAnalyzer
+            scanner  = DynamicUniverse(kite=kite)
+            ta       = TechnicalAnalyzer()
+            universe = scanner.get_candidates_with_details(top_n=30)
+            signals  = []
+            recommendations = []
+            sl_pct = config.SWING_STOP_LOSS_PERCENTAGE if config.TRADING_MODE == "swing" else config.STOP_LOSS_PERCENTAGE
+            tgt_pct = config.SWING_TARGET_PERCENTAGE if config.TRADING_MODE == "swing" else config.TARGET_PERCENTAGE
+            for c in universe[:15]:
+                sym = c['symbol']
+                try:
+                    hist = mdf.get_stock_data(sym, period="1mo", interval="1d")
+                    if hist.empty or len(hist) < 20:
+                        continue
+                    sig = ta.generate_signals(hist)
+                    if sig.get('signal') in ('BUY', 'SELL'):
+                        sig_data = {
+                            'symbol':     sym,
+                            'price':      c['last_price'],
+                            'target':     round(c['last_price'] * (1 + tgt_pct), 2),
+                            'stop_loss':  round(c['last_price'] * (1 - sl_pct), 2),
+                            'confidence': sig.get('confidence', 0),
+                            'action':     sig.get('signal'),
+                            'trend':      sig.get('trend', ''),
+                        }
+                        signals.append(sig_data)
+                        if sig.get('signal') == 'BUY' and sig.get('confidence', 0) >= config.MIN_CONFIDENCE:
+                            recommendations.append(sig_data)
+                except Exception:
                     continue
-                sig = ta.generate_signals(hist)
-                if sig.get('signal') in ('BUY', 'SELL'):
-                    sig_data = {
-                        'symbol':     sym,
-                        'price':      c['last_price'],
-                        'target':     round(c['last_price'] * (1 + tgt_pct), 2),
-                        'stop_loss':  round(c['last_price'] * (1 - sl_pct), 2),
-                        'confidence': sig.get('confidence', 0),
-                        'action':     sig.get('signal'),
-                        'trend':      sig.get('trend', ''),
-                    }
-                    signals.append(sig_data)
-                    if sig.get('signal') == 'BUY' and sig.get('confidence', 0) >= config.MIN_CONFIDENCE:
-                        recommendations.append(sig_data)
-            except Exception:
-                continue
-        data['signals'] = signals
-        data['recommendations'] = recommendations[:5]
+            data['signals'] = signals
+            data['recommendations'] = recommendations[:5]
+            data['stocks_scanned'] = len(universe)
+            _SIGNAL_CACHE.update({
+                "signals": signals,
+                "recommendations": recommendations[:5],
+                "stocks_scanned": len(universe),
+                "timestamp": now
+            })
     except Exception:
         pass
 
