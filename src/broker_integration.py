@@ -4,6 +4,8 @@ Integrates with Zerodha Kite Connect for order execution
 """
 from typing import Dict, Optional, List
 import logging
+import os
+import json
 from datetime import datetime
 
 from config import config
@@ -197,13 +199,44 @@ class BrokerIntegration:
             }
         
         except Exception as e:
-            logger.error(f"Error placing real order: {e}")
+            err = str(e)
+            logger.error(f"Error placing real order: {err}")
+            # Detect IP whitelist error and show actionable fix
+            if 'IP' in err and 'not allowed' in err:
+                current_ip = self._get_public_ip()
+                logger.error(
+                    f"\n{'='*60}\n"
+                    f"  ❌ IP WHITELIST ERROR — ORDERS BLOCKED\n"
+                    f"  Current IP : {current_ip}\n"
+                    f"  ACTION     : Add {current_ip} to Kite Developer Console\n"
+                    f"  URL        : https://developers.kite.trade/apps\n"
+                    f"{'='*60}"
+                )
+                # Save current IP so startup script can check
+                self._save_ip(current_ip)
             return {
                 'success': False,
-                'error': str(e),
+                'error': err,
                 'order_id': None
             }
     
+    def _get_public_ip(self) -> str:
+        """Fetch current public IPv4 address."""
+        try:
+            import urllib.request
+            return urllib.request.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
+        except Exception:
+            return 'unknown'
+
+    def _save_ip(self, ip: str):
+        """Save current IP to data/last_known_ip.txt for startup checks."""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(root, 'data', 'last_known_ip.txt'), 'w') as f:
+                f.write(ip)
+        except Exception:
+            pass
+
     def cancel_order(self, order_id: str) -> Dict:
         """
         Cancel an order

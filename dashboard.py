@@ -3,20 +3,685 @@ Personal Trading Dashboard
 Run: ./run_with_venv.sh dashboard.py
 Open: http://localhost:5001
 """
-import os, sys, json
+import os, sys, json, threading, logging, time
 from datetime import datetime, timedelta
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 import pytz
+try:
+    import psutil as _psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 sys.path.insert(0, os.path.dirname(__file__))
 
+from config import config
+try:
+    from trade_scorer import SCORE_SKIP as _SCORE_SKIP_THRESHOLD
+except ImportError:
+    _SCORE_SKIP_THRESHOLD = 60
+
+logger = logging.getLogger(__name__)
 app = Flask(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 
-# Dashboard signal cache: avoid rescanning 30 stocks on every 60-second UI refresh
-_SIGNAL_CACHE = {"signals": [], "recommendations": [], "stocks_scanned": 0, "timestamp": None}
-_SIGNAL_CACHE_TTL = timedelta(minutes=5)
+# ── System health metrics (updated by background heartbeat) ───────────────────
+_HEALTH: dict = {
+    "cpu_pct":        0.0,
+    "mem_pct":        0.0,
+    "mem_mb":         0.0,
+    "disk_free_gb":   0.0,
+    "api_latency_ms": 0.0,
+    "kite_ok":        False,
+    "errors_today":   0,
+    "scan_time_s":    0.0,
+    "last_heartbeat": None,
+    "start_time":     datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+}
+_HEALTH_LOCK = threading.Lock()
+
+
+def _heartbeat_loop():
+    """Background thread: update system metrics every 60 s."""
+    import pytz as _pytz
+    _ist = _pytz.timezone("Asia/Kolkata")
+    while True:
+        try:
+            metrics: dict = {}
+            if _HAS_PSUTIL:
+                metrics["cpu_pct"]      = _psutil.cpu_percent(interval=1)
+                mem = _psutil.virtual_memory()
+                metrics["mem_pct"]      = mem.percent
+                metrics["mem_mb"]       = round(mem.used / 1024 / 1024, 1)
+                disk = _psutil.disk_usage('/')
+                metrics["disk_free_gb"] = round(disk.free / 1024**3, 1)
+
+            # Kite connectivity probe (latency)
+            try:
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+                from token_manager import TokenManager
+                _tm = TokenManager()
+                _kite = _tm.initialize_kite()
+                if _kite:
+                    t0 = time.time()
+                    _kite.ltp(["NSE:NIFTY 50"])
+                    metrics["api_latency_ms"] = round((time.time() - t0) * 1000, 1)
+                    metrics["kite_ok"] = True
+                else:
+                    metrics["kite_ok"] = False
+            except Exception:
+                metrics["kite_ok"] = False
+
+            metrics["last_heartbeat"] = datetime.now(_ist).isoformat()
+
+            with _HEALTH_LOCK:
+                _HEALTH.update(metrics)
+        except Exception as _e:
+            logger.debug(f"Heartbeat error: {_e}")
+        time.sleep(60)
+
+# ── Background signal cache ───────────────────────────────────────────────────
+# Scan runs in a background thread every 15 min; dashboard reads from cache instantly
+_SIGNAL_CACHE = {
+    "signals": [], "recommendations": [], "stocks_scanned": 0,
+    "scan_universe": [], "timestamp": None, "scanning": False,
+}
+_SIGNAL_CACHE_LOCK = threading.Lock()
+_SIGNAL_CACHE_TTL  = timedelta(minutes=15)
+
+def _run_background_scan():
+    """Background thread: scan full 150-stock universe, cache top-50 for display."""
+    _scan_t0 = time.time()
+    try:
+        with _SIGNAL_CACHE_LOCK:
+            _SIGNAL_CACHE["scanning"] = True
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from dynamic_universe import DynamicUniverse
+        from signal_generator import SignalGenerator
+
+        scanner = DynamicUniverse()
+        sg      = SignalGenerator()
+
+        # Step 1: get 150-stock scan universe + 50-stock diversified display list
+        candidates = scanner.get_top_candidates(display_n=50, scan_n=150)
+        scan_syms    = candidates["scan_universe"]    # 150 ranked by liquidity+momentum
+        display_syms = candidates["top_display"]      # 50 sector-diversified for UI
+
+        # ── Inject morning report top picks + real-time gainers ───────────────
+        # These are the stocks identified by the morning intelligence as top movers.
+        # They MUST be scanned even if DynamicUniverse didn't rank them in top-50.
+        priority_syms: list = []
+
+        # A) Morning report AI top picks (already signal-ranked)
+        with _MORNING_CACHE_LOCK:
+            mr = _MORNING_CACHE.get("report") or {}
+        priority_syms += [p["symbol"] for p in mr.get("ai_top_picks", [])[:15]]
+
+        # B) Morning report top gainers (real-time price movers)
+        priority_syms += [g["symbol"] for g in mr.get("top_gainers", [])[:10]]
+
+        # C) Gap-up stocks from morning report
+        priority_syms += [g["symbol"] for g in mr.get("gap_up_stocks", [])[:8]]
+
+        # D) Live batch-quote top gainers (current session, not just morning open)
+        try:
+            from dynamic_universe import _NIFTY500_PRIORITY as _prio
+            from market_data import MarketDataFetcher as _MDF
+            _mdf = _MDF()
+            if _mdf.kite:
+                _syms = list(_prio)[:200]
+                _all_q: dict = {}
+                for _i in range(0, len(_syms), 200):
+                    try:
+                        _q = _mdf.kite.quote([f"NSE:{s}" for s in _syms[_i:_i+200]]) or {}
+                        _all_q.update(_q)
+                    except Exception:
+                        pass
+                _live_movers = []
+                for _key, _qv in _all_q.items():
+                    _s = _key.replace("NSE:", "")
+                    _lp = _qv.get("last_price", 0)
+                    _pc = _qv.get("ohlc", {}).get("close", 0)
+                    if _lp and _pc:
+                        _chg = (_lp - _pc) / _pc * 100
+                        if _chg >= 1.5:            # only stocks up ≥1.5% intraday
+                            _live_movers.append((_s, _chg))
+                _live_movers.sort(key=lambda x: x[1], reverse=True)
+                priority_syms += [s for s, _ in _live_movers[:12]]
+                logger.info(f"Live gainers ≥1.5%: {[s for s,_ in _live_movers[:8]]}")
+        except Exception as _e:
+            logger.debug(f"Live gainer fetch error: {_e}")
+
+        # Merge: priority first (force-included), then normal display list, dedup, cap at 60
+        _seen: set = set()
+        merged_display: list = []
+        for _sym in priority_syms + display_syms:
+            if _sym and _sym not in _seen:
+                _seen.add(_sym)
+                merged_display.append(_sym)
+            if len(merged_display) >= 60:
+                break
+
+        logger.info(
+            f"Scan list: {len(merged_display)} stocks "
+            f"({len(priority_syms)} priority + {len(display_syms)} universe = merged to 60 cap)"
+        )
+
+        # Step 2: run full AI pipeline on merged list (priority stocks guaranteed entry)
+        raw_signals = sg.generate_signals_for_watchlist(merged_display)
+        display_syms = merged_display   # update display_syms so filter logic uses merged list
+
+        # Step 3: get held symbols for bot_decision logic
+        try:
+            from broker_integration import BrokerIntegration
+            _b = BrokerIntegration()
+            _held = _b.get_holdings()
+            _held_syms = {
+                p.get('tradingsymbol')
+                for p in (_held.get('positions', []) + _held.get('holdings', []))
+                if (p.get('quantity', 0) or p.get('opening_quantity', 0)) > 0
+            }
+            _open_count = len([p for p in _held.get('positions', [])
+                               if (p.get('quantity', 0) or 0) > 0])
+        except Exception:
+            _held_syms  = set()
+            _open_count = 0
+
+        sl_pct  = config.SWING_STOP_LOSS_PERCENTAGE if config.TRADING_MODE == 'swing' else config.STOP_LOSS_PERCENTAGE
+        tgt_pct = config.SWING_TARGET_PERCENTAGE    if config.TRADING_MODE == 'swing' else config.TARGET_PERCENTAGE
+
+        # Step 4: build enriched signal list, filter to display_syms for UI
+        from dynamic_universe import SECTOR_MAP as _SMAP
+        display_set = set(display_syms)
+        all_signals  = []
+        display_sigs = []
+        recommendations = []
+
+        for sig in raw_signals:
+            sym   = sig.get('symbol', '')
+            act   = sig.get('action', '')
+            conf  = sig.get('confidence', 0)
+            score = float(sig.get('overall_score') or sig.get('trade_score') or 0)
+            rr    = float(sig.get('risk_reward_ratio') or 0)
+            price = float(sig.get('current_price') or sig.get('price') or 0)
+
+            if act != 'BUY':
+                bot_decision = 'SELL signal — not buying'
+            elif sym in _held_syms:
+                bot_decision = 'Already held'
+            elif _open_count >= config.MAX_POSITIONS:
+                bot_decision = 'Max positions reached'
+            elif score < _SCORE_SKIP_THRESHOLD:
+                bot_decision = f'Score {score:.0f}/100 below threshold ({_SCORE_SKIP_THRESHOLD})'
+            elif rr < config.MIN_RISK_REWARD:
+                bot_decision = f'R:R {rr:.2f} below {config.MIN_RISK_REWARD} min'
+            elif conf < config.MIN_CONFIDENCE:
+                bot_decision = f'Confidence {conf:.0%} below min'
+            else:
+                bot_decision = 'Will buy*'
+
+            sig_data = {
+                'symbol':            sym,
+                'action':            act,
+                'price':             price,
+                'current_price':     price,
+                'target':            sig.get('target') or round(price * (1 + tgt_pct), 2),
+                'stop_loss':         sig.get('stop_loss') or round(price * (1 - sl_pct), 2),
+                'confidence':        conf,
+                'overall_score':     round(score, 1),
+                'risk_reward_ratio': round(rr, 2),
+                'trend':             sig.get('trend', ''),
+                'reasoning':         sig.get('reasoning', ''),
+                'bot_decision':      bot_decision,
+                'sector':            _SMAP.get(sym, 'Other'),
+                'market_regime':     sig.get('market_regime', ''),
+                'atr':               sig.get('atr', 0),
+                'mtf_aligned':       sig.get('mtf_aligned', False),
+            }
+            all_signals.append(sig_data)
+            if sym in display_set:
+                display_sigs.append(sig_data)
+            if act == 'BUY' and bot_decision == 'Will buy*':
+                recommendations.append(sig_data)
+
+        # Sort display signals: BUY first, then by score desc
+        display_sigs.sort(key=lambda x: (x['action'] != 'BUY', -x['overall_score']))
+
+        with _SIGNAL_CACHE_LOCK:
+            _SIGNAL_CACHE.update({
+                "signals":        display_sigs,
+                "recommendations": recommendations[:5],
+                "stocks_scanned": len(scan_syms),
+                "scan_universe":  scan_syms,
+                "timestamp":      datetime.now(IST),
+                "scanning":       False,
+            })
+        _elapsed = round(time.time() - _scan_t0, 1)
+        with _HEALTH_LOCK:
+            _HEALTH["scan_time_s"] = _elapsed
+        logger.info(f"BG scan complete: {len(scan_syms)} scanned, {len(display_sigs)} displayed, {len(recommendations)} actionable [{_elapsed}s]")
+    except Exception as e:
+        logger.error(f"Background scan error: {e}")
+        with _SIGNAL_CACHE_LOCK:
+            _SIGNAL_CACHE["scanning"] = False
+        with _HEALTH_LOCK:
+            _HEALTH["errors_today"] = _HEALTH.get("errors_today", 0) + 1
+
+def _maybe_trigger_background_scan():
+    """Trigger background scan if cache is stale and no scan already running."""
+    with _SIGNAL_CACHE_LOCK:
+        ts       = _SIGNAL_CACHE["timestamp"]
+        scanning = _SIGNAL_CACHE["scanning"]
+    age = (datetime.now(IST) - ts) if ts else timedelta.max
+    if age > _SIGNAL_CACHE_TTL and not scanning:
+        t = threading.Thread(target=_run_background_scan, daemon=True)
+        t.start()
+
+
+# ── Morning Intelligence Report cache ─────────────────────────────────────────
+_MORNING_CACHE: dict = {"report": None, "date": None, "generating": False}
+_MORNING_CACHE_LOCK = threading.Lock()
+
+# Sector proxy symbols — used to judge sector strength from daily moves
+_SECTOR_PROXIES = {
+    "Defence":      ["HAL", "BEL", "BEML", "GRSE", "MAZDOCK"],
+    "Banking":      ["HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK"],
+    "IT":           ["TCS", "INFY", "WIPRO", "HCLTECH", "TECHM"],
+    "Pharma":       ["SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "LUPIN"],
+    "Energy":       ["RELIANCE", "ONGC", "NTPC", "POWERGRID", "TATAPOWER"],
+    "Auto":         ["MARUTI", "TATAMOTORS", "M&M", "BAJAJ-AUTO", "EICHERMOT"],
+    "Metals":       ["TATASTEEL", "JSWSTEEL", "HINDALCO", "COALINDIA", "VEDL"],
+    "Infra":        ["LT", "SIEMENS", "ABB", "RVNL", "IRCON"],
+    "FMCG":         ["HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "TATACONSUM"],
+    "RealEstate":   ["GODREJPROP", "PRESTIGE", "OBEROIRLTY", "LODHA", "BRIGADE"],
+    "Chemicals":    ["PIDILITIND", "DEEPAKNTR", "NAVINFLUOR", "ALKYLAMINE", "AARTIIND"],
+    "Retail":       ["TRENT", "DMART", "ZOMATO", "NYKAA", "JUBLFOOD"],
+}
+
+# Stocks to flag for avoid-reasons (keyword → reason label)
+_AVOID_KEYWORDS = [
+    ("fraud", "Fraud / SEBI action"),
+    ("sebi", "SEBI action"),
+    ("promoter sell", "Promoter selling"),
+    ("insider sell", "Insider selling"),
+    ("loss", "Weak earnings"),
+    ("negative result", "Negative results"),
+    ("downgrade", "Analyst downgrade"),
+    ("debt", "High debt concern"),
+]
+
+
+def _generate_morning_report():
+    """
+    Generate full Morning Market Intelligence Report.
+    Runs once per trading day (cached). Covers:
+      1. Market Overview  (NIFTY, BANKNIFTY, VIX, regime)
+      2. Sector Strength  (ranked by avg 1-day move)
+      3. Top Gainers      (pre-market movers, gap-up)
+      4. Gap-Up Stocks    (gap > 1.5%, volume filter)
+      5. Delivery Volume  (top delivery % stocks)
+      6. Strong News      (positive news + AI confidence)
+      7. AI Top Picks     (ranked, sector-diversified, ≤ 20)
+      8. Stocks to Avoid  (negative signals)
+      9. Trading Plan     (regime-aware playbook)
+    """
+    with _MORNING_CACHE_LOCK:
+        _MORNING_CACHE["generating"] = True
+
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from market_data import MarketDataFetcher
+        from market_regime import MarketRegimeDetector
+        from dynamic_universe import DynamicUniverse, SECTOR_MAP as _SMAP
+        from broker_integration import BrokerIntegration
+        import config as _cfg
+
+        mdf = MarketDataFetcher()
+        kite = mdf.kite
+
+        report = {
+            "generated_at": datetime.now(IST).isoformat(),
+            "market_overview": {},
+            "sector_strength": [],
+            "top_gainers": [],
+            "gap_up_stocks": [],
+            "delivery_volume": [],
+            "strong_news": [],
+            "ai_top_picks": [],
+            "stocks_to_avoid": [],
+            "trading_plan": {},
+        }
+
+        # ── 1. Market Overview ────────────────────────────────────────────────
+        try:
+            regime_det = MarketRegimeDetector()
+            regime_sum = regime_det.get_summary()
+            regime     = regime_sum.get("regime", "SIDEWAYS")
+
+            # NIFTY, BANKNIFTY, VIX via Kite LTP
+            ltp_keys = ["NSE:NIFTY 50", "NSE:NIFTY BANK", "NSE:INDIA VIX"]
+            ltp_data = {}
+            if kite:
+                try:
+                    ltp_data = kite.ltp(ltp_keys) or {}
+                except Exception:
+                    pass
+
+            def _ltp(key):
+                return ltp_data.get(key, {}).get("last_price", 0)
+
+            # Prev-close change for NIFTY
+            nifty_hist = mdf.get_stock_data("NIFTY 50", period="5d", interval="1d")
+            nifty_chg  = 0.0
+            if not nifty_hist.empty and len(nifty_hist) >= 2:
+                nifty_chg = float((nifty_hist["Close"].iloc[-1] / nifty_hist["Close"].iloc[-2] - 1) * 100)
+
+            bnf_hist = mdf.get_stock_data("NIFTY BANK", period="5d", interval="1d")
+            bnf_chg  = 0.0
+            if not bnf_hist.empty and len(bnf_hist) >= 2:
+                bnf_chg = float((bnf_hist["Close"].iloc[-1] / bnf_hist["Close"].iloc[-2] - 1) * 100)
+
+            vix_val = _ltp("NSE:INDIA VIX")
+            vix_label = "LOW" if vix_val < 15 else "MEDIUM" if vix_val < 20 else "HIGH"
+
+            nifty_val  = regime_sum.get("nifty") or _ltp("NSE:NIFTY 50")
+            report["market_overview"] = {
+                "regime":        regime,
+                "nifty":         round(nifty_val, 2),
+                "nifty_chg":     round(nifty_chg, 2),
+                "banknifty_chg": round(bnf_chg, 2),
+                "vix":           round(vix_val, 2),
+                "vix_label":     vix_label,
+                "sentiment":     "Bullish" if nifty_chg > 0.3 else "Bearish" if nifty_chg < -0.3 else "Neutral",
+                "dma50":         regime_sum.get("dma50", 0),
+                "dma200":        regime_sum.get("dma200", 0),
+            }
+        except Exception as e:
+            logger.warning(f"Morning report: market overview error: {e}")
+
+        # ── 2. Sector Strength ────────────────────────────────────────────────
+        try:
+            sector_scores = {}
+            for sector, syms in _SECTOR_PROXIES.items():
+                moves = []
+                for sym in syms:
+                    try:
+                        h = mdf.get_stock_data(sym, period="5d", interval="1d")
+                        if not h.empty and len(h) >= 2:
+                            chg = float((h["Close"].iloc[-1] / h["Close"].iloc[-2] - 1) * 100)
+                            moves.append(chg)
+                    except Exception:
+                        pass
+                if moves:
+                    sector_scores[sector] = round(sum(moves) / len(moves), 2)
+            sorted_sectors = sorted(sector_scores.items(), key=lambda x: x[1], reverse=True)
+            report["sector_strength"] = [
+                {"sector": s, "change_pct": c,
+                 "direction": "↑↑" if c > 0.5 else "↑" if c > 0 else "↓" if c > -0.5 else "↓↓"}
+                for s, c in sorted_sectors
+            ]
+        except Exception as e:
+            logger.warning(f"Morning report: sector strength error: {e}")
+
+        # ── 3 & 4. Top Gainers + Gap-Up ──────────────────────────────────────
+        try:
+            scanner = DynamicUniverse()
+            if kite:
+                # Batch quote priority universe
+                from dynamic_universe import _NIFTY500_PRIORITY
+                syms_list = list(_NIFTY500_PRIORITY)[:300]
+                batch_size = 200
+                all_quotes = {}
+                for i in range(0, len(syms_list), batch_size):
+                    batch = syms_list[i:i+batch_size]
+                    try:
+                        q = kite.quote([f"NSE:{s}" for s in batch]) or {}
+                        all_quotes.update(q)
+                    except Exception:
+                        pass
+
+                movers = []
+                gap_ups = []
+                for sym, q in all_quotes.items():
+                    s = sym.replace("NSE:", "")
+                    lp   = q.get("last_price", 0)
+                    pc   = q.get("ohlc", {}).get("close", 0)
+                    op   = q.get("ohlc", {}).get("open", 0)
+                    vol  = q.get("volume", 0)
+                    if not pc or not lp:
+                        continue
+                    chg_pct = (lp - pc) / pc * 100
+                    gap_pct = (op - pc) / pc * 100 if pc else 0
+                    movers.append({"symbol": s, "price": lp, "change_pct": round(chg_pct, 2),
+                                   "volume": vol, "sector": _SMAP.get(s, "Other")})
+                    if gap_pct >= 1.5 and vol > 50000:
+                        gap_ups.append({"symbol": s, "price": lp, "gap_pct": round(gap_pct, 2),
+                                        "volume": vol, "sector": _SMAP.get(s, "Other")})
+
+                movers.sort(key=lambda x: x["change_pct"], reverse=True)
+                gap_ups.sort(key=lambda x: x["gap_pct"], reverse=True)
+                report["top_gainers"]   = movers[:10]
+                report["gap_up_stocks"] = gap_ups[:10]
+        except Exception as e:
+            logger.warning(f"Morning report: gainers/gap-up error: {e}")
+
+        # ── 5. Delivery Volume (top delivery % - approximated via high vol stocks) ──
+        try:
+            # Proxy: stocks with high volume relative to avg (institutional interest)
+            high_vol = sorted(
+                [m for m in report.get("top_gainers", []) if m.get("volume", 0) > 500000],
+                key=lambda x: x.get("volume", 0), reverse=True
+            )[:8]
+            report["delivery_volume"] = [
+                {"symbol": h["symbol"], "price": h["price"],
+                 "volume": h["volume"], "sector": h.get("sector", "Other"),
+                 "note": "High institutional volume"}
+                for h in high_vol
+            ]
+        except Exception as e:
+            logger.warning(f"Morning report: delivery volume error: {e}")
+
+        # ── 6. Strong News + AI Confidence ───────────────────────────────────
+        try:
+            from sentiment_analysis import SentimentAnalyzer
+            sa = SentimentAnalyzer()
+            news_picks = []
+            # Check top gainers + sector leaders for positive news
+            check_syms = [m["symbol"] for m in report.get("top_gainers", [])[:6]]
+            top_sector_syms = []
+            for sec in (report.get("sector_strength") or [])[:3]:
+                top_sector_syms += _SECTOR_PROXIES.get(sec["sector"], [])[:2]
+            check_syms = list(dict.fromkeys(check_syms + top_sector_syms))[:10]
+
+            for sym in check_syms:
+                try:
+                    sent = sa.get_market_sentiment(sym)
+                    items = sent.get("news_items", [])
+                    price_info = next(
+                        (m for m in report.get("top_gainers", []) if m["symbol"] == sym), {}
+                    )
+                    if items and sent.get("score", 0) > 0.3:
+                        headline = items[0].get("title", "") if isinstance(items[0], dict) else str(items[0])
+                        news_picks.append({
+                            "symbol":     sym,
+                            "price":      price_info.get("price", 0),
+                            "headline":   headline[:80],
+                            "sentiment":  "Positive",
+                            "confidence": round(sent.get("score", 0) * 100),
+                            "sector":     _SMAP.get(sym, "Other"),
+                        })
+                except Exception:
+                    pass
+            report["strong_news"] = news_picks[:6]
+        except Exception as e:
+            logger.warning(f"Morning report: strong news error: {e}")
+
+        # ── 7. AI Top Picks ───────────────────────────────────────────────────
+        try:
+            from signal_generator import SignalGenerator
+            sg = SignalGenerator()
+            # Build priority list: gap-ups + top gainers + top-sector leaders
+            priority_syms = []
+            priority_syms += [g["symbol"] for g in report.get("gap_up_stocks", [])]
+            priority_syms += [g["symbol"] for g in report.get("top_gainers", [])[:8]]
+            for sec in (report.get("sector_strength") or [])[:4]:
+                priority_syms += _SECTOR_PROXIES.get(sec["sector"], [])[:3]
+            # De-dup, keep order
+            seen = set(); uniq = []
+            for s in priority_syms:
+                if s not in seen:
+                    seen.add(s); uniq.append(s)
+            priority_syms = uniq[:30]
+
+            raw_sigs = sg.generate_signals_for_watchlist(priority_syms)
+
+            # Sector-diversified top picks (max 3 per sector)
+            sec_count: dict = {}
+            top_picks = []
+            for sig in raw_sigs:
+                if sig.get("action") not in ("BUY", "HOLD"):
+                    continue
+                sym  = sig.get("symbol", "")
+                sec  = _SMAP.get(sym, "Other")
+                if sec_count.get(sec, 0) >= 3:
+                    continue
+                price = float(sig.get("current_price") or 0)
+                tgt   = float(sig.get("target") or 0)
+                sl    = float(sig.get("stop_loss") or 0)
+                exp_ret = round((tgt - price) / price * 100, 1) if price and tgt else 0
+                top_picks.append({
+                    "rank":        len(top_picks) + 1,
+                    "symbol":      sym,
+                    "score":       round(sig.get("overall_score", 0), 1),
+                    "confidence":  round((sig.get("confidence", 0)) * 100),
+                    "sector":      sec,
+                    "action":      sig.get("action"),
+                    "entry":       price,
+                    "target":      tgt,
+                    "stop_loss":   sl,
+                    "rr":          round(sig.get("risk_reward_ratio", 0), 2),
+                    "exp_return":  exp_ret,
+                    "trend":       sig.get("trend", ""),
+                    "reason":      (sig.get("reasoning", "") or "").split(".")[0][:80],
+                })
+                sec_count[sec] = sec_count.get(sec, 0) + 1
+                if len(top_picks) >= 20:
+                    break
+
+            report["ai_top_picks"]      = top_picks
+            report["morning_scan_syms"] = [p["symbol"] for p in top_picks]
+        except Exception as e:
+            logger.warning(f"Morning report: AI top picks error: {e}")
+
+        # ── 8. Stocks to Avoid ────────────────────────────────────────────────
+        try:
+            from sentiment_analysis import SentimentAnalyzer
+            sa2 = SentimentAnalyzer()
+            avoid_list = []
+            # Check bottom movers
+            bottom = sorted(report.get("top_gainers", []), key=lambda x: x.get("change_pct", 0))[:8]
+            for item in bottom:
+                sym = item["symbol"]
+                try:
+                    sent = sa2.get_market_sentiment(sym)
+                    items = sent.get("news_items", [])
+                    score = sent.get("score", 0)
+                    if score < -0.1 or items:
+                        reason = "Negative sentiment"
+                        for kw, label in _AVOID_KEYWORDS:
+                            all_text = " ".join(
+                                str(n.get("title", "") if isinstance(n, dict) else n)
+                                for n in items
+                            ).lower()
+                            if kw in all_text:
+                                reason = label
+                                break
+                        avoid_list.append({
+                            "symbol":     sym,
+                            "price":      item.get("price", 0),
+                            "change_pct": item.get("change_pct", 0),
+                            "reason":     reason,
+                            "sector":     _SMAP.get(sym, "Other"),
+                        })
+                except Exception:
+                    pass
+            report["stocks_to_avoid"] = avoid_list[:6]
+        except Exception as e:
+            logger.warning(f"Morning report: avoid list error: {e}")
+
+        # ── 9. Trading Plan ───────────────────────────────────────────────────
+        try:
+            regime = report["market_overview"].get("regime", "SIDEWAYS")
+            top_secs = [s["sector"] for s in report.get("sector_strength", [])[:3] if s["change_pct"] > 0]
+            bot_secs = [s["sector"] for s in report.get("sector_strength", []) if s["change_pct"] < -0.3]
+            vix_val  = report["market_overview"].get("vix", 0)
+
+            if regime == "BULL" and vix_val < 15:
+                max_trades = "4–6"; risk_mode = "Aggressive"
+            elif regime == "SIDEWAYS" or 15 <= vix_val < 20:
+                max_trades = "2–4"; risk_mode = "Moderate"
+            else:
+                max_trades = "0–2"; risk_mode = "Defensive"
+
+            report["trading_plan"] = {
+                "regime":           regime,
+                "risk_mode":        risk_mode,
+                "expected_trades":  max_trades,
+                "preferred_sectors": top_secs[:3],
+                "avoid_sectors":     bot_secs[:3],
+                "vix":              vix_val,
+                "note": (
+                    "Strong trending market — follow momentum" if regime == "BULL"
+                    else "Choppy market — tighter SL, fewer trades" if regime == "SIDEWAYS"
+                    else "Bear market — mostly cash, only defensive buys"
+                ),
+            }
+        except Exception as e:
+            logger.warning(f"Morning report: trading plan error: {e}")
+
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        with _MORNING_CACHE_LOCK:
+            _MORNING_CACHE.update({
+                "report":     report,
+                "date":       today,
+                "generating": False,
+            })
+
+        # Persist to disk so trading_orchestrator.py (separate process) can read it
+        try:
+            _cache_dir  = os.path.join(os.path.dirname(__file__), 'data')
+            os.makedirs(_cache_dir, exist_ok=True)
+            _cache_path = os.path.join(_cache_dir, 'morning_report_cache.json')
+            with open(_cache_path, 'w') as _f:
+                json.dump({"date": today, "report": report}, _f, default=str)
+            logger.info(f"Morning report persisted → {_cache_path}")
+        except Exception as _pe:
+            logger.warning(f"Could not persist morning report: {_pe}")
+
+        logger.info("Morning Intelligence Report generated successfully")
+        return report
+
+    except Exception as e:
+        logger.error(f"Morning report generation failed: {e}")
+        with _MORNING_CACHE_LOCK:
+            _MORNING_CACHE["generating"] = False
+        return {}
+
+
+def _maybe_trigger_morning_report():
+    """Generate morning report if not done today and time is ≥ 09:00 IST."""
+    now = datetime.now(IST)
+    today = now.strftime("%Y-%m-%d")
+    with _MORNING_CACHE_LOCK:
+        cached_date = _MORNING_CACHE["date"]
+        generating  = _MORNING_CACHE["generating"]
+    if cached_date == today or generating:
+        return
+    if now.hour >= 9:  # generate from 9:00 AM onwards
+        t = threading.Thread(target=_generate_morning_report, daemon=True)
+        t.start()
 
 SECTOR_MAP = {
     "RELIANCE": "Energy/Oil",
@@ -191,6 +856,7 @@ tr:last-child td{border:none}
 <!-- TAB NAV -->
 <div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px" class="flex gap-2">
   <button class="tab-btn active" onclick="switchTab('dashboard',this)">🏠 Dashboard</button>
+  <button class="tab-btn" onclick="switchTab('morning',this)" id="morning-tab-btn">🌅 Morning Intel</button>
   <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
   <button class="tab-btn" onclick="switchTab('positions',this)">📋 Positions</button>
   <button class="tab-btn" onclick="switchTab('history',this)">🕒 History</button>
@@ -199,9 +865,143 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
+  <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
+  <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
+
+<!-- ===== TAB: MORNING INTELLIGENCE ===== -->
+<div id="tab-morning" class="tab-content">
+
+  <!-- Header -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div>
+      <div style="font-size:20px;font-weight:800;color:#f9fafb">🌅 Morning Market Intelligence</div>
+      <div style="font-size:12px;color:#4b5563" id="mr-generated-at">Generated: —</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div id="mr-generating-badge" style="display:none;font-size:11px;color:#93c5fd;background:#1d4ed822;border:1px solid #3b82f644;padding:4px 10px;border-radius:6px">⏳ Generating…</div>
+      <button onclick="refreshMorningReport()" style="background:#1d4ed8;color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">↻ Regenerate</button>
+    </div>
+  </div>
+
+  <!-- Section 1: Market Overview -->
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+    <div class="card" style="text-align:center">
+      <div class="stat-label">Sentiment</div>
+      <div style="font-size:18px;font-weight:800" id="mr-sentiment">—</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="stat-label">NIFTY</div>
+      <div style="font-size:16px;font-weight:700" id="mr-nifty">—</div>
+      <div style="font-size:11px" id="mr-nifty-chg">—</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="stat-label">BANKNIFTY</div>
+      <div style="font-size:16px;font-weight:700" id="mr-bnf">—</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="stat-label">India VIX</div>
+      <div style="font-size:16px;font-weight:700" id="mr-vix">—</div>
+      <div style="font-size:11px" id="mr-vix-label">—</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="stat-label">Market Regime</div>
+      <div style="font-size:16px;font-weight:700" id="mr-regime">—</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+
+    <!-- Section 2: Sector Strength -->
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">📊 Sector Strength</div>
+      <div id="mr-sectors" style="font-size:13px">—</div>
+    </div>
+
+    <!-- Section 9: Trading Plan -->
+    <div class="card" style="border:1px solid #1d4ed855">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">📋 Today's Trading Plan</div>
+      <div id="mr-plan">—</div>
+    </div>
+
+  </div>
+
+  <!-- Section 3+4: Gainers + Gap-Up -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">🚀 Top Gainers (Pre-Market)</div>
+      <table style="width:100%;border-collapse:collapse" id="mr-gainers-tbl">
+        <thead><tr>
+          <th style="text-align:left;font-size:11px">Symbol</th>
+          <th style="font-size:11px">Chg%</th>
+          <th style="font-size:11px;text-align:left">Sector</th>
+          <th style="text-align:right;font-size:11px">Price</th>
+        </tr></thead>
+        <tbody id="mr-gainers"><tr><td colspan="4" style="color:#4b5563;padding:10px;text-align:center">—</td></tr></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">⬆️ Gap-Up Stocks <span style="font-size:10px;font-weight:400;color:#4b5563">(gap ≥ 1.5%, vol filter)</span></div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="text-align:left;font-size:11px">Symbol</th>
+          <th style="font-size:11px">Gap%</th>
+          <th style="font-size:11px;text-align:left">Sector</th>
+          <th style="text-align:right;font-size:11px">Price</th>
+        </tr></thead>
+        <tbody id="mr-gapup"><tr><td colspan="4" style="color:#4b5563;padding:10px;text-align:center">—</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section 5+6: Delivery Volume + Strong News -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">📦 High Volume / Institutional Interest</div>
+      <div id="mr-delivery">—</div>
+    </div>
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">📰 Strong News Catalysts</div>
+      <div id="mr-news">—</div>
+    </div>
+  </div>
+
+  <!-- Section 7: AI Top Picks -->
+  <div class="card mb-4" style="border:1px solid #22c55e44">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-size:14px;font-weight:800;color:#22c55e">🎯 AI Top Picks for Today</div>
+      <div style="font-size:11px;color:#4b5563">Sector-diversified · max 3 per sector</div>
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="font-size:11px;text-align:center;width:30px">#</th>
+        <th style="font-size:11px;text-align:left">Symbol</th>
+        <th style="font-size:11px;text-align:center">Score</th>
+        <th style="font-size:11px;text-align:center">Conf.</th>
+        <th style="font-size:11px;text-align:left">Sector</th>
+        <th style="font-size:11px;text-align:right">Entry</th>
+        <th style="font-size:11px;text-align:right">Target</th>
+        <th style="font-size:11px;text-align:right">SL</th>
+        <th style="font-size:11px;text-align:center">R:R</th>
+        <th style="font-size:11px;text-align:center">Exp.Ret</th>
+        <th style="font-size:11px;text-align:left">Reason</th>
+      </tr></thead>
+      <tbody id="mr-picks"><tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">—</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Section 8: Stocks to Avoid -->
+  <div class="card" style="border:1px solid #ef444444">
+    <div style="font-size:13px;font-weight:700;color:#ef4444;margin-bottom:10px">🚫 Stocks to Avoid Today</div>
+    <div id="mr-avoid">—</div>
+  </div>
+
+</div><!-- /tab-morning -->
+
 
 <!-- ===== TAB: DASHBOARD ===== -->
 <div id="tab-dashboard" class="tab-content active">
@@ -510,36 +1310,84 @@ tr:last-child td{border:none}
 <!-- ===== TAB: AI SIGNALS ===== -->
 <div id="tab-signals" class="tab-content">
 
+  <!-- Stats bar -->
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Stocks Scanned</div><div class="stat-value blue" id="s-scanned">—</div></div>
-    <div class="card"><div class="stat-label">AI Signals</div><div class="stat-value yellow" id="s-signals-cnt">—</div></div>
-    <div class="card"><div class="stat-label">BUY Signals</div><div class="stat-value green" id="s-buy-cnt">—</div></div>
-    <div class="card"><div class="stat-label">Market Regime</div><div class="stat-value" id="s-regime">—</div></div>
+    <div class="card"><div class="stat-label">Universe Scanned</div><div class="stat-value blue" id="s-scanned">—</div></div>
+    <div class="card"><div class="stat-label">Actionable Buys</div><div class="stat-value green" id="s-buy-cnt">—</div></div>
+    <div class="card"><div class="stat-label">Rejected</div><div class="stat-value red" id="s-rejected-cnt">—</div></div>
+    <div class="card"><div class="stat-label">Market Regime</div><div class="stat-value yellow" id="s-regime">—</div></div>
   </div>
 
-  <!-- Ranked Opportunities -->
+  <!-- Scan status banner -->
+  <div id="s-scan-banner" style="display:none;background:#1d4ed822;border:1px solid #3b82f644;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#93c5fd">
+    ⏳ Background scan running — results will update automatically in a few minutes…
+  </div>
+
+  <!-- ── TODAY'S CANDIDATES ─────────────────────────────────────── -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">📈 All Scanned Signals</div>
-    <div style="font-size:11px;color:#4b5563;margin-bottom:12px">Bot only buys signals where Action=BUY and the full 5-gate pipeline passes (score≥70, MTF aligned, R:R≥1.5, no negative news, capital available). SELL signals are <b>not</b> short-sells — they just mean the bot won’t buy that stock.</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div style="font-size:14px;font-weight:700;color:#f9fafb">🎯 Today's Candidates</div>
+      <div style="font-size:11px;color:#4b5563" id="s-candidate-count">—</div>
+    </div>
+    <div style="font-size:11px;color:#4b5563;margin-bottom:14px">
+      Stocks that passed all filters: Score ≥ 70 · R:R ≥ 1.5 · Confidence ≥ threshold · Not already held
+    </div>
+    <div id="s-candidates-empty" style="display:none;text-align:center;padding:32px;color:#4b5563;font-size:13px">
+      No actionable candidates right now — scan running or market sideways
+    </div>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
+    <table style="width:100%;border-collapse:collapse" id="s-candidates-table-wrap">
       <thead><tr>
-        <th style="text-align:left">Stock</th><th>Action</th><th>Score</th><th>Trend</th>
-        <th>Entry</th><th>Target</th><th>SL</th><th>R:R</th><th>Confidence</th><th>Bot Decision</th>
+        <th style="text-align:center;width:36px;color:#4b5563;font-size:11px">#</th>
+        <th style="text-align:left">Symbol</th>
+        <th style="text-align:center">Score</th>
+        <th style="text-align:center">Conf.</th>
+        <th style="text-align:center">R:R</th>
+        <th style="text-align:left">Trend</th>
+        <th style="text-align:left">Sector</th>
+        <th style="text-align:right">Entry</th>
+        <th style="text-align:right">Target</th>
+        <th style="text-align:right">SL</th>
+        <th style="text-align:left">Why</th>
       </tr></thead>
-      <tbody id="s-signals-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Scanning market...</td></tr></tbody>
+      <tbody id="s-candidates-body">
+        <tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">Scanning market…</td></tr>
+      </tbody>
     </table>
     </div>
   </div>
 
-  <!-- AI Confidence Meter -->
+  <!-- ── REJECTED STOCKS ────────────────────────────────────────── -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🧠 AI Confidence Meter</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleRejected()">
+      <div style="font-size:14px;font-weight:700;color:#9ca3af">🚫 Rejected Stocks <span id="s-rejected-badge" style="font-size:11px;font-weight:400;color:#4b5563"></span></div>
+      <div id="s-rejected-chevron" style="color:#4b5563;font-size:16px;transition:transform .2s">▼</div>
+    </div>
+    <div id="s-rejected-body" style="margin-top:12px;display:none">
+      <div style="font-size:11px;color:#4b5563;margin-bottom:10px">These stocks were scanned but did not pass one or more filters. Click a row to see details.</div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="text-align:left">Symbol</th>
+          <th style="text-align:left">Sector</th>
+          <th style="text-align:center">Score</th>
+          <th style="text-align:center">Conf.</th>
+          <th style="text-align:left">Rejection Reason</th>
+        </tr></thead>
+        <tbody id="s-rejected-table">
+          <tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── AI CONFIDENCE METERS (top candidates) ──────────────────── -->
+  <div class="card">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🧠 AI Confidence — Top Picks</div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div id="s-conf-meters"></div>
-      <div class="col-span-2">
+      <div style="grid-column:span 2">
         <div style="font-size:12px;color:#4b5563;margin-bottom:8px">Top Opportunity Details</div>
-        <div id="s-top-detail" style="font-size:13px;color:#9ca3af">Select a signal to see details</div>
+        <div id="s-top-detail" style="font-size:13px;color:#9ca3af">—</div>
       </div>
     </div>
   </div>
@@ -798,6 +1646,282 @@ tr:last-child td{border:none}
 
 </div><!-- /tab-botstatus -->
 
+<!-- ═══ IP STATUS TAB ═══════════════════════════════════════════════════════ -->
+<div id="tab-ipstatus" class="tab-content">
+  <div style="max-width:920px;margin:0 auto;padding:8px 0">
+
+    <!-- ── Status Banner ─────────────────────────────────────────────────── -->
+    <div id="ip-banner" style="border-radius:12px;padding:20px 24px;margin-bottom:20px;background:#1e293b;border:2px solid #334155;display:flex;align-items:center;gap:16px">
+      <div id="ip-banner-icon" style="font-size:36px">🔄</div>
+      <div style="flex:1">
+        <div id="ip-banner-title" style="font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:4px">Checking Network Status…</div>
+        <div id="ip-banner-sub" style="font-size:13px;color:#94a3b8">Please wait</div>
+      </div>
+      <div style="text-align:right">
+        <div style="color:#64748b;font-size:11px;margin-bottom:6px">TRADING STATUS</div>
+        <div id="ip-trading-status" style="font-size:15px;font-weight:800;letter-spacing:.03em">—</div>
+      </div>
+      <button onclick="refreshIpStatus()" style="background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap">🔄 Refresh</button>
+    </div>
+
+    <!-- ── 6-Card Grid ───────────────────────────────────────────────────── -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px">
+
+      <!-- Current Public IPv4 -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Current Public IPv4</div>
+        <div id="ip-current" style="font-size:20px;font-weight:700;color:#f1f5f9;font-family:monospace;word-break:break-all">—</div>
+        <div id="ip-current-status" style="font-size:12px;margin-top:6px"></div>
+        <div id="ip-verified-at" style="font-size:11px;color:#475569;margin-top:3px"></div>
+      </div>
+
+      <!-- Current Public IPv6 -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Current Public IPv6</div>
+        <div id="ip-v6" style="font-size:14px;font-weight:600;color:#94a3b8;font-family:monospace;word-break:break-all">—</div>
+        <div style="font-size:11px;color:#475569;margin-top:6px">Not used by Kite (IPv4 only)</div>
+      </div>
+
+      <!-- Kite Resolution -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Kite Resolution</div>
+        <div id="ip-kite-res" style="font-size:20px;font-weight:700;color:#22c55e">—</div>
+        <div style="font-size:11px;color:#475569;margin-top:6px">api.kite.trade → AF_INET</div>
+      </div>
+
+      <!-- Network -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Network</div>
+        <div id="ip-network" style="font-size:20px;font-weight:700;color:#60a5fa">—</div>
+        <div id="ip-latency" style="font-size:11px;color:#475569;margin-top:6px">Kite latency: —</div>
+      </div>
+
+      <!-- Last Successful Order -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Last Successful Order</div>
+        <div id="ip-last-order" style="font-size:16px;font-weight:700;color:#f1f5f9;font-family:monospace">—</div>
+        <div style="font-size:11px;color:#475569;margin-top:6px">From trade journal</div>
+      </div>
+
+      <!-- Last Successful API Call -->
+      <div style="background:#1e293b;border-radius:12px;padding:18px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Last Successful API Call</div>
+        <div id="ip-last-api" style="font-size:16px;font-weight:700;color:#f1f5f9;font-family:monospace">—</div>
+        <div style="font-size:11px;color:#475569;margin-top:6px">Heartbeat check</div>
+      </div>
+
+    </div><!-- /6-card grid -->
+
+    <!-- ── IP Changed Alert Box ──────────────────────────────────────────── -->
+    <div id="ip-action-box" style="background:#1a1206;border-radius:12px;padding:22px;border:2px solid #f59e0b;margin-bottom:20px;display:none">
+      <div style="font-size:16px;font-weight:700;color:#f59e0b;margin-bottom:6px">⚠️ Public IPv4 Changed — Orders May Fail!</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0">
+        <div style="background:#0f172a;border-radius:8px;padding:14px">
+          <div style="color:#64748b;font-size:11px;margin-bottom:4px">OLD (whitelisted)</div>
+          <div id="ip-action-old" style="color:#ef4444;font-size:18px;font-weight:700;font-family:monospace"></div>
+        </div>
+        <div style="background:#0f172a;border-radius:8px;padding:14px">
+          <div style="color:#64748b;font-size:11px;margin-bottom:4px">NEW (current)</div>
+          <div id="ip-action-new" style="color:#34d399;font-size:18px;font-weight:700;font-family:monospace"></div>
+        </div>
+      </div>
+      <div style="font-size:13px;color:#cbd5e1;margin-bottom:16px">Add the new IP to Kite Developer Console → all orders will resume automatically.</div>
+      <a href="https://developers.kite.trade/apps" target="_blank"
+         style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
+        🔗 Open Kite Console &rarr;
+      </a>
+      <div style="font-size:11px;color:#64748b;margin-top:12px">After whitelisting → click Refresh above to confirm.</div>
+    </div>
+
+    <!-- ── Instructions ──────────────────────────────────────────────────── -->
+    <div style="background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:14px">📋 How to Update IP in Kite (30 seconds)</div>
+      <ol style="color:#94a3b8;font-size:13px;line-height:2.2;padding-left:20px;margin:0">
+        <li>Click <b style="color:#f59e0b">Open Kite Console</b> in the alert box above</li>
+        <li>Click your app name → <b style="color:#f1f5f9">Edit</b></li>
+        <li>In <b style="color:#f1f5f9">IP Whitelist</b>, remove old IP, paste new IP, press <b style="color:#f1f5f9">Enter</b></li>
+        <li>Click <b style="color:#34d399">Save</b></li>
+        <li>Come back here → click <b style="color:#3b82f6">Refresh</b></li>
+      </ol>
+      <div style="margin-top:14px;padding:12px;background:#0f172a;border-radius:8px;font-size:12px;color:#64748b">
+        💡 <b style="color:#94a3b8">Why does IP change?</b> Your ISP assigns a dynamic IP — it can change on router restart or randomly. Consider asking your ISP for a static IP to avoid this permanently.
+      </div>
+    </div>
+
+    <!-- ── History Table ─────────────────────────────────────────────────── -->
+    <div style="background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155">
+      <div style="font-size:12px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">IP Change History</div>
+      <div id="ip-history" style="font-size:13px;color:#64748b">Loading…</div>
+    </div>
+
+  </div>
+</div><!-- /tab-ipstatus -->
+
+<!-- ═══ BACKTEST TAB ════════════════════════════════════════════════════════ -->
+<div id="tab-backtest" class="tab-content">
+  <div style="max-width:1100px;margin:0 auto;padding:12px 0">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <div style="font-size:22px;font-weight:700;color:#f1f5f9">📈 Backtesting Engine</div>
+        <div style="font-size:13px;color:#64748b;margin-top:4px">Replay live signal logic on historical Kite OHLCV data — no external data sources</div>
+      </div>
+      <div id="bt-status-badge" style="font-size:12px;color:#64748b;background:#1e293b;padding:6px 14px;border-radius:20px">Idle</div>
+    </div>
+
+    <!-- Controls -->
+    <div style="background:#1e293b;border-radius:12px;padding:20px;margin-bottom:20px;border:1px solid #334155">
+      <div style="display:grid;grid-template-columns:1fr 160px 160px;gap:16px;align-items:end">
+        <div>
+          <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Symbols (comma-separated)</div>
+          <input id="bt-symbols" type="text" placeholder="RELIANCE,INFY,TCS,HDFCBANK,ICICIBANK"
+            style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:13px;font-family:monospace;box-sizing:border-box">
+        </div>
+        <div>
+          <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Look-back</div>
+          <select id="bt-years" style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:13px">
+            <option value="1">1 Year</option>
+            <option value="2" selected>2 Years</option>
+            <option value="3">3 Years</option>
+            <option value="5">5 Years</option>
+          </select>
+        </div>
+        <div>
+          <button id="bt-run-btn" onclick="runBacktest()"
+            style="width:100%;background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer">
+            ▶ Run Backtest
+          </button>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <div style="color:#94a3b8;font-size:11px;margin-bottom:4px">Quick sets:</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button onclick="btQuick('RELIANCE,INFY,TCS,HDFCBANK,ICICIBANK,WIPRO,HDFC,AXISBANK,BAJFINANCE,KOTAKBANK')" style="background:#1a2744;border:1px solid #334155;color:#93c5fd;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer">Nifty Large-cap 10</button>
+          <button onclick="btQuick('BEL,ANDHRSUGAR,BRIGADE,METROPOLIS,RELIANCE,KALYANKJIL,IFGLEXPOR')" style="background:#1a2744;border:1px solid #334155;color:#93c5fd;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer">My Current Holdings</button>
+          <button onclick="btQuick('TATAMOTORS,BAJAJ-AUTO,MARUTI,HEROMOTOCO,EICHERMOT,TATASTEEL,JSWSTEEL,HINDALCO,VEDL,SAIL')" style="background:#1a2744;border:1px solid #334155;color:#93c5fd;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer">Auto + Metals</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Progress bar (hidden until run) -->
+    <div id="bt-progress-wrap" style="display:none;margin-bottom:20px">
+      <div style="color:#94a3b8;font-size:12px;margin-bottom:6px" id="bt-progress-msg">Fetching data…</div>
+      <div style="background:#1e293b;border-radius:4px;height:8px">
+        <div id="bt-progress-bar" style="background:#3b82f6;height:8px;border-radius:4px;width:0%;transition:width .3s"></div>
+      </div>
+    </div>
+
+    <!-- Summary cards (hidden until result) -->
+    <div id="bt-summary" style="display:none">
+
+      <!-- KPI row 1 -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px">
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">CAGR</div>
+          <div id="bt-cagr" style="font-size:26px;font-weight:800;margin-top:6px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Win Rate</div>
+          <div id="bt-winrate" style="font-size:26px;font-weight:800;margin-top:6px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Max Drawdown</div>
+          <div id="bt-mdd" style="font-size:26px;font-weight:800;margin-top:6px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Profit Factor</div>
+          <div id="bt-pf" style="font-size:26px;font-weight:800;margin-top:6px">—</div>
+        </div>
+      </div>
+
+      <!-- KPI row 2 -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+        <div style="background:#1e293b;border-radius:10px;padding:14px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Sharpe</div>
+          <div id="bt-sharpe" style="font-size:20px;font-weight:700;color:#f1f5f9;margin-top:4px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:14px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Sortino</div>
+          <div id="bt-sortino" style="font-size:20px;font-weight:700;color:#f1f5f9;margin-top:4px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:14px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Avg Hold Days</div>
+          <div id="bt-hold" style="font-size:20px;font-weight:700;color:#f1f5f9;margin-top:4px">—</div>
+        </div>
+        <div style="background:#1e293b;border-radius:10px;padding:14px;border:1px solid #334155;text-align:center">
+          <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em">Total Trades</div>
+          <div id="bt-trades" style="font-size:20px;font-weight:700;color:#f1f5f9;margin-top:4px">—</div>
+        </div>
+      </div>
+
+      <!-- Capital summary -->
+      <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;margin-bottom:20px;display:flex;gap:32px;align-items:center">
+        <div><div style="color:#64748b;font-size:11px">Initial Capital</div><div id="bt-initial" style="font-size:16px;font-weight:700;color:#f1f5f9;font-family:monospace">—</div></div>
+        <div style="font-size:24px;color:#334155">→</div>
+        <div><div style="color:#64748b;font-size:11px">Final Capital</div><div id="bt-final" style="font-size:16px;font-weight:700;font-family:monospace">—</div></div>
+        <div style="margin-left:auto"><div style="color:#64748b;font-size:11px">Total P&amp;L</div><div id="bt-pnl" style="font-size:20px;font-weight:800;font-family:monospace">—</div></div>
+        <div><div style="color:#64748b;font-size:11px">Period</div><div id="bt-period" style="font-size:13px;color:#94a3b8">—</div></div>
+      </div>
+
+      <!-- Equity curve chart -->
+      <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155;margin-bottom:20px">
+        <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:12px">Equity Curve</div>
+        <canvas id="bt-equity-chart" height="80"></canvas>
+      </div>
+
+      <!-- Breakdown grids -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px">
+
+        <!-- By Regime -->
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155">
+          <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:10px">By Market Regime</div>
+          <div id="bt-by-regime"></div>
+        </div>
+
+        <!-- By Confidence -->
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155">
+          <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:10px">By Confidence Bucket</div>
+          <div id="bt-by-conf"></div>
+        </div>
+
+        <!-- By Exit Reason -->
+        <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155">
+          <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:10px">By Exit Reason</div>
+          <div id="bt-by-exit"></div>
+        </div>
+      </div>
+
+      <!-- Trade log -->
+      <div style="background:#1e293b;border-radius:10px;padding:16px;border:1px solid #334155">
+        <div style="color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:10px">All Simulated Trades</div>
+        <div style="overflow-x:auto;max-height:340px;overflow-y:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="color:#64748b;font-size:10px;text-transform:uppercase;position:sticky;top:0;background:#1e293b">
+              <th style="text-align:left;padding:5px 8px">Symbol</th>
+              <th style="text-align:left;padding:5px 8px">Entry</th>
+              <th style="text-align:left;padding:5px 8px">Exit</th>
+              <th style="text-align:right;padding:5px 8px">Entry ₹</th>
+              <th style="text-align:right;padding:5px 8px">Exit ₹</th>
+              <th style="text-align:right;padding:5px 8px">P&amp;L ₹</th>
+              <th style="text-align:right;padding:5px 8px">P&amp;L %</th>
+              <th style="text-align:right;padding:5px 8px">Days</th>
+              <th style="text-align:left;padding:5px 8px">Regime</th>
+              <th style="text-align:left;padding:5px 8px">Exit Reason</th>
+            </tr></thead>
+            <tbody id="bt-trade-log"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div><!-- /bt-summary -->
+
+    <!-- Error box -->
+    <div id="bt-error" style="display:none;background:#1a0f0f;border:1px solid #ef4444;border-radius:10px;padding:16px;color:#ef4444;font-size:13px"></div>
+
+  </div>
+</div><!-- /tab-backtest -->
+
 </div><!-- /main container -->
 
 <script>
@@ -808,11 +1932,195 @@ function pnlStr(v){let n=parseFloat(v||0);return (n>=0?'+':'')+rupee(Math.abs(n)
 function pnlClass(v){return parseFloat(v)>=0?'green':'red';}
 function scoreColor(s){if(s>=80)return '#22c55e';if(s>=60)return '#eab308';return '#ef4444';}
 function riskLabel(rr){if(rr>=2)return '<span class="green">Low</span>';if(rr>=1)return '<span class="yellow">Medium</span>';return '<span class="red">High</span>';}
+function toggleRejected(){
+  const body=document.getElementById('s-rejected-body');
+  const chev=document.getElementById('s-rejected-chevron');
+  if(!body) return;
+  const open=body.style.display!=='none';
+  body.style.display=open?'none':'block';
+  if(chev) chev.style.transform=open?'':'rotate(180deg)';
+}
 function switchTab(id,btn){
-  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>{t.classList.remove('active');t.style.display=''});
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  document.getElementById('tab-'+id).classList.add('active');
+  const tabEl=document.getElementById('tab-'+id);
+  if(tabEl){tabEl.classList.add('active');tabEl.style.display='block';}
   btn.classList.add('active');
+  if(id==='ipstatus') refreshIpStatus();
+  if(id==='morning') loadMorningReport();
+}
+
+// ── Morning Intelligence Report ───────────────────────────────────────────────
+async function loadMorningReport(){
+  try{
+    const r=await fetch('/api/morning-report');
+    const d=await r.json();
+    renderMorningReport(d);
+  }catch(e){console.error('Morning report load error:',e);}
+}
+
+async function refreshMorningReport(){
+  document.getElementById('mr-generating-badge').style.display='inline-block';
+  try{
+    await fetch('/api/morning-report/refresh',{method:'POST'});
+    // Poll every 10s until done
+    const poll=setInterval(async()=>{
+      const r=await fetch('/api/morning-report');
+      const d=await r.json();
+      if(!d.generating){
+        clearInterval(poll);
+        renderMorningReport(d);
+        document.getElementById('mr-generating-badge').style.display='none';
+      }
+    },10000);
+  }catch(e){document.getElementById('mr-generating-badge').style.display='none';}
+}
+
+function renderMorningReport(d){
+  const rpt=d.report||{};
+  const generating=d.generating;
+
+  const badge=document.getElementById('mr-generating-badge');
+  if(badge) badge.style.display=generating?'inline-block':'none';
+
+  const genAt=document.getElementById('mr-generated-at');
+  if(genAt){
+    if(generating) genAt.textContent='Generating… this takes 3–5 min';
+    else if(rpt.generated_at) genAt.textContent='Generated: '+new Date(rpt.generated_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+  }
+
+  // 1. Market Overview
+  const mo=rpt.market_overview||{};
+  const setT=(id,txt,cls)=>{const el=document.getElementById(id);if(el){el.textContent=txt||'—';if(cls)el.className=cls;}};
+  const sent=mo.sentiment||'Neutral';
+  const sentEl=document.getElementById('mr-sentiment');
+  if(sentEl){sentEl.textContent=sent;sentEl.style.color=sent==='Bullish'?'#22c55e':sent==='Bearish'?'#ef4444':'#eab308';}
+  setT('mr-nifty', mo.nifty?mo.nifty.toLocaleString('en-IN'):'—');
+  const nchgEl=document.getElementById('mr-nifty-chg');
+  if(nchgEl&&mo.nifty_chg!==undefined){const c=parseFloat(mo.nifty_chg||0);nchgEl.textContent=(c>=0?'+':'')+c.toFixed(2)+'%';nchgEl.style.color=c>=0?'#22c55e':'#ef4444';}
+  const bnfEl=document.getElementById('mr-bnf');
+  if(bnfEl&&mo.banknifty_chg!==undefined){const c=parseFloat(mo.banknifty_chg||0);bnfEl.textContent=(c>=0?'+':'')+c.toFixed(2)+'%';bnfEl.style.color=c>=0?'#22c55e':'#ef4444';}
+  const vixEl=document.getElementById('mr-vix');
+  if(vixEl){vixEl.textContent=mo.vix||'—';vixEl.style.color=mo.vix_label==='LOW'?'#22c55e':mo.vix_label==='HIGH'?'#ef4444':'#eab308';}
+  setT('mr-vix-label', mo.vix_label||'—');
+  const regEl=document.getElementById('mr-regime');
+  if(regEl){regEl.textContent=mo.regime||'—';regEl.style.color=mo.regime==='BULL'?'#22c55e':mo.regime==='BEAR'?'#ef4444':'#eab308';}
+
+  // 2. Sectors
+  const secEl=document.getElementById('mr-sectors');
+  if(secEl){
+    const secs=rpt.sector_strength||[];
+    if(secs.length){
+      secEl.innerHTML=secs.map(s=>{
+        const clr=s.change_pct>0?'#22c55e':'#ef4444';
+        const bg=s.change_pct>0?'#16a34a18':'#dc262618';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;margin-bottom:4px;background:${bg};border-radius:5px">
+          <span style="font-weight:600;color:#f9fafb;font-size:13px">${s.sector}</span>
+          <span style="color:${clr};font-weight:700;font-size:13px">${s.direction} ${s.change_pct>0?'+':''}${s.change_pct}%</span>
+        </div>`;
+      }).join('');
+    } else {secEl.innerHTML='<span style="color:#4b5563">Calculating…</span>';}
+  }
+
+  // 9. Trading Plan
+  const planEl=document.getElementById('mr-plan');
+  if(planEl){
+    const p=rpt.trading_plan||{};
+    if(p.regime){
+      const modeClr=p.risk_mode==='Aggressive'?'#22c55e':p.risk_mode==='Defensive'?'#ef4444':'#eab308';
+      planEl.innerHTML=`
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+          <div class="card-sm"><div class="stat-label">Market Regime</div><b style="color:${p.regime==='BULL'?'#22c55e':p.regime==='BEAR'?'#ef4444':'#eab308'}">${p.regime}</b></div>
+          <div class="card-sm"><div class="stat-label">Risk Mode</div><b style="color:${modeClr}">${p.risk_mode}</b></div>
+          <div class="card-sm"><div class="stat-label">Expected Trades</div><b>${p.expected_trades}</b></div>
+          <div class="card-sm"><div class="stat-label">India VIX</div><b>${p.vix||'—'}</b></div>
+        </div>
+        ${p.preferred_sectors&&p.preferred_sectors.length?`<div style="margin-bottom:6px"><span style="color:#4b5563;font-size:11px">✅ Preferred Sectors: </span><b style="color:#22c55e;font-size:12px">${p.preferred_sectors.join(' · ')}</b></div>`:''}
+        ${p.avoid_sectors&&p.avoid_sectors.length?`<div style="margin-bottom:6px"><span style="color:#4b5563;font-size:11px">❌ Avoid: </span><b style="color:#ef4444;font-size:12px">${p.avoid_sectors.join(' · ')}</b></div>`:''}
+        <div style="font-size:12px;color:#6b7280;border-top:1px solid #1f2937;padding-top:8px;margin-top:4px">${p.note||''}</div>`;
+    } else {planEl.innerHTML='<span style="color:#4b5563">Generating…</span>';}
+  }
+
+  // 3. Gainers
+  const gainEl=document.getElementById('mr-gainers');
+  if(gainEl){
+    const g=rpt.top_gainers||[];
+    gainEl.innerHTML=g.length?g.map(s=>`<tr style="border-bottom:1px solid #1f293744">
+      <td style="padding:5px 4px;font-weight:600;color:#f9fafb">${s.symbol}</td>
+      <td style="text-align:center;color:${s.change_pct>=0?'#22c55e':'#ef4444'};font-weight:700">${s.change_pct>=0?'+':''}${s.change_pct}%</td>
+      <td style="color:#6b7280;font-size:11px">${s.sector||'—'}</td>
+      <td style="text-align:right;font-family:monospace;font-size:12px">${rupee(s.price)}</td>
+    </tr>`).join(''):'<tr><td colspan="4" style="color:#4b5563;padding:12px;text-align:center">No data yet</td></tr>';
+  }
+
+  // 4. Gap-Up
+  const gapEl=document.getElementById('mr-gapup');
+  if(gapEl){
+    const g=rpt.gap_up_stocks||[];
+    gapEl.innerHTML=g.length?g.map(s=>`<tr style="border-bottom:1px solid #1f293744">
+      <td style="padding:5px 4px;font-weight:600;color:#f9fafb">${s.symbol}</td>
+      <td style="text-align:center;color:#22c55e;font-weight:700">+${s.gap_pct}%</td>
+      <td style="color:#6b7280;font-size:11px">${s.sector||'—'}</td>
+      <td style="text-align:right;font-family:monospace;font-size:12px">${rupee(s.price)}</td>
+    </tr>`).join(''):'<tr><td colspan="4" style="color:#4b5563;padding:12px;text-align:center">No gap-ups today (< 1.5%)</td></tr>';
+  }
+
+  // 5. Delivery Volume
+  const delEl=document.getElementById('mr-delivery');
+  if(delEl){
+    const items=rpt.delivery_volume||[];
+    delEl.innerHTML=items.length?items.map(s=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1f293744">
+        <div><b style="color:#f9fafb">${s.symbol}</b> <span style="color:#4b5563;font-size:11px">${s.sector||''}</span></div>
+        <div style="text-align:right"><div style="font-family:monospace;font-size:12px">${rupee(s.price)}</div><div style="font-size:10px;color:#6b7280">${(s.volume||0).toLocaleString('en-IN')} vol</div></div>
+      </div>`).join(''):'<span style="color:#4b5563;font-size:12px">No high-volume stocks detected</span>';
+  }
+
+  // 6. News
+  const newsEl=document.getElementById('mr-news');
+  if(newsEl){
+    const items=rpt.strong_news||[];
+    newsEl.innerHTML=items.length?items.map(s=>`
+      <div style="padding:7px 0;border-bottom:1px solid #1f293744">
+        <div style="display:flex;justify-content:space-between">
+          <b style="color:#f9fafb;font-size:13px">${s.symbol}</b>
+          <span style="font-size:11px;background:#16a34a22;color:#22c55e;padding:1px 6px;border-radius:3px">${s.sentiment} ${s.confidence}%</span>
+        </div>
+        <div style="color:#6b7280;font-size:11px;margin-top:2px">${s.headline||''}</div>
+      </div>`).join(''):'<span style="color:#4b5563;font-size:12px">No strong news catalysts today</span>';
+  }
+
+  // 7. AI Top Picks
+  const picksEl=document.getElementById('mr-picks');
+  if(picksEl){
+    const picks=rpt.ai_top_picks||[];
+    picksEl.innerHTML=picks.length?picks.map(p=>`<tr style="border-bottom:1px solid #1f2937">
+      <td style="text-align:center;color:#4b5563;font-size:11px;padding:8px 4px">${p.rank}</td>
+      <td style="padding:8px;font-weight:700;color:#f9fafb">${p.symbol}</td>
+      <td style="text-align:center;padding:8px 4px"><span style="background:${p.score>=80?'#16a34a33':'#ca8a0433'};color:${p.score>=80?'#22c55e':'#eab308'};padding:2px 7px;border-radius:4px;font-weight:700">${p.score}</span></td>
+      <td style="text-align:center;padding:8px 4px;color:${scoreColor(p.confidence)}">${p.confidence}%</td>
+      <td style="padding:8px 4px;color:#6b7280;font-size:11px">${p.sector||'—'}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px">${rupee(p.entry)}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px;color:#22c55e">${rupee(p.target)}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px;color:#ef4444">${rupee(p.stop_loss)}</td>
+      <td style="text-align:center;padding:8px 4px;font-weight:600;color:${p.rr>=2?'#22c55e':p.rr>=1.5?'#eab308':'#9ca3af'}">${p.rr}x</td>
+      <td style="text-align:center;padding:8px 4px;color:${p.exp_return>=5?'#22c55e':p.exp_return>=2?'#eab308':'#9ca3af'};font-weight:600">${p.exp_return>0?'+':''}${p.exp_return}%</td>
+      <td style="padding:8px 4px;color:#9ca3af;font-size:11px;max-width:160px">${p.reason||'—'}</td>
+    </tr>`).join(''):'<tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">AI analysis running…</td></tr>';
+  }
+
+  // 8. Avoid
+  const avoidEl=document.getElementById('mr-avoid');
+  if(avoidEl){
+    const items=rpt.stocks_to_avoid||[];
+    avoidEl.innerHTML=items.length?`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">`+
+      items.map(s=>`<div style="background:#dc262611;border:1px solid #ef444433;border-radius:6px;padding:8px 10px">
+        <div style="font-weight:700;color:#ef4444">${s.symbol} <span style="font-size:11px;font-weight:400;color:#6b7280">${rupee(s.price)}</span></div>
+        <div style="font-size:10px;color:#f87171;margin-top:2px">${s.reason||'Negative signal'}</div>
+        <div style="font-size:10px;color:#4b5563">${s.change_pct>=0?'+':''}${s.change_pct}% today · ${s.sector||''}</div>
+      </div>`).join('')+'</div>':
+      '<span style="color:#4b5563;font-size:12px">No stocks flagged for avoidance</span>';
+  }
 }
 
 function renderPositionsTab(d){
@@ -1183,7 +2491,11 @@ async function load(){
       if((d.open_positions||0)>(prevData.open_positions||0)) pushNotif('🟢','New position opened','#22c55e');
       if((d.open_positions||0)<(prevData.open_positions||0)) pushNotif('🏁','Position closed','#60a5fa');
       if((d.market_regime||'')!==(prevData.market_regime||'')) pushNotif('📊','Market regime changed to '+d.market_regime,'#eab308');
+      if(d.ip_changed && !prevData.ip_changed) pushNotif('⚠️','IP changed! Update Kite whitelist now','#f59e0b');
     }
+
+    // ── IP STATUS TAB ─────────────────────────────────────────────────────────
+    updateIpStatus(d);
 
     // ── TAB: PORTFOLIO ────────────────────────────────────────────────────────
     document.getElementById('p-account-balance').textContent=rupee(d.account_balance||0);
@@ -1318,58 +2630,118 @@ async function load(){
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
     const allSigs=d.signals||[];
-    const buySigs=allSigs.filter(s=>s.action==='BUY');
+    const minConf=d.cfg_min_confidence||0.60;
+
+    // Split into candidates (actionable) and rejected
+    const candidates=[];
+    const rejected=[];
+    allSigs.forEach(s=>{
+      const bd=s.bot_decision||'';
+      if(bd==='Will buy*') candidates.push(s);
+      else rejected.push(s);
+    });
+
+    // Stats
     document.getElementById('s-scanned').textContent=(d.stocks_scanned||allSigs.length||0);
-    document.getElementById('s-signals-cnt').textContent=allSigs.length;
-    document.getElementById('s-buy-cnt').textContent=buySigs.length;
+    document.getElementById('s-buy-cnt').textContent=candidates.length;
+    document.getElementById('s-rejected-cnt').textContent=rejected.length;
     const sRegEl=document.getElementById('s-regime');
     sRegEl.textContent=d.market_regime||'—';
     sRegEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
 
-    const stEl2=document.getElementById('s-signals-table');
-    if(allSigs.length){
-      const minConf=d.cfg_min_confidence||0.52;
-      stEl2.innerHTML=allSigs.map(s=>{
-        const sc=Math.round((s.confidence||0)*100);
-        const rr3=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
-        const trend2=s.trend||(sc>=70?'Bullish':sc>=50?'Neutral':'Bearish');
-        // Determine bot decision + reason
-        let botDecision;
-        if(s.action==='BUY'&&(s.confidence||0)>=minConf){
-          botDecision='<span style="color:#22c55e;font-weight:700;font-size:11px">✅ Will buy*</span>';
-        } else if(s.action==='SELL'){
-          botDecision='<span style="color:#ef4444;font-size:11px">❌ SELL signal — not buying</span>';
-        } else if(s.action==='BUY'&&(s.confidence||0)<minConf){
-          botDecision=`<span style="color:#eab308;font-size:11px">⚠️ Low confidence (${sc}% < ${Math.round(minConf*100)}%)</span>`;
-        } else {
-          botDecision='<span style="color:#4b5563;font-size:11px">HOLD — no action</span>';
-        }
-        const rowStyle=s.action==='SELL'?'opacity:0.55':'';
-        return `<tr style="${rowStyle}">
-          <td style="font-weight:700;color:#f9fafb">${s.symbol}</td>
-          <td><span class="badge ${s.action==='BUY'?'badge-buy':'badge-sell'}">${s.action}</span></td>
-          <td style="color:${scoreColor(sc)};font-weight:700">${sc}</td>
-          <td style="color:${sc>=70?'#22c55e':sc>=50?'#eab308':'#ef4444'}">${trend2}</td>
-          <td>${rupee(s.price)}</td>
-          <td class="green">${rupee(s.target)}</td>
-          <td class="red">${rupee(s.stop_loss)}</td>
-          <td>${rr3>0?rr3.toFixed(2):'—'}</td>
-          <td>
-            <div class="progress-bar" style="width:80px;display:inline-block">
-              <div class="progress-fill" style="width:${sc}%;background:${scoreColor(sc)}"></div>
-            </div>
-            <span style="font-size:11px;margin-left:4px">${sc}%</span>
+    // Scan banner
+    const bannerEl=document.getElementById('s-scan-banner');
+    if(bannerEl) bannerEl.style.display=d.scan_running?'block':'none';
+
+    // ── TODAY'S CANDIDATES TABLE ──
+    const candBody=document.getElementById('s-candidates-body');
+    const candCount=document.getElementById('s-candidate-count');
+    const candEmpty=document.getElementById('s-candidates-empty');
+    const candWrap=document.getElementById('s-candidates-table-wrap');
+
+    if(candidates.length){
+      candEmpty&&(candEmpty.style.display='none');
+      candWrap&&(candWrap.style.display='');
+      candCount&&(candCount.textContent=candidates.length+' actionable stock'+(candidates.length!==1?'s':''));
+      candBody.innerHTML=candidates.map((s,i)=>{
+        const score=Math.round(s.overall_score||0);
+        const conf=Math.round((s.confidence||0)*100);
+        const rr=parseFloat(s.risk_reward_ratio||0);
+        const sector=s.market_regime?'':(s.sector||'—');
+        // Extract sector from bot reasoning / signal
+        const sectorLabel=s.sector||'—';
+        const trend=s.trend||'—';
+        // Short reason from reasoning field
+        const reasoning=(s.reasoning||'').split('.')[0].replace(/based on/i,'').trim().substring(0,60)||'AI signal';
+        return `<tr style="border-bottom:1px solid #1f2937">
+          <td style="text-align:center;color:#4b5563;font-size:12px;padding:10px 4px">${i+1}</td>
+          <td style="padding:10px 8px">
+            <div style="font-weight:700;color:#f9fafb;font-size:14px">${s.symbol}</div>
           </td>
-          <td>${botDecision}</td>
+          <td style="text-align:center;padding:10px 6px">
+            <span style="background:${score>=80?'#16a34a33':score>=70?'#ca8a0433':'#4b556333'};color:${score>=80?'#22c55e':score>=70?'#eab308':'#9ca3af'};padding:2px 8px;border-radius:4px;font-weight:700;font-size:13px">${score}</span>
+          </td>
+          <td style="text-align:center;padding:10px 6px">
+            <div class="progress-bar" style="width:64px;display:inline-block;vertical-align:middle">
+              <div class="progress-fill" style="width:${conf}%;background:${scoreColor(conf)}"></div>
+            </div>
+            <span style="font-size:11px;color:${scoreColor(conf)};margin-left:4px">${conf}%</span>
+          </td>
+          <td style="text-align:center;padding:10px 6px;font-weight:600;color:${rr>=2?'#22c55e':rr>=1.5?'#eab308':'#9ca3af'}">${rr>0?rr.toFixed(1)+'x':'—'}</td>
+          <td style="padding:10px 6px;color:${trend==='UPTREND'||trend==='Bullish'?'#22c55e':trend==='DOWNTREND'||trend==='Bearish'?'#ef4444':'#eab308'};font-size:12px">${trend}</td>
+          <td style="padding:10px 6px;color:#6b7280;font-size:11px">${sectorLabel}</td>
+          <td style="text-align:right;padding:10px 6px;font-family:monospace">${rupee(s.price)}</td>
+          <td style="text-align:right;padding:10px 6px;color:#22c55e;font-family:monospace">${rupee(s.target)}</td>
+          <td style="text-align:right;padding:10px 6px;color:#ef4444;font-family:monospace">${rupee(s.stop_loss)}</td>
+          <td style="padding:10px 6px;color:#9ca3af;font-size:11px;max-width:180px">${reasoning}…</td>
+        </tr>`;
+      }).join('');
+    } else if(!d.scan_running){
+      candBody.innerHTML='';
+      candEmpty&&(candEmpty.style.display='');
+      candWrap&&(candWrap.style.display='none');
+      candCount&&(candCount.textContent='0 candidates');
+    } else {
+      candBody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">⏳ Scanning…</td></tr>';
+      candCount&&(candCount.textContent='Scanning…');
+    }
+
+    // ── REJECTED TABLE ──
+    const rejBody=document.getElementById('s-rejected-table');
+    const rejBadge=document.getElementById('s-rejected-badge');
+    if(rejBadge) rejBadge.textContent='('+rejected.length+')';
+    document.getElementById('s-rejected-cnt').textContent=rejected.length;
+    if(rejected.length){
+      rejBody.innerHTML=rejected.map(s=>{
+        const score=Math.round(s.overall_score||0);
+        const conf=Math.round((s.confidence||0)*100);
+        const bd=s.bot_decision||'—';
+        // Rejection reason → short label
+        let rejTag='';
+        if(bd.includes('Already held')) rejTag='<span style="background:#1d4ed822;color:#60a5fa;padding:2px 7px;border-radius:3px;font-size:10px">Already Held</span>';
+        else if(bd.includes('Max positions')) rejTag='<span style="background:#16a34a22;color:#4ade80;padding:2px 7px;border-radius:3px;font-size:10px">Max Positions</span>';
+        else if(bd.includes('Score')) rejTag='<span style="background:#4b556333;color:#9ca3af;padding:2px 7px;border-radius:3px;font-size:10px">Low Score</span>';
+        else if(bd.includes('R:R')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">Poor R:R</span>';
+        else if(bd.includes('Confidence')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">Low Confidence</span>';
+        else if(bd.includes('SELL')) rejTag='<span style="background:#dc262622;color:#ef4444;padding:2px 7px;border-radius:3px;font-size:10px">SELL Signal</span>';
+        else rejTag=`<span style="color:#4b5563;font-size:11px">${bd}</span>`;
+        const sectorLabel=s.sector||'—';
+        return `<tr style="border-bottom:1px solid #1f293766;opacity:0.75">
+          <td style="padding:7px 8px;font-weight:600;color:#9ca3af">${s.symbol}</td>
+          <td style="padding:7px 6px;color:#4b5563;font-size:11px">${sectorLabel}</td>
+          <td style="text-align:center;padding:7px 6px;color:${score>=70?'#eab308':'#4b5563'};font-size:12px">${score||'—'}</td>
+          <td style="text-align:center;padding:7px 6px;color:#4b5563;font-size:11px">${conf?conf+'%':'—'}</td>
+          <td style="padding:7px 6px">${rejTag}</td>
         </tr>`;
       }).join('');
     } else {
-      stEl2.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No signals yet — next scan in a few minutes</td></tr>';
+      rejBody.innerHTML='<tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">No rejections yet</td></tr>';
     }
 
-    // Confidence meters
+    // Confidence meters (top candidates only)
     const cmEl=document.getElementById('s-conf-meters');
-    cmEl.innerHTML=buySigs.slice(0,5).map(s=>{
+    const topPicks=candidates.slice(0,5);
+    cmEl.innerHTML=topPicks.map(s=>{
       const sc=Math.round((s.confidence||0)*100);
       return `<div style="margin-bottom:10px">
         <div class="flex justify-between" style="margin-bottom:3px">
@@ -1378,7 +2750,25 @@ async function load(){
         </div>
         <div class="progress-bar"><div class="progress-fill" style="width:${sc}%;background:${scoreColor(sc)}"></div></div>
       </div>`;
-    }).join('')||'<div style="color:#4b5563;font-size:13px">No BUY signals</div>';
+    }).join('')||'<div style="color:#4b5563;font-size:13px">No actionable picks yet</div>';
+
+    // Top detail panel
+    const topD=document.getElementById('s-top-detail');
+    if(candidates.length&&topD){
+      const t=candidates[0];
+      const score=Math.round(t.overall_score||0);
+      const conf=Math.round((t.confidence||0)*100);
+      topD.innerHTML=`<div style="font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:8px">${t.symbol} <span style="font-size:12px;font-weight:400;color:#4b5563">${t.sector||''}</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+          <div><span style="color:#4b5563;font-size:11px">Score</span><br><b style="color:${score>=80?'#22c55e':'#eab308'}">${score}/100</b></div>
+          <div><span style="color:#4b5563;font-size:11px">Confidence</span><br><b style="color:#93c5fd">${conf}%</b></div>
+          <div><span style="color:#4b5563;font-size:11px">Entry</span><br><b>${rupee(t.price)}</b></div>
+          <div><span style="color:#4b5563;font-size:11px">Target / SL</span><br><b class="green">${rupee(t.target)}</b> / <b class="red">${rupee(t.stop_loss)}</b></div>
+        </div>
+        <div style="font-size:11px;color:#6b7280;line-height:1.5">${(t.reasoning||'').substring(0,200)}…</div>`;
+    } else if(topD){
+      topD.innerHTML='<span style="color:#4b5563">No actionable signals yet</span>';
+    }
 
     // ── TAB: ANALYTICS ────────────────────────────────────────────────────────
     const strat=d.strategy_stats||{};
@@ -1631,6 +3021,350 @@ async function loadJournal(){
       jTbl.innerHTML='<tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No trades yet — journal will populate after the first order executes</td></tr>';
     }
   }catch(e){console.error('Journal error:',e);}
+}
+
+// ─── IP Status ────────────────────────────────────────────────────────────────
+function updateIpStatus(d){
+  const cur       = d.current_ip   || 'unknown';
+  const known     = d.known_ip     || 'unknown';
+  const changed   = !!d.ip_changed;
+  const ipv6      = d.current_ipv6 || 'Not available';
+  const netType   = d.network_type || '—';
+  const kiteRes   = d.kite_resolution || '—';
+  const lastOrder = d.last_order_time || '—';
+  const lastApi   = d.last_api_call  || '—';
+  const latency   = d.api_latency_ms || 0;
+  const status    = d.trading_status || '—';
+  const statusCol = d.trading_status_color || '#94a3b8';
+
+  // ── Tab button ────────────────────────────────────────────────────────────
+  const tabBtn = document.getElementById('ip-tab-btn');
+  if(tabBtn){
+    tabBtn.style.background = changed ? '#f59e0b' : '';
+    tabBtn.style.color      = changed ? '#000'    : '';
+    tabBtn.textContent      = changed ? '⚠️ IP Changed!' : '🌐 IP Status';
+  }
+
+  // ── Banner ────────────────────────────────────────────────────────────────
+  const banner     = document.getElementById('ip-banner');
+  const bannerIcon = document.getElementById('ip-banner-icon');
+  const bannerTitle= document.getElementById('ip-banner-title');
+  const bannerSub  = document.getElementById('ip-banner-sub');
+  if(banner){
+    if(changed){
+      banner.style.borderColor  = '#f59e0b';
+      banner.style.background   = '#292119';
+      bannerIcon.textContent    = '⚠️';
+      bannerTitle.textContent   = 'IP Changed — Orders May Be Blocked!';
+      bannerTitle.style.color   = '#f59e0b';
+      bannerSub.textContent     = 'Your public IP changed. Update Kite whitelist immediately.';
+    } else if(cur === 'unknown'){
+      banner.style.borderColor  = '#ef4444';
+      banner.style.background   = '#1a0f0f';
+      bannerIcon.textContent    = '❌';
+      bannerTitle.textContent   = 'Network Error — Cannot reach internet';
+      bannerTitle.style.color   = '#ef4444';
+      bannerSub.textContent     = 'Check your internet connection.';
+    } else {
+      banner.style.borderColor  = '#22c55e';
+      banner.style.background   = '#0f2318';
+      bannerIcon.textContent    = '✅';
+      bannerTitle.textContent   = 'Network OK — Orders are working';
+      bannerTitle.style.color   = '#22c55e';
+      bannerSub.textContent     = 'Current IP is whitelisted in Kite. No action needed.';
+    }
+  }
+
+  // ── Trading status badge ──────────────────────────────────────────────────
+  const tsEl = document.getElementById('ip-trading-status');
+  if(tsEl){ tsEl.textContent = status; tsEl.style.color = statusCol; }
+
+  // ── IPv4 card ─────────────────────────────────────────────────────────────
+  const elCur   = document.getElementById('ip-current');
+  const elCurSt = document.getElementById('ip-current-status');
+  if(elCur) elCur.textContent = cur;
+  if(elCurSt){
+    elCurSt.innerHTML = changed
+      ? '<span style="color:#f59e0b;font-weight:600">⚠️ NOT in Kite whitelist</span>'
+      : '<span style="color:#22c55e;font-weight:600">✅ Whitelisted (Verified)</span>';
+  }
+  const elVerified = document.getElementById('ip-verified-at');
+  if(elVerified && lastApi && lastApi !== '—'){
+    try{
+      const verTs = new Date(lastApi.replace(' ','T'));
+      const diffMin = Math.round((Date.now() - verTs.getTime()) / 60000);
+      const relStr = diffMin < 1 ? 'just now'
+        : diffMin === 1 ? '1 minute ago'
+        : diffMin < 60 ? `${diffMin} minutes ago`
+        : `${Math.round(diffMin/60)}h ago`;
+      elVerified.textContent = `Verified ${relStr} (${lastApi.slice(11,19)})`;
+    }catch(_){ elVerified.textContent = `Verified: ${lastApi}`; }
+  }
+
+  // ── IPv6 card ─────────────────────────────────────────────────────────────
+  const elV6 = document.getElementById('ip-v6');
+  if(elV6) elV6.textContent = ipv6;
+
+  // ── Kite resolution card ──────────────────────────────────────────────────
+  const elKiteRes = document.getElementById('ip-kite-res');
+  if(elKiteRes){
+    elKiteRes.textContent  = kiteRes;
+    elKiteRes.style.color  = kiteRes.includes('✅') ? '#22c55e' : '#f59e0b';
+  }
+
+  // ── Network card ──────────────────────────────────────────────────────────
+  const elNet = document.getElementById('ip-network');
+  const elLat = document.getElementById('ip-latency');
+  if(elNet) elNet.textContent = netType;
+  if(elLat) elLat.textContent = `Kite latency: ${latency ? latency.toFixed(0)+'ms' : '—'}`;
+
+  // ── Last order card ───────────────────────────────────────────────────────
+  const elOrder = document.getElementById('ip-last-order');
+  if(elOrder) elOrder.textContent = lastOrder;
+
+  // ── Last API call card ────────────────────────────────────────────────────
+  const elApi = document.getElementById('ip-last-api');
+  if(elApi) elApi.textContent = lastApi;
+
+  // ── Action box ────────────────────────────────────────────────────────────
+  const actionBox = document.getElementById('ip-action-box');
+  const actionOld = document.getElementById('ip-action-old');
+  const actionNew = document.getElementById('ip-action-new');
+  if(actionBox){
+    actionBox.style.display = changed ? 'block' : 'none';
+    if(actionOld) actionOld.textContent = known;
+    if(actionNew) actionNew.textContent = cur;
+  }
+
+  // ── History table ─────────────────────────────────────────────────────────
+  const hist   = d.ip_history || [];
+  const histEl = document.getElementById('ip-history');
+  if(histEl){
+    if(!hist.length){
+      histEl.innerHTML = '<div style="color:#4b5563">No history yet</div>';
+    } else {
+      histEl.innerHTML =
+        '<table style="width:100%;border-collapse:collapse">'
+        +'<tr style="color:#64748b;font-size:11px;text-transform:uppercase">'
+        +'<th style="text-align:left;padding:5px 8px">IP Address</th>'
+        +'<th style="text-align:left;padding:5px 8px">Detected At</th>'
+        +'<th style="text-align:left;padding:5px 8px">Network</th>'
+        +'<th style="text-align:left;padding:5px 8px">Event</th>'
+        +'</tr>'
+        + hist.map(h=>`<tr style="border-top:1px solid #1e293b">
+            <td style="padding:6px 8px;font-family:monospace;color:#f1f5f9">${h.ip}</td>
+            <td style="padding:6px 8px;color:#94a3b8">${h.detected_at||'—'}</td>
+            <td style="padding:6px 8px;color:#60a5fa">${h.network||'—'}</td>
+            <td style="padding:6px 8px">${h.changed
+              ? '<span style="color:#f59e0b">⚠️ Changed</span>'
+              : '<span style="color:#22c55e">✅ Same</span>'}</td>
+          </tr>`).join('')
+        +'</table>';
+    }
+  }
+
+  // ── Global top alert bar ──────────────────────────────────────────────────
+  let alertBar = document.getElementById('ip-alert-bar');
+  if(changed){
+    if(!alertBar){
+      alertBar = document.createElement('div');
+      alertBar.id = 'ip-alert-bar';
+      alertBar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f59e0b;color:#000;text-align:center;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;';
+      alertBar.onclick = ()=>{ switchTab('ipstatus', document.getElementById('ip-tab-btn')); alertBar.style.display='none'; };
+      document.body.prepend(alertBar);
+    }
+    alertBar.style.display = 'block';
+    alertBar.textContent = `⚠️ IP CHANGED: ${known} → ${cur} — Click here to update Kite whitelist or orders will FAIL`;
+  } else {
+    if(alertBar) alertBar.style.display = 'none';
+  }
+}
+
+async function refreshIpStatus(){
+  try{
+    const d=await fetch('/api/data').then(r=>r.json());
+    updateIpStatus(d);
+  }catch(e){ console.error('IP refresh error',e); }
+}
+
+// ─── Backtest ──────────────────────────────────────────────────────────────────
+let _btEquityChart = null;
+
+function btQuick(syms){ document.getElementById('bt-symbols').value = syms; }
+
+function _btBreakdownHtml(obj){
+  if(!obj || !Object.keys(obj).length) return '<div style="color:#475569;font-size:12px">No data</div>';
+  return Object.entries(obj).map(([k,v])=>`
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1e293b;font-size:12px">
+      <span style="color:#cbd5e1">${k}</span>
+      <span>
+        <span style="color:#94a3b8">${v.trades}t</span>
+        <span style="margin:0 6px;color:${v.win_rate>=0.5?'#22c55e':'#ef4444'}">${(v.win_rate*100).toFixed(0)}%</span>
+        <span style="color:${v.avg_pnl_pct>=0?'#22c55e':'#ef4444'};font-weight:600">${(v.avg_pnl_pct*100).toFixed(1)}%</span>
+      </span>
+    </div>`).join('');
+}
+
+async function runBacktest(){
+  const rawSyms = document.getElementById('bt-symbols').value.trim();
+  const years   = parseInt(document.getElementById('bt-years').value);
+  const symbols = rawSyms ? rawSyms.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean) : [];
+
+  const btn  = document.getElementById('bt-run-btn');
+  const prog = document.getElementById('bt-progress-wrap');
+  const bar  = document.getElementById('bt-progress-bar');
+  const msg  = document.getElementById('bt-progress-msg');
+  const summ = document.getElementById('bt-summary');
+  const errEl= document.getElementById('bt-error');
+
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+  prog.style.display = 'block';
+  summ.style.display = 'none';
+  errEl.style.display = 'none';
+  document.getElementById('bt-status-badge').textContent = 'Running…';
+  bar.style.width = '5%';
+
+  // Animate progress bar while waiting (server-side is synchronous)
+  let fakePct = 5;
+  const ticker = setInterval(()=>{
+    fakePct = Math.min(fakePct + 1.5, 90);
+    bar.style.width = fakePct + '%';
+    if(fakePct < 40) msg.textContent = 'Fetching historical data from Kite…';
+    else if(fakePct < 75) msg.textContent = 'Running signal simulation…';
+    else msg.textContent = 'Computing metrics…';
+  }, 800);
+
+  try {
+    const res = await fetch('/api/backtest', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({symbols, years})
+    });
+    const data = await res.json();
+    clearInterval(ticker);
+    bar.style.width = '100%';
+
+    if(data.error){
+      errEl.textContent = '❌ ' + data.error;
+      errEl.style.display = 'block';
+      document.getElementById('bt-status-badge').textContent = 'Error';
+    } else {
+      _btRenderResults(data);
+      summ.style.display = 'block';
+      document.getElementById('bt-status-badge').textContent = 'Complete ✅';
+    }
+  } catch(e){
+    clearInterval(ticker);
+    errEl.textContent = '❌ Network error: ' + e.message;
+    errEl.style.display = 'block';
+    document.getElementById('bt-status-badge').textContent = 'Error';
+  } finally {
+    btn.disabled = false; btn.textContent = '▶ Run Backtest';
+    setTimeout(()=>{ prog.style.display='none'; bar.style.width='0%'; }, 1500);
+  }
+}
+
+function _btRenderResults(data){
+  const s = data.summary || {};
+  const cagr    = (s.cagr||0)*100;
+  const mdd     = (s.max_drawdown||0)*100;
+  const wr      = (s.win_rate||0)*100;
+  const pf      = s.profit_factor||0;
+  const pnl     = s.total_pnl||0;
+
+  // KPIs
+  const cagrEl = document.getElementById('bt-cagr');
+  cagrEl.textContent = cagr.toFixed(1)+'%';
+  cagrEl.style.color = cagr>=0 ? '#22c55e' : '#ef4444';
+
+  const wrEl = document.getElementById('bt-winrate');
+  wrEl.textContent = wr.toFixed(1)+'%';
+  wrEl.style.color = wr>=50 ? '#22c55e' : '#f59e0b';
+
+  const mddEl = document.getElementById('bt-mdd');
+  mddEl.textContent = mdd.toFixed(1)+'%';
+  mddEl.style.color = mdd > -20 ? '#f59e0b' : '#ef4444';
+
+  const pfEl = document.getElementById('bt-pf');
+  pfEl.textContent = pf===Infinity ? '∞' : pf.toFixed(2);
+  pfEl.style.color = pf>=1.5 ? '#22c55e' : pf>=1 ? '#f59e0b' : '#ef4444';
+
+  document.getElementById('bt-sharpe').textContent  = (s.sharpe_ratio||0).toFixed(2);
+  document.getElementById('bt-sortino').textContent = (s.sortino_ratio||0).toFixed(2);
+  document.getElementById('bt-hold').textContent    = (s.avg_hold_days||0).toFixed(1)+'d';
+  document.getElementById('bt-trades').textContent  = `${s.win_trades||0}W / ${s.loss_trades||0}L`;
+
+  document.getElementById('bt-initial').textContent = '₹'+(s.initial_capital||0).toLocaleString('en-IN');
+  const finEl = document.getElementById('bt-final');
+  finEl.textContent = '₹'+(s.final_capital||0).toLocaleString('en-IN');
+  finEl.style.color = s.final_capital >= s.initial_capital ? '#22c55e' : '#ef4444';
+
+  const pnlEl = document.getElementById('bt-pnl');
+  pnlEl.textContent = (pnl>=0?'+':'')+' ₹'+Math.abs(pnl).toLocaleString('en-IN');
+  pnlEl.style.color = pnl>=0 ? '#22c55e' : '#ef4444';
+
+  document.getElementById('bt-period').textContent = `${s.start_date} → ${s.end_date} (${s.years}y)`;
+
+  // Equity curve
+  const eq = data.equity_curve || [];
+  if(eq.length > 1){
+    const labels = eq.map(p=>p.date);
+    const vals   = eq.map(p=>p.equity);
+    const ctx    = document.getElementById('bt-equity-chart').getContext('2d');
+    if(_btEquityChart) _btEquityChart.destroy();
+    _btEquityChart = new Chart(ctx, {
+      type:'line',
+      data:{
+        labels,
+        datasets:[{
+          label:'Portfolio Value (₹)',
+          data: vals,
+          borderColor: vals[vals.length-1] >= vals[0] ? '#22c55e' : '#ef4444',
+          backgroundColor: vals[vals.length-1] >= vals[0]
+            ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+          fill:true, pointRadius:0, borderWidth:2, tension:0.3
+        }]
+      },
+      options:{
+        responsive:true,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'₹'+c.parsed.y.toLocaleString('en-IN')}}},
+        scales:{
+          x:{ticks:{color:'#475569',maxTicksLimit:12},grid:{color:'#1e293b'}},
+          y:{ticks:{color:'#475569',callback:v=>'₹'+v.toLocaleString('en-IN')},grid:{color:'#1e293b'}}
+        }
+      }
+    });
+  }
+
+  // Breakdowns
+  document.getElementById('bt-by-regime').innerHTML = _btBreakdownHtml(data.by_regime);
+  document.getElementById('bt-by-conf').innerHTML   = _btBreakdownHtml(data.by_confidence);
+  document.getElementById('bt-by-exit').innerHTML   = _btBreakdownHtml(data.by_exit_reason);
+
+  // Trade log
+  const tbody = document.getElementById('bt-trade-log');
+  const trades = (data.trades||[]).slice(0,200);
+  if(!trades.length){
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#475569;padding:16px">No completed trades</td></tr>';
+  } else {
+    tbody.innerHTML = trades.map(t=>{
+      const p = (t.pnl_pct*100).toFixed(2);
+      const col = t.pnl>=0 ? '#22c55e' : '#ef4444';
+      const exitTag = {stop_loss:'🛑 SL', target:'🎯 Target', max_hold:'⏰ MaxHold', rsi_overbought:'📈 RSI>80', signal_reversal:'🔄 Reversal'}[t.exit_reason] || t.exit_reason;
+      return `<tr style="border-top:1px solid #1e293b">
+        <td style="padding:5px 8px;font-weight:600;color:#f1f5f9">${t.symbol}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.entry_date}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.exit_date}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.entry_price.toLocaleString('en-IN')}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.exit_price.toLocaleString('en-IN')}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:monospace;color:${col};font-weight:600">${t.pnl>=0?'+':''}₹${Math.abs(t.pnl).toFixed(0)}</td>
+        <td style="padding:5px 8px;text-align:right;color:${col}">${t.pnl_pct>=0?'+':''}${p}%</td>
+        <td style="padding:5px 8px;text-align:right;color:#64748b">${t.hold_days}</td>
+        <td style="padding:5px 8px;color:#60a5fa;font-size:11px">${t.regime}</td>
+        <td style="padding:5px 8px;font-size:11px;color:#94a3b8">${exitTag}</td>
+      </tr>`;
+    }).join('');
+  }
 }
 
 load();
@@ -2212,57 +3946,142 @@ def api_data():
     except Exception:
         pass
 
-    # Live signals and recommendations (use swing or intraday parameters)
+    # ── Morning report: trigger once per day from 9 AM ───────────────────────
+    _maybe_trigger_morning_report()
+
+    # ── Signals: read from background cache, trigger scan if stale ───────────
+    _maybe_trigger_background_scan()
+    with _SIGNAL_CACHE_LOCK:
+        data['signals']         = _SIGNAL_CACHE["signals"]
+        data['recommendations'] = _SIGNAL_CACHE["recommendations"]
+        data['stocks_scanned']  = _SIGNAL_CACHE["stocks_scanned"]
+        data['scan_running']    = _SIGNAL_CACHE["scanning"]
+        _cache_ts = _SIGNAL_CACHE["timestamp"]
+    data['last_scan'] = _cache_ts.strftime('%I:%M %p') if _cache_ts else '—'
+    data['next_scan'] = (
+        (_cache_ts + _SIGNAL_CACHE_TTL).strftime('%I:%M %p') if _cache_ts else '—'
+    )
+
+    # ── IP status ──────────────────────────────────────────────────────────
+    import urllib.request as _ur
+    import socket as _sock
+    _ip_file      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'last_known_ip.txt')
+    _ip_hist_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ip_history.json')
+
+    # IPv4
     try:
-        now = datetime.now(IST)
-        cache_age = (now - _SIGNAL_CACHE["timestamp"]) if _SIGNAL_CACHE["timestamp"] else timedelta.max
-        if cache_age < _SIGNAL_CACHE_TTL:
-            data['signals'] = _SIGNAL_CACHE["signals"]
-            data['recommendations'] = _SIGNAL_CACHE["recommendations"]
-            data['stocks_scanned'] = _SIGNAL_CACHE["stocks_scanned"]
+        current_ip = _ur.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
+    except Exception:
+        current_ip = 'unknown'
+
+    # IPv6 (best-effort — won't resolve on many home ISPs)
+    try:
+        _ipv6_raw = _ur.urlopen('https://api6.ipify.org', timeout=4).read().decode().strip()
+        current_ipv6 = _ipv6_raw if ':' in _ipv6_raw else 'Not available'
+    except Exception:
+        current_ipv6 = 'Not available'
+
+    # Network interface type (WiFi / Ethernet / VPN / unknown)
+    try:
+        if _HAS_PSUTIL:
+            _ifaces = _psutil.net_if_stats()
+            _addrs  = _psutil.net_if_addrs()
+            _active = [i for i, s in _ifaces.items() if s.isup and i not in ('lo', 'lo0')]
+            def _iface_type(name):
+                n = name.lower()
+                if any(x in n for x in ('en0', 'en1', 'wlan', 'wifi', 'wi-fi', 'wlp')):
+                    return 'WiFi'
+                if any(x in n for x in ('eth', 'en2', 'ens', 'enp', 'lan')):
+                    return 'Ethernet'
+                if any(x in n for x in ('tun', 'tap', 'utun', 'vpn', 'wg', 'ts')):
+                    return 'VPN/Tailscale'
+                return None
+            _types = [_iface_type(i) for i in _active if _iface_type(i)]
+            network_type = _types[0] if _types else 'Unknown'
         else:
-            from dynamic_universe import DynamicUniverse
-            from technical_analysis import TechnicalAnalyzer
-            scanner  = DynamicUniverse(kite=kite)
-            ta       = TechnicalAnalyzer()
-            universe = scanner.get_candidates_with_details(top_n=30)
-            signals  = []
-            recommendations = []
-            sl_pct = config.SWING_STOP_LOSS_PERCENTAGE if config.TRADING_MODE == "swing" else config.STOP_LOSS_PERCENTAGE
-            tgt_pct = config.SWING_TARGET_PERCENTAGE if config.TRADING_MODE == "swing" else config.TARGET_PERCENTAGE
-            for c in universe[:15]:
-                sym = c['symbol']
-                try:
-                    hist = mdf.get_stock_data(sym, period="1mo", interval="1d")
-                    if hist.empty or len(hist) < 20:
-                        continue
-                    sig = ta.generate_signals(hist)
-                    if sig.get('signal') in ('BUY', 'SELL'):
-                        sig_data = {
-                            'symbol':     sym,
-                            'price':      c['last_price'],
-                            'target':     round(c['last_price'] * (1 + tgt_pct), 2),
-                            'stop_loss':  round(c['last_price'] * (1 - sl_pct), 2),
-                            'confidence': sig.get('confidence', 0),
-                            'action':     sig.get('signal'),
-                            'trend':      sig.get('trend', ''),
-                        }
-                        signals.append(sig_data)
-                        if sig.get('signal') == 'BUY' and sig.get('confidence', 0) >= config.MIN_CONFIDENCE:
-                            recommendations.append(sig_data)
-                except Exception:
-                    continue
-            data['signals'] = signals
-            data['recommendations'] = recommendations[:5]
-            data['stocks_scanned'] = len(universe)
-            _SIGNAL_CACHE.update({
-                "signals": signals,
-                "recommendations": recommendations[:5],
-                "stocks_scanned": len(universe),
-                "timestamp": now
-            })
+            network_type = 'Unknown'
+    except Exception:
+        network_type = 'Unknown'
+
+    # Kite API resolution — does api.kite.trade resolve to IPv4?
+    try:
+        _res = _sock.getaddrinfo('api.kite.trade', 443, _sock.AF_INET)
+        kite_resolution = 'IPv4 ✅' if _res else 'Unresolved ⚠️'
+    except Exception:
+        kite_resolution = 'Unresolved ⚠️'
+
+    # Last successful API call time (from health heartbeat)
+    with _HEALTH_LOCK:
+        _last_hb = _HEALTH.get('last_heartbeat', '')
+        _kite_ok  = _HEALTH.get('kite_ok', False)
+        _api_lat  = _HEALTH.get('api_latency_ms', 0)
+    last_api_call = _last_hb[:19].replace('T', ' ') if _last_hb else '—'
+
+    # Last successful order time (from trade journal — newest BUY or SELL)
+    _journal_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'trade_journal.json')
+    last_order_time = '—'
+    try:
+        if os.path.exists(_journal_file):
+            _jdata = json.load(open(_journal_file))
+            if _jdata:
+                _newest = max(_jdata, key=lambda e: e.get('timestamp', ''))
+                last_order_time = _newest.get('timestamp', '—')[:16].replace('T', ' ')
     except Exception:
         pass
+
+    # Known (whitelisted) IP
+    try:
+        known_ip = open(_ip_file).read().strip() if os.path.exists(_ip_file) else current_ip
+    except Exception:
+        known_ip = current_ip
+
+    ip_changed = current_ip != known_ip and current_ip != 'unknown'
+
+    # Overall trading status
+    if current_ip == 'unknown':
+        trading_status = 'NETWORK ERROR'
+        trading_status_color = '#ef4444'
+    elif ip_changed:
+        trading_status = 'IP MISMATCH — ORDERS BLOCKED'
+        trading_status_color = '#f59e0b'
+    elif not _kite_ok:
+        trading_status = 'KITE DISCONNECTED'
+        trading_status_color = '#f59e0b'
+    else:
+        trading_status = 'SAFE ✅'
+        trading_status_color = '#22c55e'
+
+    # Update stored IP and history
+    try:
+        with open(_ip_file, 'w') as _f: _f.write(current_ip)
+        _hist = []
+        if os.path.exists(_ip_hist_file):
+            _hist = json.load(open(_ip_hist_file))
+        if not _hist or _hist[0].get('ip') != current_ip:
+            _hist.insert(0, {
+                'ip':          current_ip,
+                'detected_at': datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S'),
+                'changed':     ip_changed,
+                'network':     network_type,
+            })
+            _hist = _hist[:20]
+            json.dump(_hist, open(_ip_hist_file, 'w'), indent=2)
+    except Exception:
+        _hist = []
+
+    data['current_ip']          = current_ip
+    data['current_ipv6']        = current_ipv6
+    data['known_ip']            = known_ip
+    data['ip_changed']          = ip_changed
+    data['ip_history']          = _hist[:10]
+    data['network_type']        = network_type
+    data['kite_resolution']     = kite_resolution
+    data['last_api_call']       = last_api_call
+    data['last_order_time']     = last_order_time
+    data['api_latency_ms']      = _api_lat
+    data['trading_status']      = trading_status
+    data['trading_status_color']= trading_status_color
+    data['kite_whitelist_url']  = 'https://developers.kite.trade/apps'
 
     return jsonify(data)
 
@@ -2553,18 +4372,159 @@ def api_journal():
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
         from trade_journal import TradeJournal
         j = TradeJournal()
+
+        # ── Sync Kite completed SELL orders → close matching open journal entries ──
+        try:
+            from broker_integration import BrokerIntegration
+            _b = BrokerIntegration()
+            kite_orders = _b.kite.orders() or []
+            entries = j.all_entries()
+            changed = False
+            for ko in kite_orders:
+                if (ko.get('transaction_type') == 'SELL'
+                        and ko.get('status') == 'COMPLETE'
+                        and ko.get('average_price', 0) > 0):
+                    ksym = ko.get('tradingsymbol', '')
+                    kprice = float(ko.get('average_price', 0))
+                    kqty   = int(ko.get('quantity', 1))
+                    ktime  = str(ko.get('order_timestamp', ''))[:10]
+                    # Find matching open BUY entry
+                    for e in entries:
+                        if (e.get('symbol') == ksym
+                                and e.get('action') == 'BUY'
+                                and e.get('status') == 'OPEN'):
+                            buy_price = float(e.get('entry_price') or e.get('price') or 0)
+                            gross_pnl = round((kprice - buy_price) * kqty, 2) if buy_price else 0
+                            e['exit_price']   = kprice
+                            e['exit_date']    = ktime
+                            e['exit_reason']  = 'kite_order'
+                            e['gross_pnl']    = gross_pnl
+                            e['net_pnl']      = gross_pnl
+                            e['holding_days'] = 0
+                            e['status']       = 'CLOSED'
+                            changed = True
+                            break
+            if changed:
+                j._save(entries)
+        except Exception as _se:
+            logger.warning(f"Journal Kite sync error: {_se}")
+
         analytics = j.analytics()
         all_entries = j.all_entries()
-        open_trades = [e for e in all_entries if e.get('action') == 'BUY' and e.get('status') == 'OPEN']
-        analytics['open_trades_count'] = len(open_trades)
-        analytics['open_trade_log'] = sorted(open_trades, key=lambda x: x.get('timestamp',''), reverse=True)[:20]
-        analytics['all_entries_count'] = len(all_entries)
+        open_trades  = [e for e in all_entries if e.get('action') == 'BUY' and e.get('status') == 'OPEN']
+        closed_trades = [e for e in all_entries if e.get('status') == 'CLOSED' and e.get('action') == 'BUY']
+        analytics['open_trades_count']  = len(open_trades)
+        analytics['closed_trades_count'] = len(closed_trades)
+        analytics['open_trade_log']     = sorted(open_trades,  key=lambda x: x.get('timestamp',''), reverse=True)[:20]
+        analytics['closed_trade_log']   = sorted(closed_trades, key=lambda x: x.get('exit_date',''), reverse=True)[:20]
+        analytics['all_entries_count']  = len(all_entries)
         return jsonify(analytics)
     except Exception as e:
         return jsonify({'error': str(e), 'total_trades': 0, 'open_trades_count': 0, 'open_trade_log': []})
 
 
+@app.route('/api/morning-report')
+def api_morning_report():
+    """Return cached morning intelligence report; trigger generation if not done today."""
+    _maybe_trigger_morning_report()
+    with _MORNING_CACHE_LOCK:
+        report     = _MORNING_CACHE["report"]
+        date       = _MORNING_CACHE["date"]
+        generating = _MORNING_CACHE["generating"]
+    return jsonify({
+        "report":     report or {},
+        "date":       date,
+        "generating": generating,
+    })
+
+
+@app.route('/api/morning-report/refresh', methods=['POST'])
+def api_morning_report_refresh():
+    """Force-regenerate morning report (manual trigger from UI)."""
+    with _MORNING_CACHE_LOCK:
+        already_running = _MORNING_CACHE["generating"]
+    if not already_running:
+        t = threading.Thread(target=_generate_morning_report, daemon=True)
+        t.start()
+    return jsonify({"status": "triggered"})
+
+
+@app.route('/api/health')
+def api_health():
+    """System health snapshot: CPU, RAM, disk, Kite latency, scan time."""
+    with _HEALTH_LOCK:
+        h = dict(_HEALTH)
+    with _SIGNAL_CACHE_LOCK:
+        h["scan_running"]  = _SIGNAL_CACHE["scanning"]
+        h["last_scan"]     = _SIGNAL_CACHE["timestamp"].isoformat() if _SIGNAL_CACHE["timestamp"] else None
+        h["signals_count"] = len(_SIGNAL_CACHE["signals"])
+    with _MORNING_CACHE_LOCK:
+        h["morning_ready"]     = _MORNING_CACHE["date"] == datetime.now(IST).strftime("%Y-%m-%d")
+        h["morning_generating"] = _MORNING_CACHE["generating"]
+    h["circuit_open"] = False
+    try:
+        from market_data import MarketDataFetcher as _MDF
+        h["circuit_open"]     = time.time() < _MDF._cb_open_until
+        h["circuit_failures"] = _MDF._cb_failures
+    except Exception:
+        pass
+    return jsonify(h)
+
+
+_BT_CACHE: dict = {}
+_BT_LOCK = threading.Lock()
+
+
+@app.route('/api/backtest', methods=['POST'])
+def api_backtest():
+    """
+    Run historical backtest.
+    POST body: { "symbols": [...], "years": 2 }
+    Returns full backtest result dict.
+    """
+    try:
+        body    = request.get_json(force=True) or {}
+        symbols = body.get('symbols') or []
+        years   = int(body.get('years', 2))
+        years   = max(1, min(years, 5))
+
+        if not symbols:
+            # Default: use config watchlist top-20
+            from config import config as _cfg
+            symbols = list(getattr(_cfg, 'WATCHLIST', []))[:20]
+            if not symbols:
+                return jsonify({'error': 'No symbols provided and WATCHLIST is empty'}), 400
+
+        # Cache key — same symbols+years returns cached result for 30 min
+        cache_key = f"{','.join(sorted(symbols))}_{years}"
+        with _BT_LOCK:
+            cached = _BT_CACHE.get(cache_key)
+            if cached and (time.time() - cached['ts']) < 1800:
+                return jsonify(cached['data'])
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from backtester import Backtester
+        bt     = Backtester()
+        result = bt.run(symbols=symbols, years=years)
+
+        with _BT_LOCK:
+            _BT_CACHE[cache_key] = {'data': result, 'ts': time.time()}
+            # Keep cache small
+            if len(_BT_CACHE) > 10:
+                oldest = min(_BT_CACHE, key=lambda k: _BT_CACHE[k]['ts'])
+                del _BT_CACHE[oldest]
+
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("Backtest error")
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
+    # Start background heartbeat
+    _hb = threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat")
+    _hb.start()
+
     print("\n" + "="*55)
     print("  🤖 AI Trading Dashboard")
     print("  Open in browser: http://localhost:5001")

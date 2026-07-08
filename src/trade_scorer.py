@@ -75,14 +75,16 @@ class TradeScorer:
 
         # ── 1. TREND (25 pts) — primary quality gate ──────────────────────────
         trend = tech.get('trend', 'NEUTRAL')
-        if trend == 'STRONG_UPTREND':
+        if trend in ('STRONG_UPTREND', 'BULLISH'):       # legacy BULLISH alias
             components['trend'] = 25
         elif trend == 'UPTREND':
             components['trend'] = 18
         elif trend == 'NEUTRAL':
-            components['trend'] = 5   # conservative: neutral trend is weak signal
-        elif trend == 'DOWNTREND':
-            components['trend'] = 0   # no credit for downtrend
+            components['trend'] = 0   # no credit for flat/choppy market
+        elif trend in ('DOWNTREND', 'BEARISH'):           # legacy BEARISH alias
+            components['trend'] = 0
+        elif trend == 'STRONG_DOWNTREND':
+            components['trend'] = 0
         else:
             components['trend'] = 0
 
@@ -119,20 +121,20 @@ class TradeScorer:
         else:
             components['macd'] = 7           # no data → neutral
 
-        # ── 4. VOLUME (20 pts) ─────────────────────────────────────────────────
+        # ── 4. VOLUME (20 pts) — hard gate: no volume = no trade ────────────
         vol_ratio = tech.get('volume_ratio', 1.0)   # current / 20d avg
-        if vol_ratio >= 3.0:
+        if vol_ratio >= 2.5:
             components['volume'] = 20
-        elif vol_ratio >= 2.0:
+        elif vol_ratio >= 1.8:
             components['volume'] = 16
-        elif vol_ratio >= 1.5:
+        elif vol_ratio >= 1.3:
             components['volume'] = 12
         elif vol_ratio >= 1.0:
             components['volume'] = 8
         elif vol_ratio >= 0.7:
-            components['volume'] = 4
+            components['volume'] = 3
         else:
-            components['volume'] = 0    # volume collapsing
+            components['volume'] = 0    # volume collapsing — hard skip signal below
 
         # ── 5. SENTIMENT (8 pts) ───────────────────────────────────────────────
         sent_score = senti.get('score', 0.0)   # −1 to 1
@@ -162,6 +164,10 @@ class TradeScorer:
         # ── Total score ────────────────────────────────────────────────────────
         total = sum(components.values())
         total = max(0, min(100, total))
+
+        # ── Hard veto: no trend + low volume = always skip ─────────────────────
+        if components['trend'] == 0 and components['volume'] < 8:
+            total = min(total, 50)   # cap below any skip threshold
 
         # ── Regime-adjusted skip threshold ─────────────────────────────────────
         regime_upper = str(regime).upper()

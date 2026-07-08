@@ -6,6 +6,7 @@ Persists to data/trade_journal.json for lifetime analytics.
 import json
 import os
 import logging
+import threading
 from datetime import datetime, date
 from typing import Dict, List, Optional
 
@@ -19,6 +20,9 @@ JOURNAL_FILE = os.path.join(
 
 class TradeJournal:
     """Auto-logs every trade with full context for post-trade analysis."""
+
+    # Class-level lock: prevents concurrent write corruption from parallel threads
+    _file_lock = threading.Lock()
 
     def __init__(self, path: str = JOURNAL_FILE):
         self._path = path
@@ -83,105 +87,107 @@ class TradeJournal:
         net_pnl: float = 0,
         charges: float = 0,
     ) -> Dict:
-        entries = self._load()
         today = datetime.now().strftime('%Y-%m-%d')
         now   = datetime.now().isoformat(timespec='seconds')
+        _dow  = datetime.now().strftime('%A')
+        _week = int(datetime.now().strftime('%V'))
+        _mon  = datetime.now().strftime('%B')
 
-        if action == 'BUY':
-            entry = {
-                'id':              len(entries) + 1,
-                'date':            today,
-                'timestamp':       now,
-                'symbol':          symbol,
-                'action':          'BUY',
-                'entry_price':     round(price, 2),
-                'quantity':        quantity,
-                'invested':        round(price * quantity, 2),
-                'buy_reason':      buy_reason,
-                'trade_score':     round(trade_score, 1),
-                'score_components': score_components or {},
-                'market_regime':   market_regime,
-                'sector':          sector,
-                'sentiment':       sentiment,
-                'sentiment_score': round(sentiment_score, 3),
-                'news_count':      news_count,
-                'rsi':             round(rsi, 1),
-                'macd_histogram':  round(macd_histogram, 4),
-                'volume_ratio':    round(volume_ratio, 2),
-                'trend':           trend,
-                'atr':             round(atr, 2),
-                'mtf_aligned':     mtf_aligned,
-                'mtf_strict':      mtf_strict,
-                'confidence':      round(confidence, 3),
-                # re-entry fields
-                'is_reentry':            is_reentry,
-                'prev_exit_reason':      prev_exit_reason,
-                'prev_pnl':              round(prev_pnl, 2),
-                'time_since_exit_hours': round(time_since_exit_hours, 2),
-                'reentry_score':         round(reentry_score, 1),
-                'reentry_confidence':    round(reentry_confidence, 3),
-                # exit fields — filled later
-                'exit_price':      None,
-                'exit_date':       None,
-                'holding_days':    None,
-                'exit_reason':     None,
-                'gross_pnl':       None,
-                'net_pnl':         None,
-                'charges':         None,
-                'status':          'OPEN',
-                'day_of_week':     datetime.now().strftime('%A'),
-                'week_number':     int(datetime.now().strftime('%V')),
-                'month':           datetime.now().strftime('%B'),
-            }
-        else:
-            # SELL: try to update the matching open BUY entry first
-            entry_date_dt = datetime.fromisoformat(entry_date) if entry_date else datetime.now()
-            holding_days = (datetime.now() - entry_date_dt).days
+        with TradeJournal._file_lock:
+            entries = self._load()
 
-            entry = {
-                'id':             len(entries) + 1,
-                'date':           today,
-                'timestamp':      now,
-                'symbol':         symbol,
-                'action':         'SELL',
-                'entry_price':    round(entry_price, 2) if entry_price else 0,
-                'exit_price':     round(price, 2),
-                'quantity':       quantity,
-                'invested':       round(entry_price * quantity, 2) if entry_price else 0,
-                'entry_date':     entry_date,
-                'exit_date':      today,
-                'holding_days':   holding_days,
-                'exit_reason':    exit_reason,
-                'gross_pnl':      round(gross_pnl, 2),
-                'net_pnl':        round(net_pnl, 2),
-                'charges':        round(charges, 2),
-                'market_regime':  market_regime,
-                'sector':         sector,
-                'buy_reason':     buy_reason,
-                'trade_score':    round(trade_score, 1),
-                'confidence':     round(confidence, 3),
-                'status':         'CLOSED',
-                'day_of_week':    datetime.now().strftime('%A'),
-                'week_number':    int(datetime.now().strftime('%V')),
-                'month':          datetime.now().strftime('%B'),
-            }
-            # Update the matching open BUY record so we have one complete row
-            for e in entries:
-                if (e.get('symbol') == symbol
-                        and e.get('action') == 'BUY'
-                        and e.get('status') == 'OPEN'):
-                    e['exit_price']   = entry['exit_price']
-                    e['exit_date']    = today
-                    e['holding_days'] = holding_days
-                    e['exit_reason']  = exit_reason
-                    e['gross_pnl']    = entry['gross_pnl']
-                    e['net_pnl']      = entry['net_pnl']
-                    e['charges']      = entry['charges']
-                    e['status']       = 'CLOSED'
-                    break
+            if action == 'BUY':
+                entry = {
+                    'id':              len(entries) + 1,
+                    'date':            today,
+                    'timestamp':       now,
+                    'symbol':          symbol,
+                    'action':          'BUY',
+                    'entry_price':     round(price, 2),
+                    'quantity':        quantity,
+                    'invested':        round(price * quantity, 2),
+                    'buy_reason':      buy_reason,
+                    'trade_score':     round(trade_score, 1),
+                    'score_components': score_components or {},
+                    'market_regime':   market_regime,
+                    'sector':          sector,
+                    'sentiment':       sentiment,
+                    'sentiment_score': round(sentiment_score, 3),
+                    'news_count':      news_count,
+                    'rsi':             round(rsi, 1),
+                    'macd_histogram':  round(macd_histogram, 4),
+                    'volume_ratio':    round(volume_ratio, 2),
+                    'trend':           trend,
+                    'atr':             round(atr, 2),
+                    'mtf_aligned':     mtf_aligned,
+                    'mtf_strict':      mtf_strict,
+                    'confidence':      round(confidence, 3),
+                    'is_reentry':            is_reentry,
+                    'prev_exit_reason':      prev_exit_reason,
+                    'prev_pnl':              round(prev_pnl, 2),
+                    'time_since_exit_hours': round(time_since_exit_hours, 2),
+                    'reentry_score':         round(reentry_score, 1),
+                    'reentry_confidence':    round(reentry_confidence, 3),
+                    'exit_price':      None,
+                    'exit_date':       None,
+                    'holding_days':    None,
+                    'exit_reason':     None,
+                    'gross_pnl':       None,
+                    'net_pnl':         None,
+                    'charges':         None,
+                    'status':          'OPEN',
+                    'day_of_week':     _dow,
+                    'week_number':     _week,
+                    'month':           _mon,
+                }
+            else:
+                entry_date_dt = datetime.fromisoformat(entry_date) if entry_date else datetime.now()
+                holding_days  = (datetime.now() - entry_date_dt).days
+                entry = {
+                    'id':             len(entries) + 1,
+                    'date':           today,
+                    'timestamp':      now,
+                    'symbol':         symbol,
+                    'action':         'SELL',
+                    'entry_price':    round(entry_price, 2) if entry_price else 0,
+                    'exit_price':     round(price, 2),
+                    'quantity':       quantity,
+                    'invested':       round(entry_price * quantity, 2) if entry_price else 0,
+                    'entry_date':     entry_date,
+                    'exit_date':      today,
+                    'holding_days':   holding_days,
+                    'exit_reason':    exit_reason,
+                    'gross_pnl':      round(gross_pnl, 2),
+                    'net_pnl':        round(net_pnl, 2),
+                    'charges':        round(charges, 2),
+                    'market_regime':  market_regime,
+                    'sector':         sector,
+                    'buy_reason':     buy_reason,
+                    'trade_score':    round(trade_score, 1),
+                    'confidence':     round(confidence, 3),
+                    'status':         'CLOSED',
+                    'day_of_week':    _dow,
+                    'week_number':    _week,
+                    'month':          _mon,
+                }
+                # Update the matching open BUY record so we have one complete row
+                for e in entries:
+                    if (e.get('symbol') == symbol
+                            and e.get('action') == 'BUY'
+                            and e.get('status') == 'OPEN'):
+                        e['exit_price']   = entry['exit_price']
+                        e['exit_date']    = today
+                        e['holding_days'] = holding_days
+                        e['exit_reason']  = exit_reason
+                        e['gross_pnl']    = entry['gross_pnl']
+                        e['net_pnl']      = entry['net_pnl']
+                        e['charges']      = entry['charges']
+                        e['status']       = 'CLOSED'
+                        break
 
-        entries.append(entry)
-        self._save(entries)
+            entries.append(entry)
+            self._save(entries)
+
         logger.info(f"Journal: logged {action} {symbol} @ ₹{price} (score={trade_score})")
         return entry
 
@@ -200,8 +206,8 @@ class TradeJournal:
         if not trades:
             return {'total_trades': 0}
 
-        pnls        = [t.get('net_pnl', 0) for t in trades]
-        scores      = [t.get('trade_score', 0) for t in trades]
+        pnls        = [float(t.get('net_pnl') or 0) for t in trades]
+        scores      = [float(t.get('trade_score') or 0) for t in trades]
         wins        = [p for p in pnls if p > 0]
         losses      = [p for p in pnls if p < 0]
         total       = len(trades)
@@ -211,7 +217,7 @@ class TradeJournal:
         pf          = sum(wins) / abs(sum(losses)) if losses else 0
         total_net   = sum(pnls)
         avg_score   = sum(scores) / len(scores) if scores else 0
-        avg_hold    = sum(t.get('holding_days', 1) for t in trades) / total
+        avg_hold    = sum(float(t.get('holding_days') or 1) for t in trades) / total
 
         # By sector
         by_sector: Dict[str, List[float]] = {}
@@ -301,16 +307,17 @@ class TradeJournal:
         cumulative = []
         running = 0
         for t in trades[-50:]:
-            running += t.get('net_pnl', 0)
+            running += float(t.get('net_pnl') or 0)
             cumulative.append({'date': t.get('exit_date', ''), 'cumulative_pnl': round(running, 2)})
 
         return {
             'total_trades':  total,
-            'win_rate':      round(win_rate * 100, 1),
+            'win_rate':      round(win_rate, 4),
             'avg_win':       round(avg_win, 2),
             'avg_loss':      round(avg_loss, 2),
             'profit_factor': round(pf, 2),
             'total_net_pnl': round(total_net, 2),
+            'net_pnl':       round(total_net, 2),
             'avg_score':     round(avg_score, 1),
             'avg_hold_days': round(avg_hold, 1),
             'by_sector':     sector_stats,

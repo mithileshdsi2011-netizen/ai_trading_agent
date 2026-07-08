@@ -61,10 +61,14 @@ class TradingOrchestrator:
         self.mtf = MultiTimeframeConfirmer(market_data=self.market_data)
         self.smart_exit = SmartExitAI(market_data=self.market_data)
         self.is_running = False
-        self.trade_log = []
+        self.trade_log: List[Dict] = []   # capped at 500 entries (in-memory only)
+        self._TRADE_LOG_MAX = 500
         self._last_rebalance_week: Optional[int] = None
         # Re-entry tracking: symbol -> {exit_price, exit_time, exit_reason}
         self._recently_sold: Dict[str, Dict] = {}
+        # Kite health: consecutive failure counter for mid-session token expiry alert
+        self._kite_fail_count: int = 0
+        self._KITE_FAIL_ALERT_THRESHOLD: int = 2
     
     def run_once(self) -> Dict:
         """
@@ -85,6 +89,39 @@ class TradingOrchestrator:
             'errors': []
         }
         
+        # ── Kite token health check — alert if down 2+ consecutive cycles ─────────
+        kite_ok = bool(self.market_data.kite)
+        if not config.PAPER_TRADING:
+            try:
+                # Quick probe: margins() is lightweight and confirms token is live
+                if self.market_data.kite:
+                    self.market_data.kite.margins()
+                    kite_ok = True
+                    self._kite_fail_count = 0  # reset on success
+                else:
+                    kite_ok = False
+            except Exception as _kite_err:
+                kite_ok = False
+                logger.error(f"Kite health check FAILED: {_kite_err}")
+            if not kite_ok:
+                self._kite_fail_count += 1
+                if self._kite_fail_count >= self._KITE_FAIL_ALERT_THRESHOLD:
+                    logger.error(
+                        f"KITE TOKEN EXPIRED/UNREACHABLE — "
+                        f"{self._kite_fail_count} consecutive failures. "
+                        f"Run: python get_kite_token.py"
+                    )
+                    self._alert(
+                        "🔴 KITE TOKEN ALERT",
+                        f"🔴 KITE TOKEN ALERT\n\n"
+                        f"kite_ok=False for {self._kite_fail_count} consecutive cycles.\n"
+                        f"Orders are BLOCKED.\n"
+                        f"Run: python get_kite_token.py to refresh token."
+                    )
+                cycle_result['errors'].append(f'kite_ok=False ({self._kite_fail_count} cycles)')
+                return cycle_result
+        # ──────────────────────────────────────────────────────────────────
+
         # Check if market is open (includes holiday check)
         if not cycle_result['market_open']:
             if self.market_data.is_market_holiday():
@@ -98,6 +135,20 @@ class TradingOrchestrator:
         now_ist = datetime.now(ist)
         cutoff_h, cutoff_m = map(int, config.INTRADAY_CUTOFF.split(':'))
         past_cutoff = (now_ist.hour, now_ist.minute) >= (cutoff_h, cutoff_m)
+
+        # Enforce TRADING_START buffer (default 09:30) — no new BUYs before this
+        # NSE open (09:15) is illiquid and erratic; wait for price discovery.
+        start_h, start_m = map(int, config.TRADING_START.split(':'))
+        before_trading_start = (now_ist.hour, now_ist.minute) < (start_h, start_m)
+        if before_trading_start:
+            logger.info(
+                f"Before TRADING_START {config.TRADING_START} IST — "
+                f"monitoring positions only, no new BUYs (avoiding illiquid open)"
+            )
+            position_updates = self.order_executor.monitor_positions()
+            cycle_result['positions_monitored'] = position_updates
+            return cycle_result
+
         if past_cutoff:
             if config.TRADING_MODE == "swing":
                 logger.warning(f"Past intraday cutoff ({config.INTRADAY_CUTOFF}) — swing mode: monitoring only, no new BUYs")
@@ -109,10 +160,29 @@ class TradingOrchestrator:
                 self.end_of_day_close()
                 return cycle_result
 
-        # Check if we should stop trading
+        # Check if we should stop trading (daily loss limit OR consecutive loss streak)
         if self.order_executor.should_stop_trading():
-            logger.warning("Trading stopped due to risk limits")
-            cycle_result['errors'].append("Trading stopped due to risk limits")
+            rm = self.order_executor.risk_manager
+            # Determine which limit fired for a meaningful alert
+            daily_loss_hit  = rm.daily_pnl < -rm.max_daily_loss
+            consec_limit    = config.MAX_CONSECUTIVE_LOSSES
+            stop_reason = (
+                f"Daily loss limit: ₹{rm.daily_pnl:.0f} < -₹{rm.max_daily_loss:.0f}"
+                if daily_loss_hit
+                else f"{consec_limit} consecutive losing trades today"
+            )
+            logger.warning(f"Trading halted — {stop_reason}")
+            cycle_result['errors'].append(f"Trading halted: {stop_reason}")
+            self._alert(
+                "🔴 TRADING HALTED",
+                f"🔴 TRADING HALTED\n\n"
+                f"Reason: {stop_reason}\n"
+                f"No new BUYs for the rest of today.\n"
+                f"Positions are still being monitored."
+            )
+            # Still monitor and exit existing positions — never abandon open trades
+            position_updates = self.order_executor.monitor_positions()
+            cycle_result['positions_monitored'] = position_updates
             return cycle_result
         
         # Emergency circuit breaker: if drawdown > 15% from peak, sell all positions
@@ -144,22 +214,51 @@ class TradingOrchestrator:
                     close_results = self.order_executor.close_all_positions()
                     cycle_result['close_results'] = close_results
                     cycle_result['errors'].append(f"Circuit breaker triggered: drawdown {drawdown:.2%}")
-                    try:
-                        self.telegram._send(f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed.")
-                    except Exception:
-                        pass
+                    self._alert(
+                        "🔴 EMERGENCY CIRCUIT BREAKER",
+                        f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed."
+                    )
                     return cycle_result
         except Exception as e:
             logger.warning(f"Circuit breaker check failed (skipping): {e}")
         
+        # Daily loss limit: if today's realised P&L is worse than DAILY_MAX_LOSS_PCT × capital, halt new buys
+        _daily_loss_halt = False
+        try:
+            _journal_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'trade_journal.json')
+            if os.path.exists(_journal_path):
+                with open(_journal_path) as _jf:
+                    _all_entries = json.load(_jf)
+                _today = datetime.now().strftime('%Y-%m-%d')
+                _today_pnl = sum(
+                    float(e.get('net_pnl', 0) or 0)
+                    for e in _all_entries
+                    if (e.get('timestamp', '') or '')[:10] == _today and e.get('action') == 'SELL'
+                )
+                _loss_limit = -(config.TRADING_AMOUNT * config.DAILY_MAX_LOSS_PCT)
+                if _today_pnl < _loss_limit:
+                    logger.error(
+                        f"DAILY LOSS LIMIT HIT: today P&L ₹{_today_pnl:.0f} "
+                        f"< limit ₹{_loss_limit:.0f} — no new BUYs for rest of day"
+                    )
+                    _daily_loss_halt = True
+                    self._alert(
+                        "🔴 Daily Loss Limit Hit",
+                        f"🔴 Daily loss limit hit\nToday P&L: ₹{_today_pnl:.0f}\n"
+                        f"Limit: ₹{_loss_limit:.0f}\nNo new buys until tomorrow."
+                    )
+        except Exception as _dl_e:
+            logger.debug(f"Daily loss check skipped: {_dl_e}")
+
         try:
             # --- Build dynamic universe from live Kite data ---
             logger.info("Building dynamic stock universe from NSE via Kite...")
             try:
-                universe = self.dynamic_universe.get_intraday_candidates(
-                    top_n=config.DYNAMIC_UNIVERSE_SIZE
+                _candidates = self.dynamic_universe.get_top_candidates(
+                    display_n=50, scan_n=config.DYNAMIC_UNIVERSE_SIZE
                 )
-                logger.info(f"Dynamic universe: {len(universe)} stocks selected")
+                universe = _candidates["scan_universe"]  # 150 ranked by liquidity+momentum
+                logger.info(f"Dynamic universe: {len(universe)} stocks selected (display top-50 diversified)")
             except Exception as ue:
                 logger.warning(f"Dynamic universe failed ({ue}), using fallback watchlist")
                 universe = config.WATCHLIST
@@ -230,6 +329,72 @@ class TradingOrchestrator:
                     cycle_result['positions_monitored'] = position_updates
                     return cycle_result
 
+            # ── Inject today's top movers (morning picks + live gainers) ────────
+            # These stocks must be evaluated regardless of DynamicUniverse rank.
+            priority_syms: list = []
+
+            # A) Morning report AI top picks + gainers (if report is ready for today)
+            try:
+                import json as _json
+                _cache_path = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), 'data', 'morning_report_cache.json'
+                )
+                if os.path.exists(_cache_path):
+                    with open(_cache_path) as _f:
+                        _mr = _json.load(_f)
+                    from datetime import date as _date
+                    if _mr.get("date") == str(_date.today()):
+                        _rpt = _mr.get("report", {})
+                        priority_syms += [p["symbol"] for p in _rpt.get("ai_top_picks", [])[:15]]
+                        priority_syms += [g["symbol"] for g in _rpt.get("top_gainers", [])[:10]]
+                        priority_syms += [g["symbol"] for g in _rpt.get("gap_up_stocks", [])[:8]]
+                        logger.info(f"Morning picks injected: {priority_syms[:10]}")
+            except Exception as _mp_e:
+                logger.debug(f"Morning picks load error: {_mp_e}")
+
+            # B) Live batch-quote gainers ≥1.5% right now
+            try:
+                from dynamic_universe import _NIFTY500_PRIORITY as _prio
+                _syms200 = list(_prio)[:200]
+                _all_q: dict = {}
+                for _i in range(0, len(_syms200), 200):
+                    try:
+                        _q = self.market_data.kite.quote(
+                            [f"NSE:{s}" for s in _syms200[_i:_i+200]]
+                        ) or {}
+                        _all_q.update(_q)
+                    except Exception:
+                        pass
+                _live: list = []
+                for _k, _qv in _all_q.items():
+                    _sym = _k.replace("NSE:", "")
+                    _lp  = _qv.get("last_price", 0)
+                    _pc  = _qv.get("ohlc", {}).get("close", 0)
+                    if _lp and _pc:
+                        _chg = (_lp - _pc) / _pc * 100
+                        if _chg >= 1.5:
+                            _live.append((_sym, _chg))
+                _live.sort(key=lambda x: x[1], reverse=True)
+                priority_syms += [s for s, _ in _live[:12]]
+                logger.info(f"Live gainers ≥1.5%: {[s for s,_ in _live[:8]]}")
+            except Exception as _lg_e:
+                logger.debug(f"Live gainer fetch error: {_lg_e}")
+
+            # Merge: priority stocks first, then universe, dedup, cap at 175
+            _seen_u: set = set()
+            merged_universe: list = []
+            for _s in priority_syms + universe:
+                if _s and _s not in _seen_u:
+                    _seen_u.add(_s)
+                    merged_universe.append(_s)
+                if len(merged_universe) >= 175:
+                    break
+            logger.info(
+                f"Universe: {len(merged_universe)} total "
+                f"({len([s for s in priority_syms if s])} priority + {len(universe)} dynamic)"
+            )
+            universe = merged_universe
+
             # --- Generate signals for dynamic universe ---
             logger.info(f"Generating signals for {len(universe)} stocks...")
             signals = self.signal_generator.generate_signals_for_watchlist(universe)
@@ -258,7 +423,7 @@ class TradingOrchestrator:
                 pass
 
             # --- Execute BUY signals with scoring, MTF, news filter ---
-            buy_signals = [s for s in signals if s.get('action') == 'BUY']
+            buy_signals = [] if _daily_loss_halt else [s for s in signals if s.get('action') == 'BUY']
             if buy_signals:
                 # Only count OPEN slots not already used
                 open_slot_count = len([p for p in self.order_executor.risk_manager.positions
@@ -285,14 +450,29 @@ class TradingOrchestrator:
                         logger.warning(f"Skipping {sym}: correlated with open position")
                         continue
 
+                    # ── 2b. Sector concentration limit (max 2 per sector) ──────
+                    if self._sector_concentration_exceeded(sym, open_symbols):
+                        logger.warning(f"Skipping {sym}: sector concentration limit (max 2 per sector)")
+                        continue
+
                     # ── 3. Negative news filter ────────────────────────────────
                     if self._has_negative_news(best_signal):
                         logger.warning(f"Skipping {sym}: negative news filter")
                         continue
 
+                    # ── 3b. Earnings/result date guard — skip within 3 days ────
+                    if self._near_earnings(sym):
+                        logger.warning(f"Skipping {sym}: earnings/corporate action within 3 days")
+                        continue
+
                     # ── 4. Bear regime guard ───────────────────────────────────
                     if regime == 'BEAR':
                         logger.warning(f"Skipping {sym}: no new BUYs in BEAR regime")
+                        continue
+
+                    # ── 4b. Liquidity filter: order value < 1% of 20d ADV ──────
+                    if self._order_too_large_vs_adv(best_signal):
+                        logger.warning(f"Skipping {sym}: order > 1% of 20d ADV — would move price")
                         continue
 
                     # ── 5. Trade Scoring ───────────────────────────────────────
@@ -312,8 +492,8 @@ class TradingOrchestrator:
 
                     # ── 6. Minimum R:R guard (1.5:1) ──────────────────────────
                     rr = best_signal.get('risk_reward_ratio', 0)
-                    if rr < 1.5:
-                        logger.warning(f"Skipping {sym}: R:R {rr:.2f} below minimum 1.5:1")
+                    if rr < config.MIN_RISK_REWARD:
+                        logger.warning(f"Skipping {sym}: R:R {rr:.2f} below minimum {config.MIN_RISK_REWARD}:1")
                         continue
 
                     # ── 7. Multi-timeframe confirmation ────────────────────────
@@ -374,7 +554,7 @@ class TradingOrchestrator:
                     cycle_result['orders_executed'].append(execution_result)
                     if execution_result['success']:
                         logger.info(f"Order executed: {sym}")
-                        self.trade_log.append(execution_result)
+                        self._append_trade_log(execution_result)
                         open_symbols.add(sym)
                         current_invested += best_signal['investment_amount']
                         try:
@@ -398,7 +578,7 @@ class TradingOrchestrator:
                 cycle_result['orders_executed'].append(execution_result)
                 if execution_result['success']:
                     logger.info(f"Sell order executed: {sym}")
-                    self.trade_log.append(execution_result)
+                    self._append_trade_log(execution_result)
                     # Record exit for re-entry engine
                     self._record_exit(sym, sell_signal.get('current_price', 0), 'signal')
             
@@ -430,7 +610,7 @@ class TradingOrchestrator:
                     })
                     if exec_r['success']:
                         cycle_result['orders_executed'].append(exec_r)
-                        self.trade_log.append(exec_r)
+                        self._append_trade_log(exec_r)
                         self._record_exit(se['symbol'], se['price'], se.get('reason', 'smart_exit'))
                         try:
                             self.telegram.exit(se, exec_r.get('order_id', ''))
@@ -445,22 +625,30 @@ class TradingOrchestrator:
             if position_updates:
                 logger.info(f"Position updates: {len(position_updates)}")
                 for update in position_updates:
-                    self.trade_log.append(update)
-                    # Telegram alert for partial exits
-                    if update.get('success') and update.get('exit_signal', {}).get('partial'):
-                        try:
-                            es = update['exit_signal']
-                            self.telegram._send(
-                                f"🟡 <b>PARTIAL PROFIT BOOKED</b>\n\n"
-                                f"Symbol: {es['symbol']}\n"
-                                f"Qty sold: {es['quantity']}\n"
-                                f"Price: ₹{es['price']:.2f}\n"
-                                f"P&amp;L: ₹{es.get('pnl',0):.2f}\n"
-                                f"Net P&amp;L: ₹{es.get('net_pnl',0):.2f}\n"
-                                f"Reason: {es.get('reason','')}"
+                    self._append_trade_log(update)
+                    # Record exit for re-entry cooldown — prevents immediate re-buy
+                    if update.get('success'):
+                        es = update.get('exit_signal', {})
+                        if es.get('symbol') and not es.get('partial'):
+                            self._record_exit(
+                                es['symbol'],
+                                es.get('price', 0),
+                                es.get('reason', 'sl_target'),
+                                pnl=es.get('pnl', 0),
                             )
-                        except Exception:
-                            pass
+                    # Alert for partial exits
+                    if update.get('success') and update.get('exit_signal', {}).get('partial'):
+                        es = update['exit_signal']
+                        self._alert(
+                            f"🟡 Partial Profit: {es['symbol']}",
+                            f"🟡 PARTIAL PROFIT BOOKED\n\n"
+                            f"Symbol: {es['symbol']}\n"
+                            f"Qty sold: {es['quantity']}\n"
+                            f"Price: ₹{es['price']:.2f}\n"
+                            f"P&L: ₹{es.get('pnl',0):.2f}\n"
+                            f"Net P&L: ₹{es.get('net_pnl',0):.2f}\n"
+                            f"Reason: {es.get('reason','')}"
+                        )
             
             # Get execution summary
             summary = self.order_executor.get_execution_summary()
@@ -506,6 +694,9 @@ class TradingOrchestrator:
         # Schedule daily reset
         schedule.every().day.at("09:00").do(self.daily_reset)
 
+        # Schedule IP check every 30 minutes to catch dynamic IP changes early
+        schedule.every(30).minutes.do(self._check_ip_whitelist)
+
         # Run one cycle immediately on startup so we don't wait up to 15 min
         logger.info("Running immediate startup cycle...")
         try:
@@ -524,6 +715,49 @@ class TradingOrchestrator:
             logger.error(f"Error in scheduled trading: {e}")
             self.is_running = False
     
+    def _check_ip_whitelist(self):
+        """Check if public IP has changed and warn loudly if so."""
+        try:
+            import urllib.request, os
+            current_ip = urllib.request.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
+            ip_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'last_known_ip.txt')
+            known_ip = open(ip_file).read().strip() if os.path.exists(ip_file) else None
+            if known_ip and known_ip != current_ip:
+                logger.error(
+                    f"\n{'='*60}\n"
+                    f"  ⚠️  IP ADDRESS CHANGED!\n"
+                    f"  Old IP: {known_ip}\n"
+                    f"  New IP: {current_ip}\n"
+                    f"  ACTION: Add {current_ip} to Kite whitelist NOW!\n"
+                    f"  URL   : https://developers.kite.trade/apps\n"
+                    f"{'='*60}"
+                )
+            # Always update the stored IP
+            with open(ip_file, 'w') as f:
+                f.write(current_ip)
+        except Exception:
+            pass
+
+    def _alert(self, subject: str, body: str) -> None:
+        """
+        Send a critical alert via BOTH Telegram and email.
+        Either channel failing does not block the other.
+        `body` is plain text for Telegram; HTML is auto-wrapped for email.
+        """
+        # Telegram (plain text, strip HTML tags for readability)
+        try:
+            self.telegram._send(body)
+        except Exception as _te:
+            logger.warning(f"Telegram alert failed: {_te}")
+        # Email (wrap in minimal HTML)
+        try:
+            html_body = "<html><body><pre style='font-family:Arial'>" \
+                        + body.replace("&", "&amp;").replace("<b>", "<b>").replace("</b>", "</b>") \
+                        + "</pre></body></html>"
+            self.email.send_report(subject, html_body)
+        except Exception as _ee:
+            logger.warning(f"Email alert failed: {_ee}")
+
     def stop(self):
         """Stop the trading orchestrator"""
         logger.info("Stopping trading orchestrator")
@@ -722,6 +956,79 @@ class TradingOrchestrator:
                     return True
         return False
 
+    def _sector_concentration_exceeded(self, candidate: str, open_symbols: set,
+                                        max_per_sector: int = 2) -> bool:
+        """
+        Return True if adding `candidate` would give more than max_per_sector positions
+        in the same sector group. Prevents all-banking or all-IT concentration.
+        """
+        if not open_symbols:
+            return False
+        for group in self._SECTOR_GROUPS:
+            if candidate in group:
+                count = len(group & open_symbols)
+                if count >= max_per_sector:
+                    return True
+        return False
+
+    def _near_earnings(self, symbol: str, days: int = 3) -> bool:
+        """
+        Return True if the stock has a known corporate action (results/earnings)
+        within `days` calendar days. Uses Kite corporate_actions API.
+        Fails silently (returns False) if Kite is unavailable.
+        """
+        try:
+            if not self.market_data.kite:
+                return False
+            from datetime import date, timedelta
+            today = date.today()
+            window_end = today + timedelta(days=days)
+            actions = self.market_data.kite.corporate_actions(
+                instrument_token=None,
+                exchange="NSE",
+                tradingsymbol=symbol,
+                from_date=str(today),
+                to_date=str(window_end),
+            )
+            if actions:
+                logger.info(
+                    f"Earnings guard: {symbol} has {len(actions)} corporate action(s) "
+                    f"within {days} days — skipping"
+                )
+                return True
+        except Exception as _e:
+            logger.debug(f"Earnings check skipped for {symbol}: {_e}")
+        return False
+
+    def _order_too_large_vs_adv(self, signal: Dict, adv_fraction: float = 0.01) -> bool:
+        """
+        Return True if the proposed order value exceeds `adv_fraction` (default 1%)
+        of the 20-day average daily value traded. Prevents price impact on illiquid stocks.
+        """
+        try:
+            order_value = signal.get('investment_amount', 0)
+            if order_value <= 0:
+                return False
+            sym = signal['symbol']
+            hist = self.market_data.get_stock_data(sym, period="1mo", interval="1d")
+            if hist is None or hist.empty or 'Volume' not in hist.columns:
+                return False
+            adv_shares = float(hist['Volume'].tail(20).mean())
+            avg_price   = float(hist['Close'].tail(20).mean())
+            adv_value   = adv_shares * avg_price   # 20d average daily traded value in ₹
+            if adv_value <= 0:
+                return False
+            max_order = adv_value * adv_fraction
+            if order_value > max_order:
+                logger.info(
+                    f"Liquidity check {sym}: order ₹{order_value:.0f} > "
+                    f"1% ADV ₹{max_order:.0f} (20d ADV ₹{adv_value:.0f})"
+                )
+                return True
+        except Exception as _e:
+            logger.debug(f"ADV liquidity check skipped for {signal.get('symbol')}: {_e}")
+        return False
+
     @staticmethod
     def _confidence_multiplier(confidence: float) -> float:
         """
@@ -834,16 +1141,14 @@ class TradingOrchestrator:
         })
         if exec_r['success']:
             logger.info(f"Rebalance exit executed: {weakest.symbol}")
-            self.trade_log.append(exec_r)
-            try:
-                self.telegram._send(
-                    f"🔄 <b>WEEKLY REBALANCE</b>\n\n"
-                    f"Exited: {weakest.symbol}\n"
-                    f"P&amp;L: {wpct*100:.1f}%\n"
-                    f"Reason: Underperformer replaced by better opportunity"
-                )
-            except Exception:
-                pass
+            self._append_trade_log(exec_r)
+            self._alert(
+                f"🔄 Weekly Rebalance: {weakest.symbol}",
+                f"🔄 WEEKLY REBALANCE\n\n"
+                f"Exited: {weakest.symbol}\n"
+                f"P&L: {wpct*100:.1f}%\n"
+                f"Reason: Underperformer replaced by better opportunity"
+            )
 
     def end_of_day_close(self) -> Dict:
         """
@@ -921,6 +1226,11 @@ class TradingOrchestrator:
             logger.info(f"Intraday SL: {config.STOP_LOSS_PERCENTAGE*100:.1f}% | Target: {config.TARGET_PERCENTAGE*100:.1f}%")
         logger.info(f"Dynamic universe size: {config.DYNAMIC_UNIVERSE_SIZE} stocks (live NSE scan)")
     
+    def _append_trade_log(self, entry: Dict) -> None:
+        self.trade_log.append(entry)
+        if len(self.trade_log) > self._TRADE_LOG_MAX:
+            self.trade_log = self.trade_log[-self._TRADE_LOG_MAX:]
+
     def get_trade_log(self) -> List[Dict]:
         """
         Get the trade log

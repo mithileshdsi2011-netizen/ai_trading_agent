@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+import threading
 
 # Add parent directory to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,9 +30,18 @@ class MarketDataFetcher:
     _last_historical_request: float = 0.0
     _min_historical_interval: float = 0.35  # seconds between historical API calls
 
+    # ── Circuit Breaker (class-level, shared across instances) ────────────────
+    _cb_failures: int = 0
+    _cb_open_until: float = 0.0          # epoch time when circuit re-closes
+    _CB_MAX_FAILURES: int = 5
+    _CB_RESET_SECONDS: float = 30.0
+    _cb_lock = threading.Lock()
+
+    _CACHE_MAX_ENTRIES: int = 500   # evict oldest when exceeded
+
     def __init__(self, kite=None):
         self.cache = {}
-        self.cache_duration = timedelta(minutes=5)
+        self.cache_duration = timedelta(minutes=5)   # default TTL; overridden per call
         self.kite = kite
         if not self.kite:
             try:
@@ -69,9 +79,80 @@ class MarketDataFetcher:
                 return inst['instrument_token']
         return None
     
+    # ── Retry helper ──────────────────────────────────────────────────────────
+    def _kite_call_with_retry(self, fn, *args, max_retries: int = 3, **kwargs):
+        """
+        Call a Kite API function with exponential backoff retry and circuit breaker.
+        Raises the last exception if all retries fail.
+        """
+        with MarketDataFetcher._cb_lock:
+            if time.time() < MarketDataFetcher._cb_open_until:
+                raise RuntimeError(
+                    f"Kite circuit open — retry after "
+                    f"{MarketDataFetcher._cb_open_until - time.time():.0f}s"
+                )
+
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                result = fn(*args, **kwargs)
+                # Successful call — reset failure counter
+                with MarketDataFetcher._cb_lock:
+                    MarketDataFetcher._cb_failures = 0
+                return result
+            except Exception as exc:
+                last_exc = exc
+                with MarketDataFetcher._cb_lock:
+                    MarketDataFetcher._cb_failures += 1
+                    if MarketDataFetcher._cb_failures >= MarketDataFetcher._CB_MAX_FAILURES:
+                        MarketDataFetcher._cb_open_until = time.time() + MarketDataFetcher._CB_RESET_SECONDS
+                        logger.warning(
+                            f"Kite circuit OPEN after {MarketDataFetcher._cb_failures} failures — "
+                            f"pausing API calls for {MarketDataFetcher._CB_RESET_SECONDS:.0f}s"
+                        )
+                sleep_time = 2 ** attempt          # 1s, 2s, 4s
+                logger.warning(f"Kite API error (attempt {attempt+1}/{max_retries}): {exc} — retry in {sleep_time}s")
+                time.sleep(sleep_time)
+        raise last_exc
+
+    # ── Data validation ───────────────────────────────────────────────────────
+    @staticmethod
+    def _validate_ohlcv(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """
+        Drop rows with: negative/zero price, NaN OHLC, volume=0,
+        or a price spike >50% from previous close (bad tick).
+        """
+        if df.empty:
+            return df
+        orig_len = len(df)
+        # Drop NaN in price columns
+        price_cols = [c for c in ['Open', 'High', 'Low', 'Close'] if c in df.columns]
+        df = df.dropna(subset=price_cols)
+        # Drop non-positive prices
+        for col in price_cols:
+            df = df[df[col] > 0]
+        # Drop zero volume rows (if Volume exists)
+        if 'Volume' in df.columns:
+            df = df[df['Volume'] >= 0]   # 0 is okay for index/pre-market
+        # Detect price spikes: close changes >50% in one candle
+        if 'Close' in df.columns and len(df) > 1:
+            pct_chg = df['Close'].pct_change().abs()
+            spike_mask = pct_chg > 0.50
+            if spike_mask.any():
+                logger.warning(f"{symbol}: dropped {spike_mask.sum()} spike candle(s)")
+                df = df[~spike_mask]
+        # Remove duplicates on index (date)
+        if df.index.duplicated().any():
+            df = df[~df.index.duplicated(keep='last')]
+        dropped = orig_len - len(df)
+        if dropped:
+            logger.debug(f"{symbol}: validation removed {dropped}/{orig_len} bad rows")
+        return df
+
     def get_stock_data(self, symbol: str, period: str = "1mo", interval: str = "1d") -> pd.DataFrame:
         """
-        Fetch historical stock data using Kite Connect
+        Fetch historical stock data using Kite Connect.
+        TTL-based cache: daily candles cached 60s; intraday 30s.
 
         Args:
             symbol: Stock symbol (e.g., "RELIANCE")
@@ -84,6 +165,12 @@ class MarketDataFetcher:
         if not self.kite:
             logger.error("Kite Connect not initialized")
             return pd.DataFrame()
+
+        cache_key = f"{symbol}_{period}_{interval}"
+        ttl = timedelta(seconds=30 if interval != '1d' else 60)
+        cached = self.cache.get(cache_key)
+        if cached and (datetime.now() - cached['timestamp']) < ttl:
+            return cached['data']
 
         try:
             # Get instrument token for the symbol
@@ -126,15 +213,16 @@ class MarketDataFetcher:
             if elapsed < MarketDataFetcher._min_historical_interval:
                 time.sleep(MarketDataFetcher._min_historical_interval - elapsed)
 
-            # Get historical data
+            # Get historical data (with retry + circuit breaker)
             to_date = datetime.now()
             from_date = to_date - timedelta(days=days)
 
-            data = self.kite.historical_data(
+            data = self._kite_call_with_retry(
+                self.kite.historical_data,
                 instrument_token=instrument['instrument_token'],
                 from_date=from_date,
                 to_date=to_date,
-                interval=kite_interval
+                interval=kite_interval,
             )
             MarketDataFetcher._last_historical_request = time.time()
 
@@ -146,16 +234,27 @@ class MarketDataFetcher:
             df = pd.DataFrame(data)
             df.columns = [col.capitalize() for col in df.columns]
 
-            # Cache the data
-            cache_key = f"{symbol}_{period}_{interval}"
+            # Validate and clean
+            df = self._validate_ohlcv(df, symbol)
+
+            # Cache the data (evict oldest entries if over limit)
+            if len(self.cache) >= MarketDataFetcher._CACHE_MAX_ENTRIES:
+                oldest_keys = sorted(
+                    self.cache, key=lambda k: self.cache[k]['timestamp']
+                )[:100]
+                for _k in oldest_keys:
+                    del self.cache[_k]
             self.cache[cache_key] = {
                 'data': df,
                 'timestamp': datetime.now()
             }
 
-            logger.info(f"Fetched {len(df)} candles for {symbol}")
+            logger.debug(f"Fetched {len(df)} candles for {symbol}")
             return df
 
+        except RuntimeError as re:
+            logger.warning(f"Circuit breaker blocked {symbol}: {re}")
+            return pd.DataFrame()
         except Exception as e:
             logger.error(f"Error fetching data for {symbol}: {e}")
             return pd.DataFrame()
@@ -176,11 +275,17 @@ class MarketDataFetcher:
 
         try:
             key = f"NSE:{symbol}"
-            quote = self.kite.ltp([key])
+            quote = self._kite_call_with_retry(self.kite.ltp, [key])
             if not quote or key not in quote:
                 logger.warning(f"No quote data for {symbol}")
                 return None
-            return quote[key]['last_price']
+            price = quote[key]['last_price']
+            if not price or price <= 0:
+                logger.warning(f"Invalid price for {symbol}: {price}")
+                return None
+            return price
+        except RuntimeError:
+            return None
         except Exception as e:
             logger.error(f"Error getting real-time price for {symbol}: {e}")
             return None
@@ -201,26 +306,32 @@ class MarketDataFetcher:
 
         try:
             key = f"NSE:{symbol}"
-            quote = self.kite.quote([key])
+            quote = self._kite_call_with_retry(self.kite.quote, [key])
             if not quote or key not in quote:
                 logger.warning(f"No quote data for {symbol}")
                 return {}
 
             q = quote[key]
             token = self._get_instrument_token(symbol)
+            lp = q.get('last_price', 0)
+            if not lp or lp <= 0:
+                logger.warning(f"Invalid price in stock info for {symbol}: {lp}")
+                return {}
             return {
                 'symbol': symbol,
-                'current_price': q['last_price'],
-                'day_open': q['ohlc']['open'],
-                'day_high': q['ohlc']['high'],
-                'day_low': q['ohlc']['low'],
-                'day_close': q['ohlc']['close'],
-                'volume': q['volume'],
+                'current_price': lp,
+                'day_open': q.get('ohlc', {}).get('open', 0),
+                'day_high': q.get('ohlc', {}).get('high', 0),
+                'day_low': q.get('ohlc', {}).get('low', 0),
+                'day_close': q.get('ohlc', {}).get('close', 0),
+                'volume': q.get('volume', 0),
                 'change': q.get('net_change', 0),
                 'change_percent': q.get('ohlc', {}).get('change', 0),
                 'instrument_token': token,
                 'exchange': 'NSE'
             }
+        except RuntimeError:
+            return {}
         except Exception as e:
             logger.error(f"Error getting stock info for {symbol}: {e}")
             return {}
@@ -280,11 +391,12 @@ class MarketDataFetcher:
             to_date = datetime.now()
             from_date = to_date - timedelta(days=days)
 
-            data = self.kite.historical_data(
+            data = self._kite_call_with_retry(
+                self.kite.historical_data,
                 instrument_token=instrument['instrument_token'],
                 from_date=from_date,
                 to_date=to_date,
-                interval="15minute"
+                interval="15minute",
             )
             MarketDataFetcher._last_historical_request = time.time()
 
@@ -292,13 +404,17 @@ class MarketDataFetcher:
                 logger.warning(f"No intraday data found for {symbol}")
                 return pd.DataFrame()
 
-            # Convert to DataFrame
+            # Convert to DataFrame and validate
             df = pd.DataFrame(data)
             df.columns = [col.capitalize() for col in df.columns]
+            df = self._validate_ohlcv(df, symbol)
 
-            logger.info(f"Fetched intraday data for {symbol}: {len(df)} records")
+            logger.debug(f"Fetched intraday data for {symbol}: {len(df)} records")
             return df
 
+        except RuntimeError as re:
+            logger.warning(f"Circuit breaker blocked intraday {symbol}: {re}")
+            return pd.DataFrame()
         except Exception as e:
             logger.error(f"Error fetching intraday data for {symbol}: {e}")
             return pd.DataFrame()
