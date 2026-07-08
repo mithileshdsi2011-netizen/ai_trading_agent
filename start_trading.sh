@@ -43,6 +43,18 @@ sleep 1
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
 TOKEN_FILE="data/kite_token.json"
+IP_FILE="data/last_known_ip.txt"
+
+# ─── IP WHITELIST CHECK ────────────────────────────────────────────────────
+echo -e "${YELLOW}━━━ IP Whitelist Check ━━━${NC}"
+CURRENT_IP=$(curl -s -4 --max-time 8 https://api.ipify.org 2>/dev/null || echo "unknown")
+echo -e "${GREEN}  ✓ Current Public IP: ${CURRENT_IP}${NC}"
+# Save for reference
+echo "$CURRENT_IP" > "$IP_FILE"
+if [ "$CURRENT_IP" != "unknown" ]; then
+    echo -e "${CYAN}  → Make sure ${CURRENT_IP} is whitelisted at: https://developers.kite.trade/apps${NC}"
+fi
+echo ""
 
 # ─── STEP 1: Kite Login & Token ────────────────────────────────────────────
 echo -e "${YELLOW}━━━ STEP 1: Kite Connect Login ━━━${NC}"

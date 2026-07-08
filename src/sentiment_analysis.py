@@ -8,6 +8,7 @@ from typing import Dict, List
 import logging
 from datetime import datetime, timedelta
 import re
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,7 +16,13 @@ logger = logging.getLogger(__name__)
 
 class SentimentAnalyzer:
     """Analyzes market sentiment from news sources"""
-    
+
+    # ── Class-level sentiment cache (shared, 15-min TTL, max 200 symbols) ──
+    _sentiment_cache: Dict = {}
+    _sentiment_cache_lock = threading.Lock()
+    _SENTIMENT_TTL = timedelta(minutes=15)
+    _SENTIMENT_CACHE_MAX: int = 200
+
     def __init__(self):
         self.news_sources = [
             'https://www.moneycontrol.com/news/business/markets/',
@@ -142,14 +149,21 @@ class SentimentAnalyzer:
     
     def get_market_sentiment(self, symbol: str) -> Dict:
         """
-        Get overall market sentiment for a stock
-        
+        Get overall market sentiment for a stock (cached 15 min).
+
         Args:
             symbol: Stock symbol
-        
+
         Returns:
             Dictionary with sentiment analysis
         """
+        # ── Cache read ──────────────────────────────────────────────────
+        with SentimentAnalyzer._sentiment_cache_lock:
+            cached = SentimentAnalyzer._sentiment_cache.get(symbol)
+            if cached and (datetime.now() - cached['ts']) < SentimentAnalyzer._SENTIMENT_TTL:
+                logger.debug(f"Sentiment cache hit for {symbol}")
+                return cached['data']
+
         news_items = self.get_news_headlines(symbol)
         
         if not news_items:
@@ -181,10 +195,29 @@ class SentimentAnalyzer:
         else:
             overall_sentiment = 'neutral'
         
-        return {
+        result = {
             'sentiment': overall_sentiment,
             'score': avg_score,
             'news_count': len(news_items),
             'news_items': analyzed_news,
             'reason': f'Based on {len(news_items)} news items'
         }
+        # ── Cache write (evict expired + cap at max size) ────────────────
+        with SentimentAnalyzer._sentiment_cache_lock:
+            now = datetime.now()
+            # Drop expired entries first
+            expired = [k for k, v in SentimentAnalyzer._sentiment_cache.items()
+                       if (now - v['ts']) >= SentimentAnalyzer._SENTIMENT_TTL]
+            for k in expired:
+                del SentimentAnalyzer._sentiment_cache[k]
+            # If still over cap, drop oldest
+            if len(SentimentAnalyzer._sentiment_cache) >= SentimentAnalyzer._SENTIMENT_CACHE_MAX:
+                oldest = sorted(SentimentAnalyzer._sentiment_cache,
+                                key=lambda k: SentimentAnalyzer._sentiment_cache[k]['ts'])[:20]
+                for k in oldest:
+                    del SentimentAnalyzer._sentiment_cache[k]
+            SentimentAnalyzer._sentiment_cache[symbol] = {
+                'data': result,
+                'ts': now,
+            }
+        return result

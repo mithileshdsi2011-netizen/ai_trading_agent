@@ -559,19 +559,44 @@ class RiskManager:
             logger.warning("Daily loss limit exceeded - stopping trading")
             return True
         
-        # Stop if too many consecutive losses
-        recent_trades = [p for p in self.positions if p.status != PositionStatus.OPEN][-5:]
-        if len(recent_trades) >= 3:
-            consecutive_losses = 0
-            for trade in reversed(recent_trades):
-                if trade.pnl < 0:
+        # Stop if too many consecutive losses (reads today's journal so it survives restarts)
+        max_consec = config.MAX_CONSECUTIVE_LOSSES
+        consecutive_losses = 0
+        try:
+            _jpath = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'trade_journal.json'
+            )
+            if os.path.exists(_jpath):
+                with open(_jpath) as _jf:
+                    _all = json.load(_jf)
+                _today = date.today().isoformat()
+                _today_sells = [
+                    e for e in _all
+                    if e.get('action') == 'SELL'
+                    and (e.get('timestamp', '') or '')[:10] == _today
+                ]
+                # Walk backwards through today's closed trades
+                for _e in reversed(_today_sells):
+                    _pnl = float(_e.get('net_pnl') or _e.get('pnl') or 0)
+                    if _pnl < 0:
+                        consecutive_losses += 1
+                    else:
+                        break
+        except Exception:
+            # Fallback: check in-memory positions
+            recent = [p for p in self.positions if p.status != PositionStatus.OPEN][-5:]
+            for p in reversed(recent):
+                if hasattr(p, 'pnl') and p.pnl < 0:
                     consecutive_losses += 1
                 else:
                     break
-            
-            if consecutive_losses >= 3:
-                logger.warning("Three consecutive losses - stopping trading")
-                return True
+
+        if consecutive_losses >= max_consec:
+            logger.warning(
+                f"{consecutive_losses} consecutive losing trades today — halting new entries"
+            )
+            return True
         
         return False
     

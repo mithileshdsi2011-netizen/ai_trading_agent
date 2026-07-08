@@ -57,12 +57,26 @@ class TechnicalAnalyzer:
             df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
             df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
             
-            # ADX (Trend Strength) - Simplified version
-            high_diff = df['High'].diff()
-            low_diff = -df['Low'].diff()
-            tr = pd.concat([high_diff, low_diff, df['Close'].diff()], axis=1).max(axis=1)
-            atr = tr.rolling(window=14).mean()
-            df['ADX'] = atr  # Simplified ADX using ATR
+            # True Range and ATR
+            tr1 = df['High'] - df['Low']
+            tr2 = (df['High'] - df['Close'].shift()).abs()
+            tr3 = (df['Low']  - df['Close'].shift()).abs()
+            tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = tr.ewm(alpha=1/14, adjust=False).mean()
+            df['ATR'] = atr
+
+            # Real ADX using Wilder smoothing
+            up_move   = df['High'].diff()
+            down_move = -df['Low'].diff()
+            plus_dm   = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+            minus_dm  = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+            atr_w     = atr.replace(0, 1e-9)
+            plus_di   = 100 * plus_dm.ewm(alpha=1/14, adjust=False).mean()  / atr_w
+            minus_di  = 100 * minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_w
+            dx        = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9))
+            df['ADX']      = dx.ewm(alpha=1/14, adjust=False).mean()
+            df['Plus_DI']  = plus_di
+            df['Minus_DI'] = minus_di
             
             # Stochastic Oscillator
             low_min = df['Low'].rolling(window=14).min()
@@ -86,59 +100,74 @@ class TechnicalAnalyzer:
     
     def get_trend(self, data: pd.DataFrame) -> str:
         """
-        Determine the overall trend
-        
-        Args:
-            data: DataFrame with indicators
-        
-        Returns:
-            'BULLISH', 'BEARISH', or 'NEUTRAL'
+        Determine the overall trend.
+        Returns one of: STRONG_UPTREND, UPTREND, NEUTRAL, DOWNTREND, STRONG_DOWNTREND
+        These labels match TradeScorer expectations exactly.
         """
         if data.empty or len(data) < 50:
             return 'NEUTRAL'
-        
+
         latest = data.iloc[-1]
-        
-        bullish_signals = 0
-        bearish_signals = 0
-        
-        # SMA crossover
-        if pd.notna(latest['SMA_20']) and pd.notna(latest['SMA_50']):
-            if latest['SMA_20'] > latest['SMA_50']:
-                bullish_signals += 1
+        prev5  = data.iloc[-6] if len(data) >= 6 else data.iloc[0]
+
+        bullish = 0
+        bearish = 0
+
+        # 1. SMA 20/50 crossover — primary trend
+        if pd.notna(latest.get('SMA_20')) and pd.notna(latest.get('SMA_50')):
+            if latest['SMA_20'] > latest['SMA_50'] * 1.005:   # clear golden cross
+                bullish += 2
+            elif latest['SMA_20'] < latest['SMA_50'] * 0.995: # clear death cross
+                bearish += 2
+
+        # 2. Price above/below SMA50 (intermediate trend)
+        if pd.notna(latest.get('SMA_50')):
+            if latest['Close'] > latest['SMA_50']:
+                bullish += 1
             else:
-                bearish_signals += 1
-        
-        # Price vs SMA
-        if pd.notna(latest['SMA_20']):
+                bearish += 1
+
+        # 3. Price above/below SMA20 (short-term)
+        if pd.notna(latest.get('SMA_20')):
             if latest['Close'] > latest['SMA_20']:
-                bullish_signals += 1
+                bullish += 1
             else:
-                bearish_signals += 1
-        
-        # RSI
-        if pd.notna(latest['RSI']):
-            if latest['RSI'] > 50:
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
-        
-        # MACD
-        if pd.notna(latest['MACD']) and pd.notna(latest['MACD_Signal']):
-            if latest['MACD'] > latest['MACD_Signal']:
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
-        
-        # ADX for trend strength
-        if pd.notna(latest['ADX']):
-            if latest['ADX'] < 20:
-                return 'NEUTRAL'  # Weak trend
-        
-        if bullish_signals > bearish_signals:
-            return 'BULLISH'
-        elif bearish_signals > bullish_signals:
-            return 'BEARISH'
+                bearish += 1
+
+        # 4. MACD histogram direction
+        if pd.notna(latest.get('MACD')) and pd.notna(latest.get('MACD_Signal')):
+            hist_now  = latest['MACD'] - latest['MACD_Signal']
+            hist_prev = (data.iloc[-2]['MACD'] - data.iloc[-2]['MACD_Signal']) \
+                        if len(data) >= 2 and pd.notna(data.iloc[-2].get('MACD')) else 0
+            if hist_now > 0 and hist_now >= hist_prev:
+                bullish += 1
+            elif hist_now < 0 and hist_now <= hist_prev:
+                bearish += 1
+
+        # 5. ADX strength gate — require real trend (ADX > 20)
+        adx = latest.get('ADX', 0)
+        plus_di  = latest.get('Plus_DI', 0)
+        minus_di = latest.get('Minus_DI', 0)
+        if pd.notna(adx) and adx < 20:
+            return 'NEUTRAL'   # choppy market — no signal
+
+        # 6. DI alignment confirms direction
+        if pd.notna(plus_di) and pd.notna(minus_di):
+            if plus_di > minus_di * 1.1:
+                bullish += 1
+            elif minus_di > plus_di * 1.1:
+                bearish += 1
+
+        # Map score to label
+        net = bullish - bearish
+        if net >= 4:
+            return 'STRONG_UPTREND'
+        elif net >= 2:
+            return 'UPTREND'
+        elif net <= -4:
+            return 'STRONG_DOWNTREND'
+        elif net <= -2:
+            return 'DOWNTREND'
         else:
             return 'NEUTRAL'
     
@@ -327,17 +356,21 @@ class TechnicalAnalyzer:
         technical_score = self.get_technical_score(df)
         support_resistance = self.get_support_resistance(df)
         
-        # Generate signal based on score
-        # Confidence is scaled so score of 0.3 -> ~0.60 confidence
-        if technical_score > 0.3:
+        # Generate signal — require both score AND trend confirmation
+        # BUY: score > 0.45 (was 0.30) AND trend must be up
+        # SELL: score < -0.35 AND trend must be down
+        bullish_trend = trend in ('STRONG_UPTREND', 'UPTREND')
+        bearish_trend = trend in ('STRONG_DOWNTREND', 'DOWNTREND')
+
+        if technical_score > 0.45 and bullish_trend:
             signal = 'BUY'
-            confidence = min(0.45 + technical_score * 0.8, 0.92)
-        elif technical_score < -0.3:
+            confidence = min(0.50 + technical_score * 0.75, 0.92)
+        elif technical_score < -0.35 and bearish_trend:
             signal = 'SELL'
-            confidence = min(0.45 + abs(technical_score) * 0.8, 0.92)
+            confidence = min(0.50 + abs(technical_score) * 0.75, 0.92)
         else:
             signal = 'HOLD'
-            confidence = max(0.30, 0.45 + technical_score * 0.5)
+            confidence = max(0.30, 0.45 + technical_score * 0.4)
         
         latest = df.iloc[-1]
         prev   = df.iloc[-2] if len(df) >= 2 else latest
