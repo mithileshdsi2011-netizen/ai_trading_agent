@@ -31,6 +31,8 @@ class OrderExecutor:
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
         self._pending_order_symbols: set = set()
+        # Tracks CDSL-auth alerts already sent today to avoid spamming per cycle
+        self._cdsl_alert_sent: set = set()
         self._load_existing_positions()
     
     def _load_existing_positions(self):
@@ -71,7 +73,7 @@ class OrderExecutor:
             pos_data = self.broker.kite.positions()
             for p in pos_data.get('net', []):
                 qty = p.get('quantity', 0)
-                if qty == 0:
+                if qty <= 0:  # skip zero AND negative (settlement offsets from sold CNC)
                     continue
                 symbol = p.get('tradingsymbol')
                 avg_price = p.get('average_price', 0)
@@ -111,7 +113,226 @@ class OrderExecutor:
                     f"({'from journal' if symbol in _journal_entry_times else 'fallback now()'})")
         except Exception as e:
             logger.warning(f"Could not load existing positions: {e}")
-    
+
+        # ── Load CNC holdings (prior-day delivery positions) ───────────────
+        # kite.positions() only shows intraday net; kite.holdings() has CNC
+        # stocks bought on previous days that have settled into the demat account.
+        # NOTE: T+1 stocks appear in BOTH kite.positions() net AND kite.holdings()
+        # (with t1_quantity > 0, settled quantity = 0). We only load here if the
+        # settled quantity > 0 to avoid duplicates with positions() already loaded above.
+        try:
+            holdings_data = self.broker.kite.holdings()
+            already_loaded = {p.symbol for p in self.risk_manager.positions}
+            for h in holdings_data:
+                settled_qty = h.get('quantity', 0)   # only fully settled shares
+                t1_qty      = h.get('t1_quantity', 0) # T+1 pending — also in positions()
+                qty = settled_qty  # only use settled; T+1 already handled by positions()
+                if qty <= 0:
+                    continue
+                symbol = h.get('tradingsymbol')
+                if not symbol or symbol in already_loaded:
+                    continue
+                avg_price = h.get('average_price', 0) or h.get('last_price', 0)
+                if not avg_price:
+                    continue
+                # Recalculate SL/target from config percentages (ATR not stored for old holdings)
+                if config.TRADING_MODE == "swing":
+                    sl     = avg_price * (1 - config.SWING_STOP_LOSS_PERCENTAGE)
+                    target = avg_price * (1 + config.SWING_TARGET_PERCENTAGE)
+                    max_days = config.SWING_MAX_HOLD_DAYS
+                else:
+                    sl     = avg_price * (1 - config.STOP_LOSS_PERCENTAGE)
+                    target = avg_price * (1 + config.TARGET_PERCENTAGE)
+                    max_days = None
+                entry_time = _journal_entry_times.get(symbol, datetime.now())
+                position = Position(
+                    symbol=symbol,
+                    entry_price=avg_price,
+                    quantity=qty,
+                    stop_loss=round(sl, 2),
+                    target=round(target, 2),
+                    entry_time=entry_time,
+                    status=PositionStatus.OPEN,
+                    planned_exit_date=entry_time + timedelta(days=max_days) if max_days else None,
+                    product_type="CNC",
+                    highest_price=avg_price,
+                    trailing_stop=round(sl, 2) if config.TRAILING_STOP_ENABLED else None,
+                )
+                self.risk_manager.positions.append(position)
+                already_loaded.add(symbol)
+                logger.info(
+                    f"Loaded CNC holding: {symbol} {qty} @ {avg_price} "
+                    f"SL:{sl:.2f} Target:{target:.2f} "
+                    f"entry={'from journal' if symbol in _journal_entry_times else 'fallback now()'}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not load CNC holdings: {e}")
+
+    def monitor_holdings(self) -> List[Dict]:
+        """
+        Monitor CNC holdings (prior-day delivery) for SL / target exits.
+        Uses existing risk_manager positions that were loaded from kite.holdings().
+        Called every trading cycle alongside monitor_positions().
+        """
+        # Only monitor positions tagged as CNC that came from holdings
+        # (monitor_positions handles the in-session positions already)
+        holdings_positions = [
+            p for p in self.risk_manager.positions
+            if p.product_type == 'CNC'
+            and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}
+        ]
+        if not holdings_positions:
+            return []
+
+        # Batch LTP for all holdings symbols
+        symbols = [p.symbol for p in holdings_positions]
+        current_prices: Dict[str, float] = {}
+        if self.market_data.kite:
+            try:
+                keys = [f'NSE:{s}' for s in symbols]
+                ltp_data = self.market_data._kite_call_with_retry(
+                    self.market_data.kite.ltp, keys
+                ) or {}
+                for s in symbols:
+                    val = ltp_data.get(f'NSE:{s}', {}).get('last_price', 0)
+                    if val and val > 0:
+                        current_prices[s] = val
+            except Exception as _e:
+                logger.warning(f'Holdings batch LTP failed: {_e}')
+                for s in symbols:
+                    p = self.market_data.get_realtime_price(s)
+                    if p:
+                        current_prices[s] = p
+
+        executed_exits = []
+        for position in holdings_positions:
+            ltp = current_prices.get(position.symbol)
+            if not ltp:
+                continue
+
+            # Update trailing stop
+            if ltp > position.highest_price:
+                position.highest_price = ltp
+            if (config.TRAILING_STOP_ENABLED
+                    and position.highest_price > position.entry_price * (1 + config.TRAILING_STOP_ACTIVATION_PCT)):
+                new_trail = (position.highest_price - 1.5 * position.atr_at_entry
+                             if position.atr_at_entry > 0
+                             else position.highest_price * (1 - config.TRAILING_STOP_TRAIL_PCT))
+                if position.trailing_stop is None or new_trail > position.trailing_stop:
+                    position.trailing_stop = round(new_trail, 2)
+
+            effective_stop = max(position.stop_loss, position.trailing_stop or 0)
+            pnl_pct = (ltp - position.entry_price) / position.entry_price * 100
+
+            # Determine exit reason
+            exit_reason = None
+            if ltp <= effective_stop:
+                exit_reason = (f'Trailing stop hit (₹{position.trailing_stop:.2f})'
+                               if position.trailing_stop and ltp <= position.trailing_stop
+                                  and ltp > position.stop_loss
+                               else f'Stop loss hit ({pnl_pct:.1f}%)')
+            elif ltp >= position.target:
+                exit_reason = f'Target hit (+{pnl_pct:.1f}%)'
+            elif (position.planned_exit_date
+                  and datetime.now() >= position.planned_exit_date
+                  and config.TRADING_MODE == 'swing'):
+                exit_reason = f'Max hold days reached ({config.SWING_MAX_HOLD_DAYS}d)'
+
+            if not exit_reason:
+                logger.info(
+                    f'Holding {position.symbol}: LTP ₹{ltp:.2f} '
+                    f'entry ₹{position.entry_price:.2f} ({pnl_pct:+.1f}%) '
+                    f'SL ₹{effective_stop:.2f} Target ₹{position.target:.2f}'
+                )
+                continue
+
+            logger.info(f'Holdings exit triggered — {position.symbol}: {exit_reason}')
+            sell_signal = {
+                'symbol':            position.symbol,
+                'action':            'SELL',
+                'current_price':     ltp,
+                'position_size':     position.quantity,
+                'investment_amount': ltp * position.quantity,
+                'stop_loss':         0,
+                'target':            0,
+                'risk_reward_ratio': 0,
+                'confidence':        1.0,
+                'overall_score':     0,
+                'reasoning':         exit_reason,
+                'timestamp':         datetime.now().isoformat(),
+            }
+            order_result = self.broker.place_order(sell_signal)
+            gross_pnl = (ltp - position.entry_price) * position.quantity
+
+            if order_result['success']:
+                position.status = PositionStatus.CLOSED
+                position.exit_price = ltp
+                position.exit_time = datetime.now()
+                logger.info(
+                    f'Holding SOLD {position.symbol} ×{position.quantity} '
+                    f'@ ₹{ltp:.2f} | P&L ₹{gross_pnl:+.2f} | {exit_reason}'
+                )
+                exit_signal_out = {
+                    'symbol':      position.symbol,
+                    'action':      'SELL',
+                    'price':       ltp,
+                    'quantity':    position.quantity,
+                    'pnl':         gross_pnl,
+                    'pnl_percentage': pnl_pct,
+                    'reason':      exit_reason,
+                    'partial':     False,
+                    'timestamp':   datetime.now().isoformat(),
+                }
+                executed_exits.append({
+                    'success':     True,
+                    'order_id':    order_result['order_id'],
+                    'exit_signal': exit_signal_out,
+                    'timestamp':   datetime.now().isoformat(),
+                })
+                try:
+                    self.telegram.exit(exit_signal_out, order_result.get('order_id', ''))
+                except Exception:
+                    pass
+                try:
+                    self.journal.log_entry(
+                        symbol=position.symbol, action='SELL',
+                        price=ltp, quantity=position.quantity,
+                        exit_reason=exit_reason,
+                        entry_price=position.entry_price,
+                        entry_date=position.entry_time.isoformat(),
+                        gross_pnl=gross_pnl,
+                        net_pnl=gross_pnl,
+                        charges=0,
+                        sector='Other',
+                        trade_score=0,
+                    )
+                except Exception as je:
+                    logger.warning(f'Journal SELL log failed for holding: {je}')
+            else:
+                if order_result.get('cdsl_auth_required'):
+                    # Position stays OPEN — bot will retry next cycle once authorised
+                    logger.error(
+                        f'CDSL auth required for {position.symbol} — '
+                        f'position kept OPEN, will retry after authorisation'
+                    )
+                    if position.symbol not in self._cdsl_alert_sent:
+                        try:
+                            self.telegram._send(
+                                f'🔐 <b>CDSL AUTHORISATION REQUIRED</b>\n\n'
+                                f'Bot wants to sell <b>{position.symbol}</b> '
+                                f'({exit_reason}) but needs demat authorisation first.\n\n'
+                                f'<b>Action:</b> Open Kite → Portfolio → Holdings → tap <b>Authorise</b>\n'
+                                f'🔗 https://kite.zerodha.com/holdings\n\n'
+                                f'Bot will auto-sell on the next cycle once authorised.'
+                            )
+                        except Exception:
+                            pass
+                        self._cdsl_alert_sent.add(position.symbol)
+                else:
+                    logger.error(f'Holdings SELL order FAILED for {position.symbol}: {order_result}')
+
+        return executed_exits
+
     def execute_signal(self, signal: Dict) -> Dict:
         """
         Execute a trading signal

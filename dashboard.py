@@ -81,6 +81,42 @@ def _heartbeat_loop():
             logger.debug(f"Heartbeat error: {_e}")
         time.sleep(60)
 
+# ── IP address cache — refreshed every 5 min in background to avoid per-request HTTP calls ──
+_IP_CACHE: dict = {"ipv4": "unknown", "ipv6": "Not available", "ts": None}
+_IP_CACHE_TTL = timedelta(minutes=5)
+_IP_CACHE_LOCK = threading.Lock()
+
+def _refresh_ip_cache():
+    """Fetch public IP in background thread and cache for 5 min."""
+    import urllib.request as _ur
+    try:
+        for _url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
+            try:
+                _raw = _ur.urlopen(_url, timeout=5).read().decode().strip()
+                if _raw and '.' in _raw and len(_raw) < 20:
+                    with _IP_CACHE_LOCK:
+                        _IP_CACHE["ipv4"] = _raw
+                        _IP_CACHE["ts"]   = datetime.now(IST)
+                    break
+            except Exception:
+                continue
+        try:
+            _v6 = _ur.urlopen('https://api6.ipify.org', timeout=4).read().decode().strip()
+            with _IP_CACHE_LOCK:
+                _IP_CACHE["ipv6"] = _v6 if ':' in _v6 else 'Not available'
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _maybe_refresh_ip():
+    """Trigger background IP refresh if cache is stale."""
+    with _IP_CACHE_LOCK:
+        ts = _IP_CACHE["ts"]
+    age = (datetime.now(IST) - ts) if ts else timedelta.max
+    if age > _IP_CACHE_TTL:
+        threading.Thread(target=_refresh_ip_cache, daemon=True).start()
+
 # ── Background signal cache ───────────────────────────────────────────────────
 # Scan runs in a background thread every 15 min; dashboard reads from cache instantly
 _SIGNAL_CACHE = {
@@ -153,6 +189,20 @@ def _run_background_scan():
         except Exception as _e:
             logger.debug(f"Live gainer fetch error: {_e}")
 
+        # E) Force-include currently held/open positions so they always appear in the UI
+        try:
+            from broker_integration import BrokerIntegration as _BI
+            _bh = _BI().get_holdings()
+            _held_force = [
+                p.get('tradingsymbol') for p in
+                (_bh.get('positions', []) + _bh.get('holdings', []))
+                if (p.get('quantity', 0) or p.get('opening_quantity', 0) or 0) > 0
+                and p.get('tradingsymbol')
+            ]
+            priority_syms = _held_force + priority_syms  # held stocks always first
+        except Exception:
+            pass
+
         # Merge: priority first (force-included), then normal display list, dedup, cap at 60
         _seen: set = set()
         merged_display: list = []
@@ -202,7 +252,9 @@ def _run_background_scan():
             sym   = sig.get('symbol', '')
             act   = sig.get('action', '')
             conf  = sig.get('confidence', 0)
-            score = float(sig.get('overall_score') or sig.get('trade_score') or 0)
+            raw_score = float(sig.get('overall_score') or sig.get('trade_score') or 0)
+            # Normalize to 0-100: ai_research_agent returns 0-1 float; TradeScorer returns 0-100
+            score = round(raw_score * 100, 1) if raw_score <= 1.0 else round(raw_score, 1)
             rr    = float(sig.get('risk_reward_ratio') or 0)
             price = float(sig.get('current_price') or sig.get('price') or 0)
 
@@ -229,7 +281,7 @@ def _run_background_scan():
                 'target':            sig.get('target') or round(price * (1 + tgt_pct), 2),
                 'stop_loss':         sig.get('stop_loss') or round(price * (1 - sl_pct), 2),
                 'confidence':        conf,
-                'overall_score':     round(score, 1),
+                'overall_score':     score,
                 'risk_reward_ratio': round(rr, 2),
                 'trend':             sig.get('trend', ''),
                 'reasoning':         sig.get('reasoning', ''),
@@ -1147,10 +1199,10 @@ tr:last-child td{border:none}
 <div id="tab-portfolio" class="tab-content">
 
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Account Balance</div><div class="stat-value" id="p-account-balance">₹—</div></div>
+    <div class="card"><div class="stat-label">Portfolio Value</div><div class="stat-value" id="p-account-balance">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Cash + Holdings</div></div>
     <div class="card"><div class="stat-label">Available Cash</div><div class="stat-value green" id="p-cash">₹—</div></div>
     <div class="card"><div class="stat-label">Margin Blocked</div><div class="stat-value red" id="p-margin">₹—</div></div>
-    <div class="card"><div class="stat-label">Holdings Value</div><div class="stat-value" id="p-holdings-val">₹—</div></div>
+    <div class="card"><div class="stat-label">Holdings Value</div><div class="stat-value" id="p-holdings-val">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">At market price</div></div>
   </div>
 
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
@@ -1190,9 +1242,9 @@ tr:last-child td{border:none}
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
         <th style="text-align:left">Date</th><th style="text-align:left">Symbol</th>
-        <th>Type</th><th>Qty</th><th>Price</th><th>Value</th><th>P&amp;L</th>
+        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>P&amp;L</th><th>P&amp;L %</th>
       </tr></thead>
-      <tbody id="p-trade-history"><tr><td colspan="7" style="text-align:center;color:#4b5563;padding:20px">No trade history</td></tr></tbody>
+      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1357,21 +1409,21 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- ── REJECTED STOCKS ────────────────────────────────────────── -->
+  <!-- ── ALL SCANNED SIGNALS ────────────────────────────────────── -->
   <div class="card mb-4">
     <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleRejected()">
-      <div style="font-size:14px;font-weight:700;color:#9ca3af">🚫 Rejected Stocks <span id="s-rejected-badge" style="font-size:11px;font-weight:400;color:#4b5563"></span></div>
-      <div id="s-rejected-chevron" style="color:#4b5563;font-size:16px;transition:transform .2s">▼</div>
+      <div style="font-size:14px;font-weight:700;color:#9ca3af">📋 All Scanned Signals <span id="s-rejected-badge" style="font-size:11px;font-weight:400;color:#4b5563"></span></div>
+      <div id="s-rejected-chevron" style="color:#4b5563;font-size:16px;transition:transform .2s">▲</div>
     </div>
-    <div id="s-rejected-body" style="margin-top:12px;display:none">
-      <div style="font-size:11px;color:#4b5563;margin-bottom:10px">These stocks were scanned but did not pass one or more filters. Click a row to see details.</div>
+    <div id="s-rejected-body" style="margin-top:12px;display:block">
+      <div style="font-size:11px;color:#4b5563;margin-bottom:10px">All stocks scanned this cycle — shows score, confidence, and why the bot did or did not act.</div>
       <table style="width:100%;border-collapse:collapse">
         <thead><tr>
           <th style="text-align:left">Symbol</th>
           <th style="text-align:left">Sector</th>
           <th style="text-align:center">Score</th>
           <th style="text-align:center">Conf.</th>
-          <th style="text-align:left">Rejection Reason</th>
+          <th style="text-align:left">Bot Decision</th>
         </tr></thead>
         <tbody id="s-rejected-table">
           <tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">—</td></tr>
@@ -1640,8 +1692,38 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Health Monitor -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🩺 Health Monitor</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="card-sm"><div class="stat-label">Today's P&amp;L</div><div style="font-size:15px;font-weight:700" id="bs-daily-pnl">—</div></div>
+      <div class="card-sm"><div class="stat-label">Drawdown</div><div style="font-size:15px;font-weight:700" id="bs-drawdown">—</div></div>
+      <div class="card-sm"><div class="stat-label">Errors Today</div><div style="font-size:15px;font-weight:700" id="bs-errors">—</div></div>
+      <div class="card-sm"><div class="stat-label">Circuit Breaker</div><div style="font-size:15px;font-weight:700" id="bs-circuit">—</div></div>
+      <div class="card-sm"><div class="stat-label">API Latency</div><div style="font-size:15px;font-weight:700" id="bs-latency">—</div></div>
+      <div class="card-sm"><div class="stat-label">Memory Usage</div><div style="font-size:15px;font-weight:700" id="bs-mem">—</div></div>
+      <div class="card-sm"><div class="stat-label">CPU</div><div style="font-size:15px;font-weight:700" id="bs-cpu">—</div></div>
+      <div class="card-sm"><div class="stat-label">Win Rate (Journal)</div><div style="font-size:15px;font-weight:700 green" id="bs-winrate">—</div></div>
+    </div>
+  </div>
+
+  <!-- Positions Capacity -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">📊 Position Capacity</div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <div style="flex:1;background:#1f2937;border-radius:8px;height:18px;overflow:hidden">
+        <div id="bs-pos-bar" style="height:100%;background:#3b82f6;border-radius:8px;transition:width .4s"></div>
+      </div>
+      <div id="bs-pos-label" style="font-size:14px;font-weight:700;color:#f9fafb;min-width:60px;text-align:right">—</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#4b5563;margin-top:6px">
+      <span>0</span><span id="bs-pos-max">— max</span>
+    </div>
+  </div>
+
   <div style="text-align:right;font-size:11px;color:#374151;padding:8px 0">
-    <a href="/api/data" style="color:#374151;text-decoration:underline">Raw API JSON</a>
+    <a href="/api/data" style="color:#374151;text-decoration:underline">Raw API JSON</a> &nbsp;|
+    <a href="/api/health" style="color:#374151;text-decoration:underline">Health JSON</a>
   </div>
 
 </div><!-- /tab-botstatus -->
@@ -1712,6 +1794,19 @@ tr:last-child td{border:none}
 
     </div><!-- /6-card grid -->
 
+    <!-- ── Quick Action Links (always visible) ──────────────────────────── -->
+    <div style="background:#1e293b;border-radius:12px;padding:18px 20px;border:1px solid #334155;margin-bottom:20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div style="font-size:13px;font-weight:600;color:#94a3b8;flex:1 1 160px">🔧 Kite Quick Actions</div>
+      <a href="https://developers.kite.trade/profile" target="_blank"
+         style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
+        🔗 Update IP Whitelist
+      </a>
+      <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+         style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
+        🔐 Re-authenticate Kite
+      </a>
+    </div>
+
     <!-- ── IP Changed Alert Box ──────────────────────────────────────────── -->
     <div id="ip-action-box" style="background:#1a1206;border-radius:12px;padding:22px;border:2px solid #f59e0b;margin-bottom:20px;display:none">
       <div style="font-size:16px;font-weight:700;color:#f59e0b;margin-bottom:6px">⚠️ Public IPv4 Changed — Orders May Fail!</div>
@@ -1726,10 +1821,16 @@ tr:last-child td{border:none}
         </div>
       </div>
       <div style="font-size:13px;color:#cbd5e1;margin-bottom:16px">Add the new IP to Kite Developer Console → all orders will resume automatically.</div>
-      <a href="https://developers.kite.trade/apps" target="_blank"
-         style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
-        🔗 Open Kite Console &rarr;
-      </a>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <a href="https://developers.kite.trade/profile" target="_blank"
+           style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
+          🔗 Open Kite Console &rarr;
+        </a>
+        <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+           style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
+          🔐 Re-authenticate Kite &rarr;
+        </a>
+      </div>
       <div style="font-size:11px;color:#64748b;margin-top:12px">After whitelisting → click Refresh above to confirm.</div>
     </div>
 
@@ -1738,9 +1839,9 @@ tr:last-child td{border:none}
       <div style="font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:14px">📋 How to Update IP in Kite (30 seconds)</div>
       <ol style="color:#94a3b8;font-size:13px;line-height:2.2;padding-left:20px;margin:0">
         <li>Click <b style="color:#f59e0b">Open Kite Console</b> in the alert box above</li>
-        <li>Click your app name → <b style="color:#f1f5f9">Edit</b></li>
-        <li>In <b style="color:#f1f5f9">IP Whitelist</b>, remove old IP, paste new IP, press <b style="color:#f1f5f9">Enter</b></li>
-        <li>Click <b style="color:#34d399">Save</b></li>
+        <li>Go to your app → <b style="color:#f1f5f9">IP Whitelist</b> section</li>
+        <li>Remove old IP, paste new IP, press <b style="color:#f1f5f9">Enter</b> → click <b style="color:#34d399">Save</b></li>
+        <li>If orders still fail → click <b style="color:#3b82f6">Re-authenticate Kite</b> to get a fresh token</li>
         <li>Come back here → click <b style="color:#3b82f6">Refresh</b></li>
       </ol>
       <div style="margin-top:14px;padding:12px;background:#0f172a;border-radius:8px;font-size:12px;color:#64748b">
@@ -1928,7 +2029,7 @@ tr:last-child td{border:none}
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function rupee(v){return '₹'+parseFloat(v||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function pct(v,dec=2){let n=parseFloat(v||0);return (n>=0?'+':'')+n.toFixed(dec)+'%';}
-function pnlStr(v){let n=parseFloat(v||0);return (n>=0?'+':'')+rupee(Math.abs(n));}
+function pnlStr(v){let n=parseFloat(v||0);return (n>=0?'+':'-')+rupee(Math.abs(n));}
 function pnlClass(v){return parseFloat(v)>=0?'green':'red';}
 function scoreColor(s){if(s>=80)return '#22c55e';if(s>=60)return '#eab308';return '#ef4444';}
 function riskLabel(rr){if(rr>=2)return '<span class="green">Low</span>';if(rr>=1)return '<span class="yellow">Medium</span>';return '<span class="red">High</span>';}
@@ -2507,15 +2608,19 @@ async function load(){
 
     // Holdings table
     const hldEl=document.getElementById('p-holdings');
-    if(d.holdings&&d.holdings.length){
-      hldEl.innerHTML=d.holdings.map(h=>{
-        const pnl=(h.last_price-h.average_price)*h.quantity;
-        const retPct=((h.last_price-h.average_price)/h.average_price*100).toFixed(1);
+    const activeHoldings=(d.holdings||[]).filter(h=>parseInt(h.quantity||0)>0);
+    if(activeHoldings.length){
+      hldEl.innerHTML=activeHoldings.map(h=>{
+        const qty=parseInt(h.quantity||0);
+        const avg=parseFloat(h.average_price||0);
+        const ltp=parseFloat(h.last_price||avg);
+        const pnl=(ltp-avg)*qty;
+        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(1):'0.0';
         return `<tr>
           <td style="font-weight:700;color:#f9fafb">${h.tradingsymbol}</td>
-          <td style="text-align:center">${h.quantity}</td>
-          <td>${rupee(h.average_price)}</td>
-          <td>${rupee(h.last_price)}</td>
+          <td style="text-align:center">${qty}</td>
+          <td>${rupee(avg)}</td>
+          <td>${rupee(ltp)}</td>
           <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
           <td class="${pnlClass(retPct)}">${pct(retPct)}</td>
         </tr>`;
@@ -2530,24 +2635,38 @@ async function load(){
     if(allOrd.length){
       thEl.innerHTML=allOrd.slice(0,50).map(o=>{
         const isBuy=o.transaction_type==='BUY';
-        const price=parseFloat(o.average_price||o.price||0);
+        const isSell=o.transaction_type==='SELL';
         const qty=parseInt(o.quantity||0);
-        const val=price*qty;
+        const buyP=parseFloat(o.buy_price||o.average_price||0);
+        const sellP=parseFloat(o.sell_price||o.average_price||0);
         const pnl=parseFloat(o.pnl||0);
+        const pnlPct=(isSell&&buyP>0)?((sellP-buyP)/buyP*100):0;
         const ts=String(o.order_timestamp||'').slice(0,16).replace('T',' ');
-        const pnlCell=isBuy?'<td>—</td>':`<td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>`;
-        return `<tr>
-          <td style="font-size:12px;color:#9ca3af">${ts}</td>
-          <td style="font-weight:700;color:#f9fafb">${o.tradingsymbol}</td>
-          <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}" style="font-size:11px">${o.transaction_type}</span></td>
-          <td style="text-align:center">${qty}</td>
-          <td>${rupee(price)}</td>
-          <td>${rupee(val)}</td>
-          ${pnlCell}
+        // Buy Price column: show for both BUY and SELL rows
+        const buyCell=isSell
+          ?`<td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>`
+          :`<td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>`;
+        // Sell Price column: only meaningful for SELL rows
+        const sellCell=isSell
+          ?`<td style="color:#f9fafb;font-family:monospace">${rupee(sellP)}</td>`
+          :`<td style="color:#4b5563">—</td>`;
+        // P&L cell: only for SELLs
+        const pnlCell=isSell
+          ?`<td class="${pnlClass(pnl)}" style="font-weight:700">${pnlStr(pnl)}</td>`
+          :`<td style="color:#4b5563">—</td>`;
+        const pnlPctCell=isSell
+          ?`<td class="${pnlClass(pnlPct)}" style="font-size:12px">${pct(pnlPct,1)}</td>`
+          :`<td style="color:#4b5563">—</td>`;
+        return `<tr style="border-bottom:1px solid #1f2937">
+          <td style="font-size:12px;color:#9ca3af;padding:8px 6px">${ts}</td>
+          <td style="font-weight:700;color:#f9fafb;padding:8px 6px">${o.tradingsymbol}</td>
+          <td style="padding:8px 4px"><span class="badge ${isBuy?'badge-buy':'badge-sell'}" style="font-size:11px">${o.transaction_type}</span></td>
+          <td style="text-align:center;padding:8px 4px">${qty}</td>
+          ${buyCell}${sellCell}${pnlCell}${pnlPctCell}
         </tr>`;
       }).join('');
     } else {
-      thEl.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4b5563;padding:20px">No trade history yet</td></tr>';
+      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history yet</td></tr>';
     }
 
     // ── TAB: POSITIONS ───────────────────────────────────────────
@@ -2706,36 +2825,42 @@ async function load(){
       candCount&&(candCount.textContent='Scanning…');
     }
 
-    // ── REJECTED TABLE ──
+    // ── ALL SCANNED SIGNALS TABLE (candidates + rejected combined) ──
     const rejBody=document.getElementById('s-rejected-table');
     const rejBadge=document.getElementById('s-rejected-badge');
-    if(rejBadge) rejBadge.textContent='('+rejected.length+')';
+    // Show ALL signals sorted: candidates (Will buy*) first, then rest by score
+    const allSorted=[...candidates,...rejected].sort((a,b)=>{
+      if(a.bot_decision==='Will buy*' && b.bot_decision!=='Will buy*') return -1;
+      if(b.bot_decision==='Will buy*' && a.bot_decision!=='Will buy*') return 1;
+      return (b.overall_score||0)-(a.overall_score||0);
+    });
+    if(rejBadge) rejBadge.textContent='('+allSorted.length+' stocks)';
     document.getElementById('s-rejected-cnt').textContent=rejected.length;
-    if(rejected.length){
-      rejBody.innerHTML=rejected.map(s=>{
+    if(allSorted.length){
+      rejBody.innerHTML=allSorted.map(s=>{
         const score=Math.round(s.overall_score||0);
         const conf=Math.round((s.confidence||0)*100);
         const bd=s.bot_decision||'—';
-        // Rejection reason → short label
         let rejTag='';
-        if(bd.includes('Already held')) rejTag='<span style="background:#1d4ed822;color:#60a5fa;padding:2px 7px;border-radius:3px;font-size:10px">Already Held</span>';
-        else if(bd.includes('Max positions')) rejTag='<span style="background:#16a34a22;color:#4ade80;padding:2px 7px;border-radius:3px;font-size:10px">Max Positions</span>';
-        else if(bd.includes('Score')) rejTag='<span style="background:#4b556333;color:#9ca3af;padding:2px 7px;border-radius:3px;font-size:10px">Low Score</span>';
-        else if(bd.includes('R:R')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">Poor R:R</span>';
-        else if(bd.includes('Confidence')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">Low Confidence</span>';
-        else if(bd.includes('SELL')) rejTag='<span style="background:#dc262622;color:#ef4444;padding:2px 7px;border-radius:3px;font-size:10px">SELL Signal</span>';
+        if(bd==='Will buy*') rejTag='<span style="background:#16a34a33;color:#4ade80;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700">✅ Will Buy</span>';
+        else if(bd.includes('Already held')||bd.includes('Already Held')) rejTag='<span style="background:#1d4ed822;color:#60a5fa;padding:2px 7px;border-radius:3px;font-size:10px">📦 Already Held</span>';
+        else if(bd.includes('Max positions')) rejTag='<span style="background:#7c3aed22;color:#a78bfa;padding:2px 7px;border-radius:3px;font-size:10px">🔒 Slots Full</span>';
+        else if(bd.includes('Score')) rejTag='<span style="background:#4b556333;color:#9ca3af;padding:2px 7px;border-radius:3px;font-size:10px">📉 Low Score</span>';
+        else if(bd.includes('R:R')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">⚖️ Poor R:R</span>';
+        else if(bd.includes('Confidence')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">🎯 Low Conf.</span>';
+        else if(bd.includes('SELL')) rejTag='<span style="background:#dc262622;color:#ef4444;padding:2px 7px;border-radius:3px;font-size:10px">📉 SELL Signal</span>';
         else rejTag=`<span style="color:#4b5563;font-size:11px">${bd}</span>`;
-        const sectorLabel=s.sector||'—';
-        return `<tr style="border-bottom:1px solid #1f293766;opacity:0.75">
-          <td style="padding:7px 8px;font-weight:600;color:#9ca3af">${s.symbol}</td>
-          <td style="padding:7px 6px;color:#4b5563;font-size:11px">${sectorLabel}</td>
-          <td style="text-align:center;padding:7px 6px;color:${score>=70?'#eab308':'#4b5563'};font-size:12px">${score||'—'}</td>
+        const symColor=bd==='Will buy*'?'#f9fafb':bd.includes('Already Held')||bd.includes('Already held')?'#60a5fa':'#9ca3af';
+        return `<tr style="border-bottom:1px solid #1f293766">
+          <td style="padding:7px 8px;font-weight:700;color:${symColor}">${s.symbol}</td>
+          <td style="padding:7px 6px;color:#4b5563;font-size:11px">${s.sector||'—'}</td>
+          <td style="text-align:center;padding:7px 6px;color:${score>=80?'#22c55e':score>=70?'#eab308':'#4b5563'};font-size:12px;font-weight:600">${score||'—'}</td>
           <td style="text-align:center;padding:7px 6px;color:#4b5563;font-size:11px">${conf?conf+'%':'—'}</td>
           <td style="padding:7px 6px">${rejTag}</td>
         </tr>`;
       }).join('');
     } else {
-      rejBody.innerHTML='<tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">No rejections yet</td></tr>';
+      rejBody.innerHTML='<tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">Scan running — results appear here in ~30s</td></tr>';
     }
 
     // Confidence meters (top candidates only)
@@ -2866,6 +2991,51 @@ async function load(){
     document.getElementById('bs-cfg-holddays').textContent=(d.cfg_swing_max_hold_days||15)+' days';
     document.getElementById('bs-cfg-reentry').textContent=(d.cfg_reentry_cooldown_hours||4)+'h cooldown';
 
+    // Position capacity bar
+    const posOpen=parseInt(d.open_positions||0);
+    const posMax=parseInt(d.cfg_max_positions||7);
+    const posBarEl=document.getElementById('bs-pos-bar');
+    const posPct=Math.min(posOpen/posMax*100,100);
+    if(posBarEl){
+      posBarEl.style.width=posPct+'%';
+      posBarEl.style.background=posPct>=100?'#ef4444':posPct>=80?'#eab308':'#3b82f6';
+    }
+    const posLbl=document.getElementById('bs-pos-label');
+    if(posLbl) posLbl.textContent=posOpen+' / '+posMax;
+    const posMaxLbl=document.getElementById('bs-pos-max');
+    if(posMaxLbl) posMaxLbl.textContent=posMax+' max slots';
+
+    // Daily P&L in health section
+    const dpnl=parseFloat(d.daily_pnl||0);
+    const dpnlEl=document.getElementById('bs-daily-pnl');
+    if(dpnlEl){dpnlEl.textContent=pnlStr(dpnl);dpnlEl.className='stat-value '+(dpnl>=0?'green':'red');}
+
+    // Drawdown from portfolio_health
+    const ph=d.portfolio_health||{};
+    const ddEl=document.getElementById('bs-drawdown');
+    if(ddEl){
+      const dd=parseFloat(ph.drawdown_pct||0);
+      ddEl.textContent=dd.toFixed(2)+'%';
+      ddEl.className='stat-value '+(dd<5?'green':dd<10?'yellow':'red');
+    }
+
+    // Win rate from journal (loaded separately in loadJournal)
+    // — populated by the async journal loader below
+
+    // Fetch health data for errors/circuit/latency/mem/cpu
+    fetch('/api/health').then(r=>r.json()).then(h=>{
+      const errEl=document.getElementById('bs-errors');
+      if(errEl){const e=parseInt(h.errors_today||0);errEl.textContent=e;errEl.className='stat-value '+(e===0?'green':e<5?'yellow':'red');}
+      const cbEl=document.getElementById('bs-circuit');
+      if(cbEl){const open=h.circuit_open;cbEl.innerHTML=open?'<span class="red">⚡ OPEN</span>':'<span class="green">✅ Closed</span>';}
+      const latEl=document.getElementById('bs-latency');
+      if(latEl){const ms=parseFloat(h.api_latency_ms||0);latEl.textContent=ms.toFixed(0)+'ms';latEl.className='stat-value '+(ms<200?'green':ms<500?'yellow':'red');}
+      const memEl=document.getElementById('bs-mem');
+      if(memEl){const mp=parseFloat(h.mem_pct||0);memEl.textContent=mp.toFixed(0)+'%';memEl.className='stat-value '+(mp<70?'green':mp<85?'yellow':'red');}
+      const cpuEl=document.getElementById('bs-cpu');
+      if(cpuEl){const cp=parseFloat(h.cpu_pct||0);cpuEl.textContent=cp.toFixed(0)+'%';cpuEl.className='stat-value '+(cp<60?'green':cp<80?'yellow':'red');}
+    }).catch(()=>{});
+
     prevData=d;
 
   }catch(e){console.error('Dashboard error:',e);}
@@ -2881,12 +3051,20 @@ async function loadJournal(){
     const hasClosed=j.total_trades>0;
     document.getElementById('j-total').textContent=(j.total_trades||0)+' closed / '+(j.open_trades_count||0)+' open';
     const wrEl=document.getElementById('j-winrate');
-    wrEl.textContent=(j.win_rate||0).toFixed(1)+'%';
-    wrEl.className='stat-value '+(j.win_rate>=60?'green':j.win_rate>=40?'yellow':'red');
+    // API returns win_rate as 0-1 decimal (e.g. 1.0 = 100%)
+    const wrVal=parseFloat(j.win_rate||0)*100;
+    // Also populate Bot Status tab win rate
+    const bsWrEl=document.getElementById('bs-winrate');
+    if(bsWrEl){bsWrEl.textContent=wrVal.toFixed(1)+'%';bsWrEl.className='stat-value '+(wrVal>=60?'green':wrVal>=40?'yellow':'red');}
+    wrEl.textContent=wrVal.toFixed(1)+'%';
+    wrEl.className='stat-value '+(wrVal>=60?'green':wrVal>=40?'yellow':'red');
     const npEl=document.getElementById('j-netpnl');
-    npEl.textContent=(np>=0?'+':'')+rupee(np);
+    npEl.textContent=(np>=0?'+':'-')+rupee(Math.abs(np));
     npEl.className='stat-value '+(np>=0?'green':'red');
-    document.getElementById('j-pf').textContent=(j.profit_factor||0).toFixed(2);
+    // Profit factor: ∞ when no losses exist
+    const pfVal=parseFloat(j.profit_factor||0);
+    const noLosses=(j.avg_loss||0)===0&&(j.avg_win||0)>0&&(j.total_trades||0)>0;
+    document.getElementById('j-pf').textContent=noLosses?'∞':pfVal.toFixed(2);
     document.getElementById('j-avgwin').textContent=rupee(j.avg_win||0);
     document.getElementById('j-avgloss').textContent=rupee(j.avg_loss||0);
     document.getElementById('j-avgscore').textContent=(j.avg_score||0).toFixed(1)+'/100';
@@ -2999,7 +3177,7 @@ async function loadJournal(){
           : '<span style="background:#166534;color:#fff;font-size:10px;padding:2px 6px;border-radius:6px">✅ CLOSED</span>';
         const pnlCell=isOpen
           ? '<td style="color:#60a5fa;font-weight:700">holding</td>'
-          : `<td class="${pnlClass(pnl)}" style="font-weight:700">${(pnl>=0?'+':'')+rupee(pnl)}</td>`;
+          : `<td class="${pnlClass(pnl)}" style="font-weight:700">${pnlStr(pnl)}</td>`;
         return `<tr>
           <td style="color:#6b7280;white-space:nowrap">${isOpen?(t.date||'—'):(t.exit_date||t.date||'—')}</td>
           <td style="font-weight:700;color:#f9fafb">${t.symbol}${reentryBadge}</td>
@@ -3009,11 +3187,11 @@ async function loadJournal(){
           <td style="color:#9ca3af;font-size:12px">${t.sector||'—'}</td>
           <td>${rupee(t.entry_price||0)}</td>
           <td>${isOpen?'<span style="color:#4b5563">—</span>':(t.exit_price?rupee(t.exit_price):'—')}</td>
-          <td style="text-align:center">${isOpen?((t.holding_days!=null?t.holding_days:0)+'d ongoing'):(t.holding_days!=null?t.holding_days+'d':'—')}</td>
+          <td style="text-align:center">${(()=>{if(isOpen){const d0=new Date(t.date||'');const now=new Date();const diff=d0&&!isNaN(d0)?Math.floor((now-d0)/86400000):0;return diff+'d ongoing';}else{const d0=new Date(t.date||'');const d1=new Date(t.exit_date||t.date||'');const diff=d0&&d1&&!isNaN(d0)&&!isNaN(d1)?Math.floor((d1-d0)/86400000):0;return diff+'d';}})()}</td>
           <td style="color:${sentCol};font-size:11px;text-align:center">${sentiment||'—'}</td>
           <td style="text-align:center;font-size:12px">${t.rsi?t.rsi.toFixed(0):'—'}</td>
           <td style="font-size:11px">${t.trend||'—'}</td>
-          <td style="font-size:11px;color:#9ca3af;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${t.exit_reason||t.buy_reason||''}">${isOpen?'<span style="color:#4b5563">holding</span>':(t.exit_reason||'—')}</td>
+          <td style="font-size:11px;color:#9ca3af;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${t.exit_reason||t.buy_reason||''}">${(()=>{if(isOpen)return '<span style="color:#4b5563">holding</span>';const r=t.exit_reason||'';const lbl={'kite_order':'Manual Sell','stop_loss':'🛑 SL Hit','target':'🎯 Target Hit','max_hold':'⏰ Max Hold','rsi_overbought':'📈 RSI>80','signal_reversal':'🔄 Reversal','trailing_stop':'🔔 Trail SL'};return lbl[r]||r||'—';})()}</td>
           ${pnlCell}
         </tr>`;
       }).join('');
@@ -3286,8 +3464,8 @@ function _btRenderResults(data){
   mddEl.style.color = mdd > -20 ? '#f59e0b' : '#ef4444';
 
   const pfEl = document.getElementById('bt-pf');
-  pfEl.textContent = pf===Infinity ? '∞' : pf.toFixed(2);
-  pfEl.style.color = pf>=1.5 ? '#22c55e' : pf>=1 ? '#f59e0b' : '#ef4444';
+  pfEl.textContent = (pf===null||pf>=999) ? '∞' : pf.toFixed(2);
+  pfEl.style.color = (pf===null||pf>=1.5) ? '#22c55e' : pf>=1 ? '#f59e0b' : '#ef4444';
 
   document.getElementById('bt-sharpe').textContent  = (s.sharpe_ratio||0).toFixed(2);
   document.getElementById('bt-sortino').textContent = (s.sortino_ratio||0).toFixed(2);
@@ -3620,7 +3798,8 @@ def api_data():
     net_pos = []
     try:
         pos_data = kite.positions()
-        net_pos = [p for p in pos_data.get('net', []) if p.get('quantity', 0) != 0]
+        # Only include positive qty — negative = T+1 settlement offset for already-sold CNC stocks
+        net_pos = [p for p in pos_data.get('net', []) if p.get('quantity', 0) > 0]
     except Exception:
         pass
 
@@ -3631,17 +3810,21 @@ def api_data():
         holdings_as_pos = []
         pos_symbols = {p.get('tradingsymbol') for p in net_pos}
         for h in holdings_raw:
-            effective_qty = (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0)
-            if effective_qty == 0:
+            settled_qty = h.get('quantity', 0) or 0
+            t1_qty      = h.get('t1_quantity', 0) or 0
+            # Use settled qty only — T+1 stocks also appear in kite.positions() net
+            # so using settled prevents double-counting. Show both in total for display.
+            effective_qty = settled_qty
+            if effective_qty == 0 and t1_qty == 0:
                 continue
-            h['quantity'] = effective_qty  # normalise so JS sees correct qty
+            display_qty = effective_qty if effective_qty > 0 else t1_qty
             if h.get('tradingsymbol') in pos_symbols:
-                continue  # already in net positions
+                continue  # already captured in net positions (T+1 case)
             holdings_as_pos.append({
                 'tradingsymbol':  h.get('tradingsymbol'),
                 'exchange':       h.get('exchange', 'BSE'),
                 'product':        h.get('product', 'CNC'),
-                'quantity':       effective_qty,
+                'quantity':       display_qty,
                 'average_price':  h.get('average_price', 0),
                 'last_price':     h.get('last_price', h.get('close_price', 0)),
                 'close_price':    h.get('close_price', 0),
@@ -3649,16 +3832,53 @@ def api_data():
                 'day_change':     h.get('day_change', 0),
                 'day_change_percentage': h.get('day_change_percentage', 0),
                 'overnight_quantity': h.get('opening_quantity', 0),
-                'value':          h.get('average_price', 0) * effective_qty,
+                'value':          h.get('average_price', 0) * display_qty,
                 '_source':        'holding',
             })
         all_positions = net_pos + holdings_as_pos
         data['positions'] = all_positions
         data['open_positions'] = len(all_positions)
-        data['daily_pnl'] = sum(p.get('pnl', 0) for p in all_positions)
+        # Compute P&L: use kite's pnl field when available (intraday), else derive from prices
+        def _pos_pnl(p):
+            kite_pnl = p.get('pnl', 0) or 0
+            if kite_pnl != 0:
+                return kite_pnl
+            ltp = p.get('last_price', 0) or p.get('close_price', 0) or 0
+            avg = p.get('average_price', 0) or 0
+            qty = p.get('quantity', 0) or 0
+            return (ltp - avg) * qty if ltp and avg and qty else 0
+        data['daily_pnl'] = sum(_pos_pnl(p) for p in all_positions)
         data['invested'] = sum(p.get('average_price', 0) * p.get('quantity', 0) for p in all_positions)
 
         # Enrich positions with re-entry metadata from trade journal
+        # ── Enrich with SL / Target from risk_manager positions.json ─────
+        try:
+            _pos_file = os.path.join(os.path.dirname(__file__), 'data', 'positions.json')
+            _rm_map = {}
+            if os.path.exists(_pos_file):
+                with open(_pos_file) as _pf:
+                    _pd = json.load(_pf)
+                for _rp in _pd.get('positions', []):
+                    _rm_map[_rp['symbol']] = _rp
+        except Exception:
+            _rm_map = {}
+
+        _sl_pct  = config.SWING_STOP_LOSS_PERCENTAGE  if config.TRADING_MODE == 'swing' else config.STOP_LOSS_PERCENTAGE
+        _tgt_pct = config.SWING_TARGET_PERCENTAGE     if config.TRADING_MODE == 'swing' else config.TARGET_PERCENTAGE
+
+        for pos in all_positions:
+            sym = pos.get('tradingsymbol')
+            avg = pos.get('average_price', 0) or 0
+            _rm = _rm_map.get(sym, {})
+            # SL / Target: prefer risk_manager file, fall back to config %
+            sl  = _rm.get('stop_loss')   or (round(avg * (1 - _sl_pct),  2) if avg else None)
+            tgt = _rm.get('target')      or (round(avg * (1 + _tgt_pct), 2) if avg else None)
+            tsl = _rm.get('trailing_stop') or sl
+            pos['stop_loss']    = sl
+            pos['target']       = tgt
+            pos['trailing_stop']= tsl
+
+        # ── Enrich with journal metadata (first entry, days held, re-entry) ──
         try:
             _jpath = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
             with open(_jpath) as _jf:
@@ -3667,12 +3887,13 @@ def api_data():
             for pos in all_positions:
                 sym = pos.get('tradingsymbol')
                 sym_buys = [e for e in _buy_entries if e.get('symbol') == sym]
+                avg = pos.get('average_price', 0) or 0
                 if sym_buys:
                     sym_buys_sorted = sorted(sym_buys, key=lambda x: x.get('timestamp', ''))
                     first = sym_buys_sorted[0]
                     last  = sym_buys_sorted[-1]
                     reentry_count = sum(1 for e in sym_buys if e.get('is_reentry'))
-                    pos['first_entry_price']  = first.get('entry_price', pos.get('average_price', 0))
+                    pos['first_entry_price']  = first.get('entry_price', avg)
                     pos['entry_date']         = first.get('date', '')
                     pos['reentry_count']      = reentry_count
                     pos['is_reentry']         = last.get('is_reentry', False)
@@ -3680,7 +3901,6 @@ def api_data():
                     pos['reentry_score']      = last.get('reentry_score', 0)
                     pos['reentry_confidence'] = last.get('reentry_confidence', 0)
                     if pos['entry_date']:
-                        from datetime import date as _date
                         try:
                             _entry_dt = datetime.strptime(pos['entry_date'], '%Y-%m-%d').date()
                             pos['days_held'] = (datetime.now().date() - _entry_dt).days
@@ -3688,6 +3908,12 @@ def api_data():
                             pos['days_held'] = 0
                     else:
                         pos['days_held'] = 0
+                else:
+                    # No journal entry — stock bought outside bot or before journal
+                    pos.setdefault('first_entry_price', avg)
+                    pos.setdefault('entry_date', today_str)
+                    pos['days_held'] = 0  # treat as today
+                    pos['reentry_count'] = 0
         except Exception:
             pass
     except Exception:
@@ -3734,33 +3960,93 @@ def api_data():
                     order_pnl[order_id] = total_pnl
             return order_pnl
         
-        # Attach P&L to all orders
-        all_order_pnl = calculate_pnl(orders)
-        for o in orders:
-            o['pnl'] = all_order_pnl.get(o.get('order_id', ''), 0.0)
-        
-        # All completed orders (for trade history tab) + today's orders
-        all_completed = [o for o in orders if o.get('status') == 'COMPLETE']
-        # Merge journal entries for orders not already in Kite's list (covers manual buys + past sessions)
+        # Load journal for buy-price lookup (needed for sells from past sessions)
         journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
+        journal_entries = []
         try:
             with open(journal_path) as _jf:
                 journal_entries = json.load(_jf)
+        except Exception:
+            pass
+
+        # Build per-symbol buy price map from journal (for cross-session P&L)
+        # journal BUY entries: entry_price=buy price, exit_price=sell price (set on SELL)
+        _jnl_buy_map = {}  # symbol -> list of {qty, buy_price, sell_price, net_pnl}
+        for je in journal_entries:
+            if je.get('action') == 'BUY':
+                sym = je.get('symbol')
+                _jnl_buy_map.setdefault(sym, []).append({
+                    'qty':       je.get('quantity', 1),
+                    'buy_price': je.get('entry_price', 0),
+                    'sell_price':je.get('exit_price'),   # set when position closed
+                    'net_pnl':   je.get('net_pnl'),
+                    'date':      je.get('date', ''),
+                })
+
+        # Attach P&L to all orders via FIFO; fall back to journal for cross-session sells
+        all_order_pnl = calculate_pnl(orders)
+        for o in orders:
+            oid = o.get('order_id', '')
+            sym = o.get('tradingsymbol', '')
+            sell_price = float(o.get('average_price', 0) or o.get('price', 0))
+            fifo_pnl = all_order_pnl.get(oid, 0.0)
+            if o.get('transaction_type') == 'SELL' and fifo_pnl == 0.0:
+                # FIFO had no matching buy (cross-session) — look up journal
+                jbuys = _jnl_buy_map.get(sym, [])
+                if jbuys:
+                    # Use journal net_pnl if available, else compute from buy price
+                    jb = jbuys[-1]
+                    if jb.get('net_pnl') is not None:
+                        fifo_pnl = jb['net_pnl']
+                        o['buy_price'] = jb['buy_price']
+                    elif jb.get('buy_price'):
+                        fifo_pnl = (sell_price - jb['buy_price']) * int(o.get('quantity', 1))
+                        o['buy_price'] = jb['buy_price']
+            elif o.get('transaction_type') == 'BUY':
+                o['buy_price'] = sell_price  # for BUYs, show the buy price itself
+            o['pnl'] = fifo_pnl
+            if o.get('transaction_type') == 'SELL':
+                o['sell_price'] = sell_price
+
+        # All completed orders (for trade history tab) + today's orders
+        all_completed = [o for o in orders if o.get('status') == 'COMPLETE']
+        # Merge journal entries for orders not already in Kite's list (covers past sessions)
+        try:
             kite_ids = {o.get('order_id') for o in all_completed}
+            kite_syms_today = {o.get('tradingsymbol') for o in all_completed}
             for je in journal_entries:
+                sym = je.get('symbol')
                 ts = str(je.get('date', '')) + ' 09:00:00'
                 if je.get('kite_order_id') not in kite_ids:
-                    all_completed.append({
-                        'tradingsymbol': je.get('symbol'),
-                        'transaction_type': je.get('action', 'BUY'),
-                        'quantity': je.get('quantity', 0),
-                        'average_price': je.get('entry_price', 0),
-                        'order_timestamp': ts,
-                        'status': 'COMPLETE',
-                        'pnl': je.get('net_pnl') or 0.0,
-                        'order_id': je.get('kite_order_id', ''),
-                        '_source': 'journal',
-                    })
+                    # Show as SELL row if the journal entry has an exit price (closed trade)
+                    if je.get('exit_price') and je.get('net_pnl') is not None:
+                        all_completed.append({
+                            'tradingsymbol':    sym,
+                            'transaction_type': 'SELL',
+                            'quantity':         je.get('quantity', 0),
+                            'average_price':    je.get('exit_price', 0),
+                            'buy_price':        je.get('entry_price', 0),
+                            'sell_price':       je.get('exit_price', 0),
+                            'order_timestamp':  ts,
+                            'status':           'COMPLETE',
+                            'pnl':              je.get('net_pnl', 0.0),
+                            'order_id':         je.get('kite_order_id', ''),
+                            '_source':          'journal',
+                        })
+                    else:
+                        # Still-open position — show as BUY row
+                        all_completed.append({
+                            'tradingsymbol':    sym,
+                            'transaction_type': je.get('action', 'BUY'),
+                            'quantity':         je.get('quantity', 0),
+                            'average_price':    je.get('entry_price', 0),
+                            'buy_price':        je.get('entry_price', 0),
+                            'order_timestamp':  ts,
+                            'status':           'COMPLETE',
+                            'pnl':              0.0,
+                            'order_id':         je.get('kite_order_id', ''),
+                            '_source':          'journal',
+                        })
         except Exception:
             pass
         data['all_orders'] = sorted(all_completed, key=lambda x: str(x.get('order_timestamp', '')), reverse=True)
@@ -3771,7 +4057,10 @@ def api_data():
         sells = [o for o in completed if o.get('transaction_type') == 'SELL']
         data['total_trades'] = len(completed)
         data['win_rate'] = len(sells) / len(buys) if buys else 0
-        data['daily_pnl'] = sum(o.get('pnl', 0) for o in sells)
+        # daily_pnl = unrealized (from positions) + realized (from today's closed trades)
+        realized_pnl = sum(o.get('pnl', 0) for o in sells)
+        unrealized_pnl = data.get('daily_pnl', 0)  # set earlier from positions
+        data['daily_pnl'] = unrealized_pnl + realized_pnl
         
         # Weekly / Monthly performance
         week_ago = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -3811,34 +4100,7 @@ def api_data():
         except Exception:
             pass
 
-        # Portfolio health
-        positions_value = sum(p.get('last_price', 0) * p.get('quantity', 0) for p in data.get('positions', []))
-        account_value = data.get('account_balance', 0) + positions_value + data.get('holdings_value', 0)
-        peak_file = os.path.join(os.path.dirname(__file__), 'data', 'peak_value.json')
-        peak_value = account_value
-        try:
-            if os.path.exists(peak_file):
-                with open(peak_file) as f:
-                    saved = json.load(f)
-                    saved_peak = saved.get('peak_value', account_value)
-                    saved_date = saved.get('date', '')
-                    # Reset peak at the start of each trading day
-                    if saved_date == today_str:
-                        peak_value = max(saved_peak, account_value)
-        except Exception:
-            pass
-        try:
-            os.makedirs(os.path.dirname(peak_file), exist_ok=True)
-            with open(peak_file, 'w') as f:
-                json.dump({"peak_value": peak_value, "date": today_str}, f)
-        except Exception:
-            pass
-        drawdown = (peak_value - account_value) / peak_value if peak_value > 0 else 0
-        data['portfolio_health'] = {
-            "account_value": round(account_value, 2),
-            "peak_value": round(peak_value, 2),
-            "drawdown": round(drawdown * 100, 2)
-        }
+        # Portfolio health — computed later after holdings are loaded (see below)
         
         # Strategy statistics (all-time complete sells)
         all_sells = [o for o in orders if o.get('status') == 'COMPLETE' and o.get('transaction_type') == 'SELL']
@@ -3864,15 +4126,59 @@ def api_data():
 
     # Delivery holdings
     try:
-        holdings = kite.holdings()
-        # Normalize quantity to include T1 (stocks bought yesterday show qty=0 otherwise)
-        for h in holdings:
-            h['quantity'] = (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0)
+        holdings_raw = kite.holdings()
+        holdings = []
+        for h in holdings_raw:
+            settled = h.get('quantity', 0) or 0
+            t1      = h.get('t1_quantity', 0) or 0
+            total_qty = settled + t1
+            if total_qty <= 0:
+                continue   # skip sold/zero-qty entries (IFGLEXPOR, KALYANKJIL etc.)
+            h['quantity'] = total_qty  # include T+1 so BPL appears
+            holdings.append(h)
         data['holdings'] = holdings
         holdings_value = sum(h.get('quantity', 0) * h.get('last_price', 0) for h in holdings)
-        data['holdings_value'] = holdings_value
-        # True portfolio = Kite net margin (cash+collateral) + current market value of stocks
-        data['net_portfolio_value'] = data.get('account_balance', 0) + holdings_value
+        # Also include T+1 positions (kite.positions net) — they settle tomorrow
+        t1_value = sum(
+            p.get('last_price', p.get('average_price', 0)) * p.get('quantity', 0)
+            for p in data.get('positions', [])
+            if p.get('_source') != 'holding'  # don't double-count settled holdings
+        )
+        total_stocks_value = holdings_value + t1_value
+        data['holdings_value'] = total_stocks_value
+        # True portfolio = cash + current market value of all stocks (settled + T+1)
+        data['net_portfolio_value'] = data.get('cash', 0) + total_stocks_value
+        # account_balance shown in Portfolio tab header = total portfolio value
+        data['account_balance'] = data.get('cash', 0) + total_stocks_value
+    except Exception:
+        pass
+
+    # Portfolio health — computed here after account_balance is fully set (cash + holdings)
+    try:
+        account_value = data.get('account_balance', 0) or data.get('cash', 0)
+        _peak_file = os.path.join(os.path.dirname(__file__), 'data', 'peak_value.json')
+        peak_value = account_value
+        try:
+            if os.path.exists(_peak_file):
+                with open(_peak_file) as _pf:
+                    _saved = json.load(_pf)
+                    _saved_peak = _saved.get('peak_value', account_value)
+                    if _saved.get('date', '') == today_str:
+                        peak_value = max(_saved_peak, account_value)
+        except Exception:
+            pass
+        try:
+            os.makedirs(os.path.dirname(_peak_file), exist_ok=True)
+            with open(_peak_file, 'w') as _pf:
+                json.dump({"peak_value": peak_value, "date": today_str}, _pf)
+        except Exception:
+            pass
+        drawdown = (peak_value - account_value) / peak_value if peak_value > 0 else 0
+        data['portfolio_health'] = {
+            "account_value": round(account_value, 2),
+            "peak_value":    round(peak_value, 2),
+            "drawdown_pct":  round(drawdown * 100, 2),
+        }
     except Exception:
         pass
 
@@ -3962,24 +4268,15 @@ def api_data():
         (_cache_ts + _SIGNAL_CACHE_TTL).strftime('%I:%M %p') if _cache_ts else '—'
     )
 
-    # ── IP status ──────────────────────────────────────────────────────────
-    import urllib.request as _ur
+    # ── IP status — served from cache, refreshed every 5 min in background ──
     import socket as _sock
     _ip_file      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'last_known_ip.txt')
     _ip_hist_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ip_history.json')
 
-    # IPv4
-    try:
-        current_ip = _ur.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
-    except Exception:
-        current_ip = 'unknown'
-
-    # IPv6 (best-effort — won't resolve on many home ISPs)
-    try:
-        _ipv6_raw = _ur.urlopen('https://api6.ipify.org', timeout=4).read().decode().strip()
-        current_ipv6 = _ipv6_raw if ':' in _ipv6_raw else 'Not available'
-    except Exception:
-        current_ipv6 = 'Not available'
+    _maybe_refresh_ip()   # triggers background refresh if cache is stale (non-blocking)
+    with _IP_CACHE_LOCK:
+        current_ip   = _IP_CACHE["ipv4"]
+        current_ipv6 = _IP_CACHE["ipv6"]
 
     # Network interface type (WiFi / Ethernet / VPN / unknown)
     try:
@@ -4081,7 +4378,8 @@ def api_data():
     data['api_latency_ms']      = _api_lat
     data['trading_status']      = trading_status
     data['trading_status_color']= trading_status_color
-    data['kite_whitelist_url']  = 'https://developers.kite.trade/apps'
+    data['kite_whitelist_url']  = 'https://developers.kite.trade/profile'
+    data['kite_login_url']      = 'https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3'
 
     return jsonify(data)
 

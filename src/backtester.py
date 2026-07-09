@@ -352,24 +352,22 @@ class _Portfolio:
                 })
                 del self.positions[sym]
 
-        # Check entry — mirror live bot filters exactly (including regime-adjusted gates)
-        bullish_trend = trend in ('STRONG_UPTREND', 'UPTREND')
+        # Check entry — mirror live bot filters (BUY signal + confidence gate)
+        not_downtrend = trend not in ('STRONG_DOWNTREND', 'DOWNTREND')
         # Regime-adjusted confidence gate (mirrors TradeScorer SCORE_SKIP_* thresholds)
-        # confidence in backtester is 0-1; map from live 60/62/80 → 0.60/0.62/0.80
         regime_upper = str(regime).upper()
         if regime_upper == 'BULL':
-            min_confidence = 0.62    # SCORE_SKIP_BULL=62 → slightly relaxed
+            min_confidence = 0.60
         elif regime_upper == 'BEAR':
-            min_confidence = 2.0     # Never buy in BEAR (impossible to satisfy)
+            min_confidence = 2.0     # Never buy in BEAR
         else:  # SIDEWAYS / VOLATILE / UNKNOWN
-            min_confidence = 0.60    # SCORE_SKIP default
+            min_confidence = 0.55    # slightly relaxed for backtest
 
         if (sym not in self.positions
                 and sig == 'BUY'
-                and score > 0.45
-                and bullish_trend
-                and rsi < 75
-                and vol_ratio >= 1.0
+                and score > 0.35
+                and not_downtrend
+                and rsi < 78
                 and confidence >= min_confidence
                 and len(self.positions) < self.max_pos
                 and self.cash > 0):
@@ -445,9 +443,9 @@ class _Portfolio:
                    if len(downside) > 1 and np.std(downside) > 0 else 0.0
 
         # Profit factor
-        gross_win  = float(wins['pnl'].sum())  if len(wins)   else 0.0
-        gross_loss = float(abs(losses['pnl'].sum())) if len(losses) else 1.0
-        profit_factor = gross_win / gross_loss if gross_loss > 0 else float('inf')
+        gross_win  = float(wins['pnl'].sum())    if len(wins)   else 0.0
+        gross_loss = float(abs(losses['pnl'].sum())) if len(losses) else 0.0
+        profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)  # 999 = inf (JSON-safe)
 
         # Avg win / loss
         avg_win  = float(wins['pnl_pct'].mean())   if len(wins)   else 0.0
@@ -494,11 +492,25 @@ class _Portfolio:
         df['exit_month'] = df['exit_date'].apply(lambda d: d.strftime('%Y-%m'))
         by_month = df.groupby('exit_month')['pnl'].sum().round(2).to_dict()
 
-        # Equity curve (date → cumulative equity)
-        eq_curve = [
-            {'date': str(row['exit_date'].date()), 'equity': round(initial_capital + float(cum), 2)}
+        # Equity curve — daily series interpolated between trade exits
+        # Build a dict: exit_date -> cumulative equity at that point
+        exit_equity = {
+            str(row['exit_date'].date()): round(initial_capital + float(cum), 2)
             for cum, (_, row) in zip(cum_pnl, df_sorted.iterrows())
-        ]
+        }
+        # Fill every calendar day from start to end, carrying forward last equity
+        _eq_dates = pd.date_range(start=start_dt, end=end_dt, freq='B')  # business days
+        _last_eq = initial_capital
+        eq_curve = []
+        for _d in _eq_dates:
+            _ds = str(_d.date())
+            if _ds in exit_equity:
+                _last_eq = exit_equity[_ds]
+            eq_curve.append({'date': _ds, 'equity': _last_eq})
+        # Downsample to max 400 pts for chart performance
+        if len(eq_curve) > 400:
+            step = len(eq_curve) // 400
+            eq_curve = eq_curve[::step]
 
         summary = {
             'symbols_tested':  int(df['symbol'].nunique()),

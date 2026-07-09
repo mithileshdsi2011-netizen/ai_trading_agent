@@ -141,8 +141,26 @@ class TradeJournal:
                     'month':           _mon,
                 }
             else:
-                entry_date_dt = datetime.fromisoformat(entry_date) if entry_date else datetime.now()
-                holding_days  = (datetime.now() - entry_date_dt).days
+                # Find the original BUY date from existing journal entries for accurate holding_days
+                _buy_entry = next(
+                    (e for e in entries if e.get('symbol') == symbol
+                     and e.get('action') == 'BUY' and e.get('status') == 'OPEN'),
+                    None
+                )
+                if _buy_entry and _buy_entry.get('date'):
+                    try:
+                        _buy_dt = datetime.fromisoformat(_buy_entry['date'])
+                        holding_days = (datetime.now() - _buy_dt).days
+                    except Exception:
+                        holding_days = 0
+                elif entry_date:
+                    try:
+                        entry_date_dt = datetime.fromisoformat(entry_date)
+                        holding_days = (datetime.now() - entry_date_dt).days
+                    except Exception:
+                        holding_days = 0
+                else:
+                    holding_days = 0
                 entry = {
                     'id':             len(entries) + 1,
                     'date':           today,
