@@ -69,6 +69,12 @@ class TradingOrchestrator:
         # Kite health: consecutive failure counter for mid-session token expiry alert
         self._kite_fail_count: int = 0
         self._KITE_FAIL_ALERT_THRESHOLD: int = 2
+        self._kite_alert_sent: bool = False   # send alert only once per outage
+        self._last_alerted_ip: str = ''          # track which IP we already alerted on
+        # Morning shortlist cache — built once per trading day from full 150-stock scan,
+        # reused every 15-min cycle to avoid rescanning all 150 stocks repeatedly.
+        self._morning_shortlist: List[str] = []   # top-40 symbols for intraday cycles
+        self._morning_shortlist_date: str = ''    # date when shortlist was built
     
     def run_once(self) -> Dict:
         """
@@ -97,15 +103,36 @@ class TradingOrchestrator:
                 if self.market_data.kite:
                     self.market_data.kite.margins()
                     kite_ok = True
-                    self._kite_fail_count = 0  # reset on success
+                    if self._kite_fail_count > 0:
+                        logger.info(f"Kite health restored after {self._kite_fail_count} failures")
+                    self._kite_fail_count = 0
+                    self._kite_alert_sent = False  # reset so next outage alerts again
                 else:
                     kite_ok = False
             except Exception as _kite_err:
-                kite_ok = False
-                logger.error(f"Kite health check FAILED: {_kite_err}")
+                # Try to reload token from file — bot may have started with a stale token
+                try:
+                    import json as _json
+                    _tfile = os.path.join(os.path.dirname(__file__), '..', 'data', 'kite_token.json')
+                    with open(_tfile) as _tf:
+                        _td = _json.load(_tf)
+                    _new_token = _td.get('access_token', '')
+                    if _new_token and self.market_data.kite:
+                        self.market_data.kite.set_access_token(_new_token)
+                        # Also update broker's kite object
+                        if hasattr(self.order_executor, 'broker') and hasattr(self.order_executor.broker, 'kite'):
+                            self.order_executor.broker.kite.set_access_token(_new_token)
+                        self.market_data.kite.margins()  # verify it works
+                        kite_ok = True
+                        self._kite_fail_count = 0
+                        self._kite_alert_sent = False
+                        logger.info("Kite token reloaded from file successfully")
+                except Exception:
+                    kite_ok = False
+                    logger.error(f"Kite health check FAILED: {_kite_err}")
             if not kite_ok:
                 self._kite_fail_count += 1
-                if self._kite_fail_count >= self._KITE_FAIL_ALERT_THRESHOLD:
+                if self._kite_fail_count >= self._KITE_FAIL_ALERT_THRESHOLD and not self._kite_alert_sent:
                     logger.error(
                         f"KITE TOKEN EXPIRED/UNREACHABLE — "
                         f"{self._kite_fail_count} consecutive failures. "
@@ -118,6 +145,9 @@ class TradingOrchestrator:
                         f"Orders are BLOCKED.\n"
                         f"Run: python get_kite_token.py to refresh token."
                     )
+                    self._kite_alert_sent = True  # suppress further alerts until recovery
+                else:
+                    logger.warning(f"Kite health check failed (cycle {self._kite_fail_count}) — alert already sent, waiting for recovery")
                 cycle_result['errors'].append(f'kite_ok=False ({self._kite_fail_count} cycles)')
                 return cycle_result
         # ──────────────────────────────────────────────────────────────────
@@ -251,18 +281,6 @@ class TradingOrchestrator:
             logger.debug(f"Daily loss check skipped: {_dl_e}")
 
         try:
-            # --- Build dynamic universe from live Kite data ---
-            logger.info("Building dynamic stock universe from NSE via Kite...")
-            try:
-                _candidates = self.dynamic_universe.get_top_candidates(
-                    display_n=50, scan_n=config.DYNAMIC_UNIVERSE_SIZE
-                )
-                universe = _candidates["scan_universe"]  # 150 ranked by liquidity+momentum
-                logger.info(f"Dynamic universe: {len(universe)} stocks selected (display top-50 diversified)")
-            except Exception as ue:
-                logger.warning(f"Dynamic universe failed ({ue}), using fallback watchlist")
-                universe = config.WATCHLIST
-
             # --- Read available cash and open positions from broker ---
             holdings = self.order_executor.broker.get_holdings()
             available_cash = holdings.get("cash", config.TRADING_AMOUNT)
@@ -298,7 +316,6 @@ class TradingOrchestrator:
                 logger.info(f"Market regime: {regime}")
                 if regime == "BEAR":
                     logger.warning("Bear market detected — no new BUYs, running smart exit + monitoring")
-                    # Fix 6: always protect open positions even in bear regime
                     try:
                         bear_positions = [
                             p for p in self.order_executor.risk_manager.positions
@@ -329,73 +346,103 @@ class TradingOrchestrator:
                     cycle_result['positions_monitored'] = position_updates
                     return cycle_result
 
-            # ── Inject today's top movers (morning picks + live gainers) ────────
-            # These stocks must be evaluated regardless of DynamicUniverse rank.
-            priority_syms: list = []
+            # ── MORNING SHORTLIST: full 150-stock scan once per day ─────────────
+            # On the FIRST cycle each trading day, scan all 150 stocks and cache
+            # the top-40 as the shortlist. Every subsequent cycle only scans those
+            # 40 + current holdings (reduces API usage by 60-75%).
+            _today_str = now_ist.strftime('%Y-%m-%d')
+            _need_full_scan = (self._morning_shortlist_date != _today_str
+                               or not self._morning_shortlist)
 
-            # A) Morning report AI top picks + gainers (if report is ready for today)
-            try:
-                import json as _json
-                _cache_path = os.path.join(
-                    os.path.dirname(os.path.dirname(__file__)), 'data', 'morning_report_cache.json'
+            if _need_full_scan:
+                logger.info("Morning full scan: building 150-stock shortlist for today...")
+                try:
+                    _candidates = self.dynamic_universe.get_top_candidates(
+                        display_n=50, scan_n=config.DYNAMIC_UNIVERSE_SIZE
+                    )
+                    _full_universe = _candidates["scan_universe"]
+                    logger.info(f"Full universe: {len(_full_universe)} stocks fetched")
+                except Exception as ue:
+                    logger.warning(f"Dynamic universe failed ({ue}), using fallback watchlist")
+                    _full_universe = config.WATCHLIST
+
+                # ── Inject priority stocks into full universe before shortlisting ──
+                priority_syms: list = list(open_symbols)  # always include held stocks
+
+                # Morning report picks
+                try:
+                    _cache_path = os.path.join(
+                        os.path.dirname(os.path.dirname(__file__)), 'data', 'morning_report_cache.json'
+                    )
+                    if os.path.exists(_cache_path):
+                        with open(_cache_path) as _f:
+                            _mr = json.load(_f)
+                        from datetime import date as _date
+                        if _mr.get("date") == str(_date.today()):
+                            _rpt = _mr.get("report", {})
+                            priority_syms += [p["symbol"] for p in _rpt.get("ai_top_picks", [])[:15]]
+                            priority_syms += [g["symbol"] for g in _rpt.get("top_gainers", [])[:10]]
+                            priority_syms += [g["symbol"] for g in _rpt.get("gap_up_stocks", [])[:8]]
+                            logger.info(f"Morning picks injected: {priority_syms[:10]}")
+                except Exception as _mp_e:
+                    logger.debug(f"Morning picks load error: {_mp_e}")
+
+                # Live batch-quote gainers ≥1.5%
+                try:
+                    from dynamic_universe import _NIFTY500_PRIORITY as _prio
+                    _all_q: dict = {}
+                    for _i in range(0, len(list(_prio)[:200]), 200):
+                        try:
+                            _q = self.market_data.kite.quote(
+                                [f"NSE:{s}" for s in list(_prio)[:200][_i:_i+200]]
+                            ) or {}
+                            _all_q.update(_q)
+                        except Exception:
+                            pass
+                    _live = []
+                    for _k, _qv in _all_q.items():
+                        _s = _k.replace("NSE:", "")
+                        _lp = _qv.get("last_price", 0)
+                        _pc = _qv.get("ohlc", {}).get("close", 0)
+                        if _lp and _pc and (_lp - _pc) / _pc * 100 >= 1.5:
+                            _live.append((_s, (_lp - _pc) / _pc * 100))
+                    _live.sort(key=lambda x: x[1], reverse=True)
+                    priority_syms += [s for s, _ in _live[:12]]
+                    logger.info(f"Live gainers ≥1.5%: {[s for s,_ in _live[:8]]}")
+                except Exception as _lg_e:
+                    logger.debug(f"Live gainer fetch error: {_lg_e}")
+
+                # Merge priority first, then full universe, dedup → take top 40 as shortlist
+                _seen_u: set = set()
+                merged_universe: list = []
+                for _s in priority_syms + _full_universe:
+                    if _s and _s not in _seen_u:
+                        _seen_u.add(_s)
+                        merged_universe.append(_s)
+                    if len(merged_universe) >= 175:
+                        break
+
+                # Cache top-40 as morning shortlist (priority stocks guaranteed)
+                self._morning_shortlist = merged_universe[:40]
+                self._morning_shortlist_date = _today_str
+                logger.info(
+                    f"Morning shortlist built: {len(self._morning_shortlist)} stocks "
+                    f"(from {len(merged_universe)} merged) — cached for all cycles today"
                 )
-                if os.path.exists(_cache_path):
-                    with open(_cache_path) as _f:
-                        _mr = _json.load(_f)
-                    from datetime import date as _date
-                    if _mr.get("date") == str(_date.today()):
-                        _rpt = _mr.get("report", {})
-                        priority_syms += [p["symbol"] for p in _rpt.get("ai_top_picks", [])[:15]]
-                        priority_syms += [g["symbol"] for g in _rpt.get("top_gainers", [])[:10]]
-                        priority_syms += [g["symbol"] for g in _rpt.get("gap_up_stocks", [])[:8]]
-                        logger.info(f"Morning picks injected: {priority_syms[:10]}")
-            except Exception as _mp_e:
-                logger.debug(f"Morning picks load error: {_mp_e}")
+                universe = merged_universe  # first cycle scans full merged list
+            else:
+                # Intraday cycle — only scan shortlist + current holdings (no redundant full scan)
+                intraday_syms: list = list(self._morning_shortlist)
+                for _s in open_symbols:
+                    if _s and _s not in intraday_syms:
+                        intraday_syms.append(_s)
+                universe = intraday_syms
+                logger.info(
+                    f"Intraday cycle: scanning {len(universe)} stocks "
+                    f"({len(self._morning_shortlist)} shortlist + {len(open_symbols)} holdings)"
+                )
 
-            # B) Live batch-quote gainers ≥1.5% right now
-            try:
-                from dynamic_universe import _NIFTY500_PRIORITY as _prio
-                _syms200 = list(_prio)[:200]
-                _all_q: dict = {}
-                for _i in range(0, len(_syms200), 200):
-                    try:
-                        _q = self.market_data.kite.quote(
-                            [f"NSE:{s}" for s in _syms200[_i:_i+200]]
-                        ) or {}
-                        _all_q.update(_q)
-                    except Exception:
-                        pass
-                _live: list = []
-                for _k, _qv in _all_q.items():
-                    _sym = _k.replace("NSE:", "")
-                    _lp  = _qv.get("last_price", 0)
-                    _pc  = _qv.get("ohlc", {}).get("close", 0)
-                    if _lp and _pc:
-                        _chg = (_lp - _pc) / _pc * 100
-                        if _chg >= 1.5:
-                            _live.append((_sym, _chg))
-                _live.sort(key=lambda x: x[1], reverse=True)
-                priority_syms += [s for s, _ in _live[:12]]
-                logger.info(f"Live gainers ≥1.5%: {[s for s,_ in _live[:8]]}")
-            except Exception as _lg_e:
-                logger.debug(f"Live gainer fetch error: {_lg_e}")
-
-            # Merge: priority stocks first, then universe, dedup, cap at 175
-            _seen_u: set = set()
-            merged_universe: list = []
-            for _s in priority_syms + universe:
-                if _s and _s not in _seen_u:
-                    _seen_u.add(_s)
-                    merged_universe.append(_s)
-                if len(merged_universe) >= 175:
-                    break
-            logger.info(
-                f"Universe: {len(merged_universe)} total "
-                f"({len([s for s in priority_syms if s])} priority + {len(universe)} dynamic)"
-            )
-            universe = merged_universe
-
-            # --- Generate signals for dynamic universe ---
+            # --- Generate signals for universe ---
             logger.info(f"Generating signals for {len(universe)} stocks...")
             signals = self.signal_generator.generate_signals_for_watchlist(universe)
             cycle_result['signals_generated'] = signals
@@ -620,6 +667,13 @@ class TradingOrchestrator:
             # --- Monitor existing positions (SL / target / trailing) ---
             logger.info("Monitoring existing positions...")
             position_updates = self.order_executor.monitor_positions()
+
+            # --- Monitor CNC holdings (prior-day delivery positions) ---
+            logger.info("Monitoring CNC holdings...")
+            holding_updates = self.order_executor.monitor_holdings()
+            if holding_updates:
+                logger.info(f"Holdings exits: {len(holding_updates)}")
+            position_updates = position_updates + holding_updates
             cycle_result['positions_monitored'] = position_updates
 
             if position_updates:
@@ -716,23 +770,58 @@ class TradingOrchestrator:
             self.is_running = False
     
     def _check_ip_whitelist(self):
-        """Check if public IP has changed and warn loudly if so."""
+        """Check if public IP has changed — alert ONCE per new IP via email + Telegram."""
         try:
-            import urllib.request, os
-            current_ip = urllib.request.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
-            ip_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'last_known_ip.txt')
+            import urllib.request as _ur
+            # Fallback chain — same as dashboard
+            current_ip = ''
+            for _url in ('https://api.ipify.org', 'https://ifconfig.me/ip',
+                         'https://icanhazip.com', 'https://checkip.amazonaws.com'):
+                try:
+                    _r = _ur.urlopen(_url, timeout=5).read().decode().strip()
+                    if _r and '.' in _r and len(_r) < 20:
+                        current_ip = _r
+                        break
+                except Exception:
+                    continue
+            if not current_ip:
+                return  # can't determine IP — skip silently
+
+            ip_file = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'last_known_ip.txt'
+            )
             known_ip = open(ip_file).read().strip() if os.path.exists(ip_file) else None
+
             if known_ip and known_ip != current_ip:
                 logger.error(
                     f"\n{'='*60}\n"
-                    f"  ⚠️  IP ADDRESS CHANGED!\n"
+                    f"  \u26a0\ufe0f  IP ADDRESS CHANGED!\n"
                     f"  Old IP: {known_ip}\n"
                     f"  New IP: {current_ip}\n"
                     f"  ACTION: Add {current_ip} to Kite whitelist NOW!\n"
-                    f"  URL   : https://developers.kite.trade/apps\n"
+                    f"  URL   : https://developers.kite.trade/profile\n"
                     f"{'='*60}"
                 )
-            # Always update the stored IP
+                # Alert only if this new IP hasn't been alerted on yet
+                if current_ip != self._last_alerted_ip:
+                    self._alert(
+                        f"\u26a0\ufe0f IP Changed — Whitelist {current_ip}",
+                        f"\u26a0\ufe0f IP ADDRESS CHANGED\n\n"
+                        f"Old IP: {known_ip}\n"
+                        f"New IP: {current_ip}\n\n"
+                        f"Orders may be BLOCKED until you whitelist the new IP.\n\n"
+                        f"Step 1 — Add new IP to Kite:\n"
+                        f"https://developers.kite.trade/profile\n\n"
+                        f"Step 2 — Re-authenticate if needed:\n"
+                        f"https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3"
+                    )
+                    self._last_alerted_ip = current_ip
+            else:
+                # IP unchanged — reset so next change alerts again
+                self._last_alerted_ip = ''
+
+            # Always persist current IP
             with open(ip_file, 'w') as f:
                 f.write(current_ip)
         except Exception:
@@ -1212,6 +1301,32 @@ class TradingOrchestrator:
             except Exception as e:
                 logger.error(f"Token validation failed: {e}")
                 logger.warning("Please refresh token before market open")
+
+        # ── CDSL reminder: if any CNC holdings exist, ask user to authorise ──
+        try:
+            holdings = self.order_executor.broker.kite.holdings() if (
+                self.order_executor.broker.kite) else []
+            if holdings:
+                syms = [h.get('tradingsymbol') for h in holdings
+                        if (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0) > 0]
+                if syms:
+                    # Reset CDSL alert tracker daily so alerts fire again if needed
+                    self.order_executor._cdsl_alert_sent.clear()
+                    msg = (
+                        f"🔐 <b>CDSL AUTHORISATION REMINDER</b>\n\n"
+                        f"You hold <b>{len(syms)} CNC positions</b>: "
+                        f"{', '.join(syms)}\n\n"
+                        f"The bot will auto-sell these when SL/target is hit — "
+                        f"but Zerodha requires daily CDSL authorisation first.\n\n"
+                        f"<b>Authorise now (takes 30 seconds):</b>\n"
+                        f"🔗 https://kite.zerodha.com/holdings\n\n"
+                        f"Tap <b>Authorise</b> at the top of the Holdings page. "
+                        f"Bot will then auto-sell without any further action from you."
+                    )
+                    self._alert("🔐 CDSL Auth Required Before Trading", msg)
+                    logger.info(f"CDSL reminder sent for: {syms}")
+        except Exception as _ce:
+            logger.debug(f"CDSL pre-market check skipped: {_ce}")
 
         # Check system status
         logger.info("System ready for trading")

@@ -214,10 +214,23 @@ class BrokerIntegration:
                 )
                 # Save current IP so startup script can check
                 self._save_ip(current_ip)
+            # Detect CDSL TPIN authorisation required
+            cdsl_auth = any(k in err.lower() for k in ('cdsl', 'tpin', 'authoris', 'authorize', 'depository'))
+            if cdsl_auth:
+                logger.error(
+                    f"\n{'='*60}\n"
+                    f"  🔐 CDSL TPIN AUTHORISATION REQUIRED\n"
+                    f"  Zerodha requires you to authorise your demat holdings\n"
+                    f"  before the bot can sell them.\n"
+                    f"  ACTION: Open Kite → Portfolio → Holdings → Authorise\n"
+                    f"  URL   : https://kite.zerodha.com/holdings\n"
+                    f"{'='*60}"
+                )
             return {
                 'success': False,
                 'error': err,
-                'order_id': None
+                'order_id': None,
+                'cdsl_auth_required': cdsl_auth,
             }
     
     def _get_public_ip(self) -> str:
