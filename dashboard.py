@@ -89,10 +89,12 @@ _IP_CACHE_LOCK = threading.Lock()
 def _refresh_ip_cache():
     """Fetch public IP in background thread and cache for 5 min."""
     import urllib.request as _ur
+    import ssl as _ssl
+    _ctx = _ssl._create_unverified_context()
     try:
         for _url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                _raw = _ur.urlopen(_url, timeout=5).read().decode().strip()
+                _raw = _ur.urlopen(_url, timeout=5, context=_ctx).read().decode().strip()
                 if _raw and '.' in _raw and len(_raw) < 20:
                     with _IP_CACHE_LOCK:
                         _IP_CACHE["ipv4"] = _raw
@@ -101,7 +103,7 @@ def _refresh_ip_cache():
             except Exception:
                 continue
         try:
-            _v6 = _ur.urlopen('https://api6.ipify.org', timeout=4).read().decode().strip()
+            _v6 = _ur.urlopen('https://api6.ipify.org', timeout=4, context=_ctx).read().decode().strip()
             with _IP_CACHE_LOCK:
                 _IP_CACHE["ipv6"] = _v6 if ':' in _v6 else 'Not available'
         except Exception:
@@ -799,9 +801,41 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
 <title>AI Swing Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/chart.umd.min.js?v=2"></script>
+<script>
+// Report JS errors to server for debugging
+window.onerror=function(msg, url, line, col, err){
+  try{
+    fetch('/api/js-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:String(msg), url:String(url), line:line, col:col, stack:(err&&err.stack)||''})});
+  }catch(e){}
+};
+// Diagnostic: try a ping fetch immediately and display any error in the header
+try{
+  fetch('/api/data').then(function(r){return r.json();}).then(function(d){
+    var el=document.getElementById('last-updated');
+    if(el) el.textContent='API reachable — loading...';
+  }).catch(function(e){
+    var el=document.getElementById('last-updated');
+    if(el) el.textContent='FETCH ERROR: '+e.message;
+  });
+}catch(e){
+  var el=document.getElementById('last-updated');
+  if(el) el.textContent='JS ERROR: '+e.message;
+}
+// If this cached copy fails to initialize within 4s, force a no-cache reload once
+if(!location.search.includes('nocache=')){
+  setTimeout(function(){
+    var el=document.getElementById('last-updated');
+    if(el && el.textContent.indexOf('Initializing')!==-1){
+      location.href=location.href.split('?')[0]+'?nocache='+Date.now();
+    }
+  },4000);
+}
+</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0f1e;color:#e2e8f0;font-family:'Inter',system-ui,sans-serif;min-height:100vh}
@@ -2373,6 +2407,7 @@ let jChartCumulative=null, jChartScoreBucket=null, jChartSector=null, jChartExit
 const CHART_COLORS=['#3b82f6','#22c55e','#eab308','#a78bfa','#ef4444','#06b6d4','#f97316'];
 
 function makeOrUpdate(ref, ctx, cfg){
+  if(typeof Chart==='undefined') return null;
   if(ref){ref.data=cfg.data;ref.update();return ref;}
   return new Chart(ctx,cfg);
 }
@@ -2447,7 +2482,7 @@ async function load(){
     const rrEl=document.getElementById('d-rr');
     rrEl.textContent='1 : '+(rr>0?rr.toFixed(2):'—');
     rrEl.className='stat-value-sm '+(rr>=2?'green':rr>=1?'yellow':'red');
-    const dd=parseFloat(ph.drawdown||0);
+    const dd=parseFloat(ph.drawdown_pct||0);
     const ddEl2=document.getElementById('d-drawdown');
     ddEl2.textContent=dd.toFixed(2)+'%';ddEl2.className='stat-value-sm '+(dd<=1?'green':dd<=3?'yellow':'red');
 
@@ -2719,33 +2754,29 @@ async function load(){
     const invested2=parseFloat(d.invested||0);
     const held=parseFloat(d.holdings_value||0);
     const margB=parseFloat(d.margin_blocked||0);
+    if(typeof Chart!=='undefined'){
     const allocCtx=document.getElementById('chart-allocation');
     if(allocCtx){
       const allocCfg={type:'doughnut',data:{labels:['Cash','Invested','Holdings','Margin'],datasets:[{data:[cash2,invested2,held,margB],backgroundColor:['#22c55e','#3b82f6','#a78bfa','#ef4444'],borderWidth:0}]},options:{plugins:{legend:{labels:{color:'#9ca3af',font:{size:11}}}},cutout:'65%',maintainAspectRatio:false}};
       if(chartAlloc){chartAlloc.data=allocCfg.data;chartAlloc.update();}else{chartAlloc=new Chart(allocCtx,allocCfg);}
     }
-
-    // Sector Chart
     const secData=Object.entries(an.sector_allocation||{Cash:100});
     const secCtx=document.getElementById('chart-sector');
     if(secCtx){
       const secCfg={type:'doughnut',data:{labels:secData.map(s=>s[0]),datasets:[{data:secData.map(s=>s[1]),backgroundColor:CHART_COLORS,borderWidth:0}]},options:{plugins:{legend:{labels:{color:'#9ca3af',font:{size:11}}}},cutout:'55%',maintainAspectRatio:false}};
       if(chartSector){chartSector.data=secCfg.data;chartSector.update();}else{chartSector=new Chart(secCtx,secCfg);}
     }
-
-    // Portfolio Value line (mock trend based on current value)
     const portCtx=document.getElementById('chart-portfolio');
     if(portCtx&&!chartPortfolio){
       chartPortfolio=new Chart(portCtx,{type:'line',data:{labels:['9:30','10:00','10:30','11:00','11:30','12:00','12:30','1:00','1:30','Now'],datasets:[{label:'Portfolio',data:[portVal-50,portVal-30,portVal-40,portVal-20,portVal-10,portVal+5,portVal+20,portVal+dpnl*0.3,portVal+dpnl*0.7,portVal],borderColor:'#3b82f6',backgroundColor:'#3b82f611',fill:true,tension:0.4,pointRadius:2}]},options:{scales:{x:{ticks:{color:'#4b5563',font:{size:10}}},y:{ticks:{color:'#4b5563',font:{size:10},callback:v=>'₹'+v.toLocaleString('en-IN')}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
-
-    // P&L Bar
     const pnlCtx=document.getElementById('chart-pnl');
     if(pnlCtx&&!chartPnl){
       const days=['Mon','Tue','Wed','Thu','Fri'];
       const vals=[52,-10,84,12,dpnl];
       chartPnl=new Chart(pnlCtx,{type:'bar',data:{labels:days,datasets:[{data:vals,backgroundColor:vals.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]},options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
+    } // end Chart guard
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
     const allSigs=d.signals||[];
@@ -2922,16 +2953,18 @@ async function load(){
     const amPnlEl=document.getElementById('a-monthly-pnl');
     amPnlEl.textContent=pnlStr(mPnl);amPnlEl.className='stat-value '+(mPnl>=0?'green':'red');
     const ddEl=document.getElementById('a-max-drawdown');
-    ddEl.textContent=parseFloat(ph.drawdown||0).toFixed(2)+'%';
+    ddEl.textContent=parseFloat(ph.drawdown_pct||0).toFixed(2)+'%';
     document.getElementById('a-total-trades').textContent=d.total_trades||0;
 
     // Win rate gauge (doughnut)
+    if(typeof Chart!=='undefined'){
     const wrCtx=document.getElementById('chart-winrate');
     if(wrCtx){
       const wrVal=Math.round(wr);
       const wrCfg={type:'doughnut',data:{labels:['Win','Loss'],datasets:[{data:[wrVal,100-wrVal],backgroundColor:[wrVal>=60?'#22c55e':wrVal>=40?'#eab308':'#ef4444','#1f2937'],borderWidth:0}]},options:{plugins:{legend:{display:false},tooltip:{enabled:false},beforeDraw(chart){const {ctx,chartArea:{top,left,width,height}}=chart;ctx.save();ctx.font='bold 28px Inter';ctx.fillStyle='#f9fafb';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(wrVal+'%',left+width/2,top+height/2);ctx.restore();}},cutout:'70%',maintainAspectRatio:false}};
       if(chartWinrate){chartWinrate.data=wrCfg.data;chartWinrate.update();}else{chartWinrate=new Chart(wrCtx,wrCfg);}
     }
+    } // end Chart guard
 
     // Trade Calendar (realized P&L per weekday, from backend)
     const calEl=document.getElementById('a-calendar');
@@ -3006,17 +3039,17 @@ async function load(){
     if(posMaxLbl) posMaxLbl.textContent=posMax+' max slots';
 
     // Daily P&L in health section
-    const dpnl=parseFloat(d.daily_pnl||0);
-    const dpnlEl=document.getElementById('bs-daily-pnl');
-    if(dpnlEl){dpnlEl.textContent=pnlStr(dpnl);dpnlEl.className='stat-value '+(dpnl>=0?'green':'red');}
+    const bsDpnl=parseFloat(d.daily_pnl||0);
+    const bsDpnlEl=document.getElementById('bs-daily-pnl');
+    if(bsDpnlEl){bsDpnlEl.textContent=pnlStr(bsDpnl);bsDpnlEl.className='stat-value '+(bsDpnl>=0?'green':'red');}
 
     // Drawdown from portfolio_health
-    const ph=d.portfolio_health||{};
-    const ddEl=document.getElementById('bs-drawdown');
-    if(ddEl){
-      const dd=parseFloat(ph.drawdown_pct||0);
-      ddEl.textContent=dd.toFixed(2)+'%';
-      ddEl.className='stat-value '+(dd<5?'green':dd<10?'yellow':'red');
+    const bsPh=d.portfolio_health||{};
+    const bsDdEl=document.getElementById('bs-drawdown');
+    if(bsDdEl){
+      const bsDd=parseFloat(bsPh.drawdown_pct||0);
+      bsDdEl.textContent=bsDd.toFixed(2)+'%';
+      bsDdEl.className='stat-value '+(bsDd<5?'green':bsDd<10?'yellow':'red');
     }
 
     // Win rate from journal (loaded separately in loadJournal)
@@ -3038,7 +3071,10 @@ async function load(){
 
     prevData=d;
 
-  }catch(e){console.error('Dashboard error:',e);}
+  }catch(e){
+    console.error('Dashboard error:',e);
+    document.getElementById('last-updated').textContent='JS ERROR: '+e.message;
+  }
 }
 
 // ─── Journal loader ──────────────────────────────────────────────────────────
@@ -3071,6 +3107,7 @@ async function loadJournal(){
     document.getElementById('j-avghold').textContent=(j.avg_hold_days||0).toFixed(1)+' days';
 
     // Cumulative P&L chart
+    if(typeof Chart!=='undefined'){
     const cumData=j.cumulative_pnl||[];
     const cumCtx=document.getElementById('j-chart-cumulative');
     if(cumCtx){
@@ -3155,6 +3192,7 @@ async function loadJournal(){
       },options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>v+'%'},max:100,min:0}},plugins:{legend:{display:false}},maintainAspectRatio:false}};
       if(jChartRegime){jChartRegime.data=cfg.data;jChartRegime.update();}else{jChartRegime=new Chart(regCtx,cfg);}
     }
+    } // end Chart guard
 
     // Trade log table — merge open + closed trades, newest first
     const closedTrades=j.recent_trades||[];
@@ -3485,7 +3523,7 @@ function _btRenderResults(data){
 
   // Equity curve
   const eq = data.equity_curve || [];
-  if(eq.length > 1){
+  if(eq.length > 1 && typeof Chart!=='undefined'){
     const labels = eq.map(p=>p.date);
     const vals   = eq.map(p=>p.equity);
     const ctx    = document.getElementById('bt-equity-chart').getContext('2d');
@@ -3658,7 +3696,23 @@ def get_kite():
 
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    from flask import make_response, redirect, request
+    # Force browsers that have an old cached HTML to load a fresh, cache-busted URL
+    if request.args.get('v') != '3':
+        return redirect('/?v=3', code=302)
+    resp = make_response(render_template_string(HTML))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
+@app.route('/api/js-error', methods=['POST'])
+def js_error():
+    data = request.get_json(silent=True) or {}
+    msg = data.get('message', 'unknown')
+    stack = data.get('stack', '')
+    app.logger.error('JS ERROR from browser: %s | stack: %s', msg, stack[:1000])
+    return jsonify({'ok': True})
 
 
 @app.route('/api/data')
@@ -4056,7 +4110,8 @@ def api_data():
         buys  = [o for o in completed if o.get('transaction_type') == 'BUY']
         sells = [o for o in completed if o.get('transaction_type') == 'SELL']
         data['total_trades'] = len(completed)
-        data['win_rate'] = len(sells) / len(buys) if buys else 0
+        win_sells = [o for o in sells if (o.get('pnl') or 0) > 0]
+        data['win_rate'] = round(len(win_sells) / len(sells) * 100, 1) if sells else 0
         # daily_pnl = unrealized (from positions) + realized (from today's closed trades)
         realized_pnl = sum(o.get('pnl', 0) for o in sells)
         unrealized_pnl = data.get('daily_pnl', 0)  # set earlier from positions
@@ -4277,6 +4332,23 @@ def api_data():
     with _IP_CACHE_LOCK:
         current_ip   = _IP_CACHE["ipv4"]
         current_ipv6 = _IP_CACHE["ipv6"]
+
+    # Fallback: synchronous IP fetch if background cache hasn't populated yet
+    if current_ip == 'unknown':
+        try:
+            import urllib.request as _ur
+            import ssl as _ssl
+            _ctx = _ssl._create_unverified_context()
+            for _url in ('https://api.ipify.org','https://ifconfig.me/ip','https://icanhazip.com'):
+                try:
+                    _raw = _ur.urlopen(_url, timeout=4, context=_ctx).read().decode().strip()
+                    if _raw and '.' in _raw and len(_raw) < 20:
+                        current_ip = _raw
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     # Network interface type (WiFi / Ethernet / VPN / unknown)
     try:

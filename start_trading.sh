@@ -33,7 +33,7 @@ else
 fi
 
 # Install flask if missing
-pip install flask -q 2>/dev/null || true
+venv/bin/pip install flask -q 2>/dev/null || true
 
 # Kill any existing dashboard on port 5001
 lsof -ti:5001 | xargs kill -9 2>/dev/null || true
@@ -49,8 +49,10 @@ IP_FILE="data/last_known_ip.txt"
 echo -e "${YELLOW}━━━ IP Whitelist Check ━━━${NC}"
 CURRENT_IP=$(curl -s -4 --max-time 8 https://api.ipify.org 2>/dev/null || echo "unknown")
 echo -e "${GREEN}  ✓ Current Public IP: ${CURRENT_IP}${NC}"
-# Save for reference
-echo "$CURRENT_IP" > "$IP_FILE"
+# Save for reference only if fetch succeeded; preserve last known good IP otherwise
+if [ "$CURRENT_IP" != "unknown" ]; then
+    echo "$CURRENT_IP" > "$IP_FILE"
+fi
 if [ "$CURRENT_IP" != "unknown" ]; then
     echo -e "${CYAN}  → Make sure ${CURRENT_IP} is whitelisted at: https://developers.kite.trade/apps${NC}"
 fi
@@ -90,7 +92,7 @@ if [ "$TOKEN_VALID" = false ]; then
     echo ""
 
     # Start the token server in background
-    python get_kite_token.py &
+    venv/bin/python get_kite_token.py &
     TOKEN_PID=$!
     sleep 2
 
@@ -168,10 +170,12 @@ trap cleanup SIGINT SIGTERM
 # ─── Dashboard watchdog (auto-restart on crash) ───────────────────────────
 dashboard_watchdog() {
     while true; do
-        python dashboard.py &
+        venv/bin/python dashboard.py &
         DASH_PID=$!
+        set +e
         wait $DASH_PID
         EXIT_CODE=$?
+        set -e
         if [ $EXIT_CODE -ne 0 ]; then
             echo -e "${RED}  ✗ Dashboard crashed (exit $EXIT_CODE). Restarting in 10s...${NC}"
             sleep 10
@@ -185,10 +189,12 @@ dashboard_watchdog() {
 bot_watchdog() {
     RESTART_COUNT=0
     while true; do
-        python src/trading_orchestrator.py scheduled 15 &
+        venv/bin/python src/trading_orchestrator.py scheduled 15 &
         BOT_PID=$!
+        set +e
         wait $BOT_PID
         EXIT_CODE=$?
+        set -e
         if [ $EXIT_CODE -ne 0 ]; then
             RESTART_COUNT=$((RESTART_COUNT + 1))
             echo -e "${RED}  ✗ Bot crashed (exit $EXIT_CODE, restart #${RESTART_COUNT}). Restarting in 10s...${NC}"
