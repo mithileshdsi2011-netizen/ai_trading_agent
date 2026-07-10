@@ -49,74 +49,175 @@ class EmailReporter:
             return False
 
     def daily_report(self, summary: Dict, positions: List[Dict], orders: List[Dict]) -> bool:
-        date_str = datetime.now().strftime("%d %b %Y")
-        subject = f"AI Trading Daily Report — {date_str}"
-
-        pos_rows = ""
-        for p in positions:
-            pnl = p.get('pnl', 0)
-            pos_rows += f"""
-                <tr>
-                    <td>{p.get('tradingsymbol', p.get('symbol', ''))}</td>
-                    <td>{p.get('quantity', 0)}</td>
-                    <td>₹{p.get('average_price', 0):,.2f}</td>
-                    <td>₹{p.get('last_price', 0):,.2f}</td>
-                    <td style='color:{"green" if pnl >= 0 else "red"}'>₹{pnl:,.2f}</td>
-                </tr>
-            """
-
-        order_rows = ""
-        for o in orders[:20]:
-            order_rows += f"""
-                <tr>
-                    <td>{o.get('tradingsymbol', '')}</td>
-                    <td>{o.get('transaction_type', '')}</td>
-                    <td>{o.get('quantity', 0)}</td>
-                    <td>₹{o.get('average_price', 0) or o.get('price', 0):,.2f}</td>
-                    <td>{o.get('status', '')}</td>
-                </tr>
-            """
+        now = datetime.now()
+        date_str = now.strftime("%d %b %Y")
+        time_str = now.strftime("%I:%M %p IST")
+        subject = f"AI Swing Trading Bot – Daily Trading Report – {date_str}"
 
         es = summary.get('execution_summary', {})
         ps = es.get('position_summary', {})
-        charges    = ps.get('total_charges', 0)
-        net_pnl    = ps.get('total_net_pnl', ps.get('total_pnl', 0) - charges)
-        pf         = ps.get('profit_factor', 0)
-        avg_win    = ps.get('avg_win', 0)
-        avg_loss   = ps.get('avg_loss', 0)
-        blacklist  = ", ".join(ps.get('daily_blacklist', [])) or "None"
-        pnl_color  = 'green' if summary.get('daily_pnl', 0) >= 0 else 'red'
+
+        # ── Portfolio metrics ───────────────────────────────────────────────
+        cash = float(summary.get('cash', 0))
+        invested = float(summary.get('invested', 0))
+        portfolio_value = float(summary.get('total_value', cash + invested))
+        daily_gross = float(summary.get('daily_pnl', 0))
+        charges = float(ps.get('total_charges', 0))
+        daily_net = daily_gross - charges
+
+        # Unrealized / realized P&L from open positions and summary
+        unrealized = 0.0
+        for p in positions:
+            qty = int(p.get('quantity', 0) or 0)
+            avg = float(p.get('average_price', 0) or 0)
+            ltp = float(p.get('last_price', 0) or 0)
+            if qty and ltp and avg:
+                unrealized += (ltp - avg) * qty
+        realized = float(ps.get('realized_pnl', ps.get('total_pnl', 0))) - unrealized
+
+        overall_return = 0.0
+        base = portfolio_value - daily_gross
+        if base > 0:
+            overall_return = daily_gross / base * 100
+
+        open_count = int(summary.get('open_positions', 0))
+
+        # Count orders completed today
+        today_str = now.strftime("%Y-%m-%d")
+        closed_today = 0
+        for o in orders:
+            ts = o.get('exchange_timestamp') or o.get('order_timestamp') or ''
+            if isinstance(ts, datetime):
+                ts = ts.isoformat()
+            if str(ts).startswith(today_str) and o.get('status') == 'COMPLETE':
+                closed_today += 1
+        # Fallback to closed positions count if available
+        if not closed_today:
+            closed_today = int(ps.get('closed_positions', 0))
+
+        buying_capacity = cash * float(getattr(config, 'MAX_CAPITAL_USAGE', 0.87))
+
+        # ── Trading activity rows (today's completed orders) ──────────────────
+        activity_rows = ""
+        for o in orders:
+            ts = o.get('exchange_timestamp') or o.get('order_timestamp') or ''
+            if isinstance(ts, datetime):
+                ts = ts.isoformat()
+            if not str(ts).startswith(today_str):
+                continue
+            sym = o.get('tradingsymbol', o.get('symbol', ''))
+            action = o.get('transaction_type', '')
+            qty = int(o.get('quantity', 0) or 0)
+            price = float(o.get('average_price', 0) or o.get('price', 0) or 0)
+            status = '✅ Completed' if o.get('status') == 'COMPLETE' else o.get('status', '')
+            reason = o.get('status_message') or o.get('tag') or '—'
+            activity_rows += f"""
+                <tr>
+                    <td>{sym}</td>
+                    <td>{action}</td>
+                    <td>{qty}</td>
+                    <td>₹{price:,.2f}</td>
+                    <td>{status}</td>
+                    <td>{reason}</td>
+                </tr>
+            """
+        if not activity_rows:
+            activity_rows = '<tr><td colspan="6" style="text-align:center;">No trades today</td></tr>'
+
+        # ── Current holdings rows ─────────────────────────────────────────────
+        holdings_rows = ""
+        for p in positions:
+            sym = p.get('tradingsymbol', p.get('symbol', ''))
+            qty = int(p.get('quantity', 0) or 0)
+            avg = float(p.get('average_price', 0) or 0)
+            ltp = float(p.get('last_price', 0) or 0)
+            day_pnl = float(p.get('day_pnl', 0))
+            total_pnl = float(p.get('pnl', 0))
+            ret = 0.0
+            if avg and ltp and avg > 0:
+                ret = (ltp - avg) / avg * 100
+            sl = p.get('stop_loss')
+            target = p.get('target')
+            status = p.get('status', 'HOLD')
+            holdings_rows += f"""
+                <tr>
+                    <td>{sym}</td>
+                    <td>{qty}</td>
+                    <td>₹{avg:,.2f}</td>
+                    <td>₹{ltp:,.2f}</td>
+                    <td style='color:{"green" if day_pnl >= 0 else "red"}'>₹{day_pnl:,.2f}</td>
+                    <td style='color:{"green" if total_pnl >= 0 else "red"}'>₹{total_pnl:,.2f}</td>
+                    <td style='color:{"green" if ret >= 0 else "red"}'>{ret:.2f}%</td>
+                    <td>{f"₹{sl:,.2f}" if sl else "—"}</td>
+                    <td>{f"₹{target:,.2f}" if target else "—"}</td>
+                    <td>{status}</td>
+                </tr>
+            """
+        if not holdings_rows:
+            holdings_rows = '<tr><td colspan="10" style="text-align:center;">No open positions</td></tr>'
+
+        pnl_color = 'green' if daily_net >= 0 else 'red'
+        gross_color = 'green' if daily_gross >= 0 else 'red'
+        unreal_color = 'green' if unrealized >= 0 else 'red'
+        real_color = 'green' if realized >= 0 else 'red'
 
         body = f"""
         <html>
-        <body style='font-family:Arial,sans-serif;'>
-            <h2>AI Trading Daily Report — {date_str}</h2>
-            <table style='border-collapse:collapse;' cellpadding='6'>
-              <tr><td><b>Cash</b></td><td>₹{summary.get('cash', 0):,.2f}</td></tr>
-              <tr><td><b>Invested</b></td><td>₹{summary.get('invested', 0):,.2f}</td></tr>
-              <tr><td><b>Daily Gross P&amp;L</b></td><td style='color:{pnl_color}'>₹{summary.get('daily_pnl', 0):,.2f}</td></tr>
-              <tr><td><b>Total Charges</b></td><td style='color:red'>₹{charges:,.2f}</td></tr>
-              <tr><td><b>Daily Net P&amp;L</b></td><td style='color:{pnl_color}'><b>₹{net_pnl:,.2f}</b></td></tr>
-              <tr><td><b>Open Positions</b></td><td>{summary.get('open_positions', 0)}</td></tr>
-              <tr><td><b>Total Trades</b></td><td>{summary.get('total_trades', 0)}</td></tr>
-              <tr><td><b>Win Rate</b></td><td>{summary.get('win_rate', 0):.0%}</td></tr>
-              <tr><td><b>Avg Win / Avg Loss</b></td><td>₹{avg_win:.2f} / ₹{abs(avg_loss):.2f}</td></tr>
-              <tr><td><b>Profit Factor</b></td><td>{pf:.2f}</td></tr>
-              <tr><td><b>Market Regime</b></td><td>{summary.get('market_regime', 'UNKNOWN')}</td></tr>
-              <tr><td><b>Today’s Blacklist</b></td><td>{blacklist}</td></tr>
-            </table>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; color: #333; }}
+                h2 {{ color: #1a5276; }}
+                h3 {{ color: #1a5276; margin-top: 24px; }}
+                table {{ border-collapse: collapse; width: 100%; margin-top: 8px; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 14px; }}
+                th {{ background-color: #f2f3f4; font-weight: bold; }}
+                .metric {{ font-weight: bold; width: 45%; }}
+                .section {{ margin-bottom: 24px; }}
+            </style>
+        </head>
+        <body>
+            <h2>AI Swing Trading Bot – Daily Trading Report</h2>
+            <p><strong>Date:</strong> {date_str}<br><strong>Report Time:</strong> {time_str}</p>
 
-            <h3>Open Positions</h3>
-            <table border='1' cellpadding='8' cellspacing='0'>
-                <tr><th>Symbol</th><th>Qty</th><th>Avg</th><th>LTP</th><th>P&L</th></tr>
-                {pos_rows if pos_rows else '<tr><td colspan=5>No open positions</td></tr>'}
-            </table>
+            <div class="section">
+                <h3>📊 Portfolio Summary</h3>
+                <table>
+                    <tr><td class="metric">Portfolio Value</td><td>₹{portfolio_value:,.2f}</td></tr>
+                    <tr><td class="metric">Available Cash</td><td>₹{cash:,.2f}</td></tr>
+                    <tr><td class="metric">Invested Capital</td><td>₹{invested:,.2f}</td></tr>
+                    <tr><td class="metric">Today's Gross P&L</td><td style='color:{gross_color}'>₹{daily_gross:,.2f}</td></tr>
+                    <tr><td class="metric">Today's Charges</td><td style='color:red'>₹{charges:,.2f}</td></tr>
+                    <tr><td class="metric">Today's Net P&L</td><td style='color:{pnl_color}'><b>₹{daily_net:,.2f}</b></td></tr>
+                    <tr><td class="metric">Total Unrealized P&L</td><td style='color:{unreal_color}'>₹{unrealized:,.2f}</td></tr>
+                    <tr><td class="metric">Total Realized P&L</td><td style='color:{real_color}'>₹{realized:,.2f}</td></tr>
+                    <tr><td class="metric">Overall Portfolio Return</td><td>{overall_return:.2f}%</td></tr>
+                    <tr><td class="metric">Market Regime</td><td>{summary.get('market_regime', 'UNKNOWN')}</td></tr>
+                    <tr><td class="metric">Open Positions</td><td>{open_count}</td></tr>
+                    <tr><td class="metric">Closed Today</td><td>{closed_today}</td></tr>
+                    <tr><td class="metric">Available Buying Capacity</td><td>₹{buying_capacity:,.2f}</td></tr>
+                </table>
+            </div>
 
-            <h3>Today's Orders</h3>
-            <table border='1' cellpadding='8' cellspacing='0'>
-                <tr><th>Symbol</th><th>Action</th><th>Qty</th><th>Price</th><th>Status</th></tr>
-                {order_rows if order_rows else '<tr><td colspan=5>No orders today</td></tr>'}
-            </table>
+            <div class="section">
+                <h3>🎯 Today's Trading Activity</h3>
+                <table>
+                    <tr>
+                        <th>Symbol</th><th>Action</th><th>Qty</th><th>Price</th><th>Status</th><th>Reason</th>
+                    </tr>
+                    {activity_rows}
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>💼 Current Holdings</h3>
+                <table>
+                    <tr>
+                        <th>Symbol</th><th>Qty</th><th>Avg Price</th><th>LTP</th><th>Day P&L</th>
+                        <th>Total P&L</th><th>Return</th><th>Stop Loss</th><th>Target</th><th>Status</th>
+                    </tr>
+                    {holdings_rows}
+                </table>
+            </div>
         </body>
         </html>
         """

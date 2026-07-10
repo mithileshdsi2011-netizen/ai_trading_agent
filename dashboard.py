@@ -3,7 +3,7 @@ Personal Trading Dashboard
 Run: ./run_with_venv.sh dashboard.py
 Open: http://localhost:5001
 """
-import os, sys, json, threading, logging, time
+import os, sys, json, threading, logging, time, socket, subprocess
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, jsonify, request
 import pytz
@@ -40,6 +40,67 @@ _HEALTH: dict = {
     "start_time":     datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
 }
 _HEALTH_LOCK = threading.Lock()
+
+# ── Token server auto-start helper ─────────────────────────────────────────────
+_TOKEN_SERVER_PROC: subprocess.Popen | None = None
+_TOKEN_SERVER_LOCK = threading.Lock()
+
+
+def _is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _ensure_token_server() -> dict:
+    """
+    Ensure the Kite token receiver server (get_kite_token.py) is running on port 8080.
+    Returns a dict with the Kite login URL and status.
+    """
+    global _TOKEN_SERVER_PROC
+    with _TOKEN_SERVER_LOCK:
+        if _is_port_open(8080):
+            return {"started": False, "already_running": True, "login_url": _kite_login_url()}
+
+        proj_dir = os.path.dirname(os.path.abspath(__file__))
+        python = os.path.join(proj_dir, "venv", "bin", "python3")
+        script = os.path.join(proj_dir, "get_kite_token.py")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{proj_dir}:{proj_dir}/src"
+
+        try:
+            _TOKEN_SERVER_PROC = subprocess.Popen(
+                [python, script],
+                cwd=proj_dir,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to start token server: {e}")
+            return {"started": False, "error": str(e), "login_url": _kite_login_url()}
+
+        # Wait up to 5 seconds for the server to be listening
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _is_port_open(8080):
+                return {"started": True, "already_running": False, "login_url": _kite_login_url()}
+            time.sleep(0.2)
+
+        return {
+            "started": False,
+            "error": "Token server did not start listening on port 8080 within 5 seconds",
+            "login_url": _kite_login_url(),
+        }
+
+
+def _kite_login_url() -> str:
+    """Build the Kite Connect login URL from config."""
+    api_key = getattr(config, "KITE_API_KEY", "") or "veq6w4lv31v27ogd"
+    return f"https://kite.trade/connect/login?api_key={api_key}&v=3"
 
 
 def _heartbeat_loop():
@@ -1835,7 +1896,7 @@ tr:last-child td{border:none}
          style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
         🔗 Update IP Whitelist
       </a>
-      <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+      <a href="#" onclick="startKiteAuth(this); return false;"
          style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
         🔐 Re-authenticate Kite
       </a>
@@ -1860,7 +1921,7 @@ tr:last-child td{border:none}
            style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
           🔗 Open Kite Console &rarr;
         </a>
-        <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+        <a href="#" onclick="startKiteAuth(this); return false;"
            style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
           🔐 Re-authenticate Kite &rarr;
         </a>
@@ -3396,6 +3457,35 @@ function updateIpStatus(d){
   }
 }
 
+async function startKiteAuth(btn){
+  const KITE_LOGIN_URL = 'https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3';
+  let authWindow = null;
+  try{
+    // Open Kite login synchronously so the popup is not blocked by the browser.
+    authWindow = window.open(KITE_LOGIN_URL, '_blank');
+    if(!authWindow){
+      alert('Popup blocked. Please allow popups for this dashboard and try again.');
+      return;
+    }
+    if(btn) { btn.style.opacity = '0.6'; btn.style.pointerEvents = 'none'; }
+    // Start the local token receiver server in the background.
+    // By the time the user finishes logging in, localhost:8080 will be ready.
+    const res = await fetch('/api/start-token-server', {method: 'POST'}).then(r=>r.json());
+    if(res.error && !res.already_running){
+      console.error('Token server start warning:', res.error);
+    } else if(res.started){
+      console.log('Token server started on port 8080');
+    } else if(res.already_running){
+      console.log('Token server already running on port 8080');
+    }
+  }catch(e){
+    console.error('Kite auth start error', e);
+    alert('Failed to start Kite authentication. Please check the logs.');
+  } finally {
+    if(btn) { btn.style.opacity = ''; btn.style.pointerEvents = ''; }
+  }
+}
+
 async function refreshIpStatus(){
   try{
     const d=await fetch('/api/data').then(r=>r.json());
@@ -4451,9 +4541,21 @@ def api_data():
     data['trading_status']      = trading_status
     data['trading_status_color']= trading_status_color
     data['kite_whitelist_url']  = 'https://developers.kite.trade/profile'
-    data['kite_login_url']      = 'https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3'
+    data['kite_login_url']      = _kite_login_url()
 
     return jsonify(data)
+
+
+@app.route('/api/start-token-server', methods=['POST'])
+def api_start_token_server():
+    """
+    Start the Kite token receiver server on port 8080 (if not already running)
+    and return the Kite login URL. The frontend can then open the URL in a new tab
+    so the user is redirected back to localhost:8080 after login without any
+    manual script startup.
+    """
+    result = _ensure_token_server()
+    return jsonify(result)
 
 
 @app.route('/api/ask', methods=['POST'])
