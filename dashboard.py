@@ -1197,18 +1197,69 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 4: Open Positions Table -->
+  <!-- Row 4: Portfolio Summary -->
+  <div class="card mb-4" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border: 1px solid #475569;">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📊 Portfolio Summary</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total Investment</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="d-summary-investment">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Current Value</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="d-summary-current">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Today's P&L</div>
+        <div style="font-size:16px;font-weight:700" id="d-summary-day-pnl">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total P&L</div>
+        <div style="font-size:16px;font-weight:700" id="d-summary-total-pnl">₹—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 5: Open Positions Table -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
-      📈 Open Positions <span class="pulse green" style="font-size:11px">● LIVE</span>
+      📈 Open Positions / Holdings <span id="d-holdings-count" style="color:#3b82f6">(0)</span> <span class="pulse green" style="font-size:11px">● LIVE</span>
     </div>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
-      <thead><tr>
-        <th style="text-align:left">Symbol</th><th>Qty</th><th>Avg</th><th>CMP</th>
-        <th>P&amp;L</th><th>Days</th><th>Trail SL</th><th>Target</th><th>AI %</th>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#1f2937">
+        <th style="text-align:left;padding:10px 8px">Instrument</th>
+        <th style="text-align:right;padding:10px 8px">Qty</th>
+        <th style="text-align:right;padding:10px 8px">Avg Cost</th>
+        <th style="text-align:right;padding:10px 8px">LTP</th>
+        <th style="text-align:right;padding:10px 8px">Invested</th>
+        <th style="text-align:right;padding:10px 8px">Current Value</th>
+        <th style="text-align:right;padding:10px 8px">Total P&L</th>
+        <th style="text-align:right;padding:10px 8px">Net Change %</th>
+        <th style="text-align:right;padding:10px 8px">Day Change %</th>
+        <th style="text-align:center;padding:10px 8px">Days Held</th>
+        <th style="text-align:right;padding:10px 8px">Trail SL</th>
+        <th style="text-align:right;padding:10px 8px">Target</th>
+        <th style="text-align:right;padding:10px 8px">AI Score</th>
       </tr></thead>
-      <tbody id="d-positions"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tbody id="d-positions"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tfoot id="d-positions-total" style="display:none;background:#1f2937;font-weight:600">
+        <tr>
+          <td style="padding:10px 8px;text-align:left">Total</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-qty">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-avg">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-ltp">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-invested">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-current">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-pnl">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-change-pct">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-day-pct">—</td>
+          <td style="padding:10px 8px;text-align:center">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+        </tr>
+      </tfoot>
     </table>
     </div>
   </div>
@@ -1317,15 +1368,69 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Portfolio Summary -->
+  <div class="card mb-4" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border: 1px solid #475569;">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📊 Portfolio Summary</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total Investment</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="p-summary-investment">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Current Value</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="p-summary-current">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Today's P&L</div>
+        <div style="font-size:16px;font-weight:700" id="p-summary-day-pnl">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total P&L</div>
+        <div style="font-size:16px;font-weight:700" id="p-summary-total-pnl">₹—</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Holdings Table -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">💼 Delivery Holdings</div>
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
+      📈 Open Positions / Holdings <span id="holdings-count" style="color:#3b82f6">(0)</span>
+    </div>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
-      <thead><tr>
-        <th style="text-align:left">Symbol</th><th>Qty</th><th>Avg Cost</th><th>LTP</th><th>P&amp;L</th><th>Return %</th>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#1f2937">
+        <th style="text-align:left;padding:10px 8px">Instrument</th>
+        <th style="text-align:right;padding:10px 8px">Qty</th>
+        <th style="text-align:right;padding:10px 8px">Avg Cost</th>
+        <th style="text-align:right;padding:10px 8px">LTP</th>
+        <th style="text-align:right;padding:10px 8px">Invested</th>
+        <th style="text-align:right;padding:10px 8px">Current Value</th>
+        <th style="text-align:right;padding:10px 8px">Total P&L</th>
+        <th style="text-align:right;padding:10px 8px">Net Change %</th>
+        <th style="text-align:right;padding:10px 8px">Day Change %</th>
+        <th style="text-align:center;padding:10px 8px">Days Held</th>
+        <th style="text-align:right;padding:10px 8px">Trail SL</th>
+        <th style="text-align:right;padding:10px 8px">Target</th>
+        <th style="text-align:right;padding:10px 8px">AI Score</th>
       </tr></thead>
-      <tbody id="p-holdings"><tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr></tbody>
+      <tbody id="p-holdings"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr></tbody>
+      <tfoot id="p-holdings-total" style="display:none;background:#1f2937;font-weight:600">
+        <tr>
+          <td style="padding:10px 8px;text-align:left">Total</td>
+          <td style="padding:10px 8px;text-align:right" id="total-qty">—</td>
+          <td style="padding:10px 8px;text-align:right" id="total-avg">—</td>
+          <td style="padding:10px 8px;text-align:right" id="total-ltp">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-invested">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-current">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-pnl">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-change-pct">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-day-pct">—</td>
+          <td style="padding:10px 8px;text-align:center">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+        </tr>
+      </tfoot>
     </table>
     </div>
   </div>
@@ -2564,31 +2669,103 @@ async function load(){
       hm.innerHTML='<div style="color:#4b5563;font-size:13px">No open positions</div>';
     }
 
-    // Positions table
+    // Positions table with enhanced data
     const pb=document.getElementById('d-positions');
-    if(d.positions&&d.positions.length){
-      pb.innerHTML=d.positions.map(p=>{
-        const pnl=parseFloat(p.pnl||0);
+    const totalEl=document.getElementById('d-positions-total');
+    const positions=d.positions||[];
+    
+    // Update holdings count
+    document.getElementById('d-holdings-count').textContent = `(${positions.length})`;
+    
+    if(positions.length){
+      // Calculate totals
+      let totalInvested = 0;
+      let totalCurrent = 0;
+      let totalPnl = 0;
+      let totalDayPnl = 0;
+      let totalQty = 0;
+      
+      const positionsRows = positions.map(p=>{
+        const qty=parseInt(p.quantity||0);
         const avg=parseFloat(p.average_price||p.entry_price||0);
         const ltp=parseFloat(p.last_price||avg);
-        const trailSl=avg>0?rupee(avg*0.95):'—';
-        const tgt=avg>0?rupee(avg*1.10):'—';
-        const days=p.days_held||1;
-        const conf=p.confidence?Math.round(p.confidence*100)+'%':'—';
-        return `<tr>
-          <td style="font-weight:700;color:#f9fafb">${p.tradingsymbol||p.symbol}</td>
-          <td style="text-align:center">${p.quantity}</td>
-          <td>${rupee(avg)}</td>
-          <td>${rupee(ltp)}</td>
-          <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
-          <td style="text-align:center">${days}</td>
-          <td class="red">${trailSl}</td>
-          <td class="green">${tgt}</td>
-          <td style="text-align:center;color:#a78bfa">${conf}</td>
+        const closePrice=parseFloat(p.close_price||avg); // Previous close for day change
+        const invested=avg*qty;
+        const current=ltp*qty;
+        const pnl=current-invested;
+        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(2):'0.00';
+        const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
+        const dayPnl=(ltp-closePrice)*qty;
+        
+        // Get SL/Target from position data
+        const trailSL = p.stop_loss ? rupee(p.stop_loss) : '—';
+        const target = p.target ? rupee(p.target) : '—';
+        const aiScore = p.trade_score ? p.trade_score.toFixed(0) : '—';
+        const daysHeld = p.days_held || 1;
+        
+        // Accumulate totals
+        totalInvested += invested;
+        totalCurrent += current;
+        totalPnl += pnl;
+        totalDayPnl += dayPnl;
+        totalQty += qty;
+        
+        // Row background based on P&L
+        const rowBg = pnl > 0 ? 'rgba(34, 197, 94, 0.05)' : pnl < 0 ? 'rgba(239, 68, 68, 0.05)' : '';
+        
+        return `<tr style="background:${rowBg}">
+          <td style="font-weight:700;color:#f9fafb;padding:10px 8px">${p.tradingsymbol||p.symbol}</td>
+          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(avg)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(ltp)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(invested)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(current)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(retPct)}">${pct(retPct)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(dayPct)}">${pct(dayPct)}</td>
+          <td style="text-align:center;padding:10px 8px">${daysHeld}</td>
+          <td style="text-align:right;padding:10px 8px">${trailSL}</td>
+          <td style="text-align:right;padding:10px 8px">${target}</td>
+          <td style="text-align:right;padding:10px 8px">${aiScore}</td>
         </tr>`;
       }).join('');
+      
+      pb.innerHTML = positionsRows;
+      
+      // Update totals
+      const totalChangePct = totalInvested > 0 ? ((totalCurrent - totalInvested) / totalInvested * 100).toFixed(2) : '0.00';
+      const totalDayChangePct = totalCurrent > 0 ? (totalDayPnl / (totalCurrent - totalDayPnl) * 100).toFixed(2) : '0.00';
+      
+      document.getElementById('d-total-qty').textContent = totalQty;
+      document.getElementById('d-total-invested').textContent = rupee(totalInvested);
+      document.getElementById('d-total-current').textContent = rupee(totalCurrent);
+      document.getElementById('d-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('d-total-pnl').className = pnlClass(totalPnl);
+      document.getElementById('d-total-change-pct').textContent = pct(totalChangePct);
+      document.getElementById('d-total-change-pct').className = pnlClass(totalChangePct);
+      document.getElementById('d-total-day-pct').textContent = pct(totalDayChangePct);
+      document.getElementById('d-total-day-pct').className = pnlClass(totalDayChangePct);
+      
+      // Show totals row
+      totalEl.style.display = 'table-footer-group';
+      
+      // Update portfolio summary
+      document.getElementById('d-summary-investment').textContent = rupee(totalInvested);
+      document.getElementById('d-summary-current').textContent = rupee(totalCurrent);
+      document.getElementById('d-summary-day-pnl').textContent = pnlStr(totalDayPnl);
+      document.getElementById('d-summary-day-pnl').className = pnlClass(totalDayPnl);
+      document.getElementById('d-summary-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('d-summary-total-pnl').className = pnlClass(totalPnl);
+      
     } else {
-      pb.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+      pb.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+      totalEl.style.display = 'none';
+      
+      // Reset summary
+      document.getElementById('d-summary-investment').textContent = '₹—';
+      document.getElementById('d-summary-current').textContent = '₹—';
+      document.getElementById('d-summary-day-pnl').textContent = '₹—';
+      document.getElementById('d-summary-total-pnl').textContent = '₹—';
     }
 
     // AI Opportunities — BUY signals only
@@ -2702,27 +2879,119 @@ async function load(){
     pmEl.className='stat-value '+(parseFloat(d.margin_blocked||0)>0?'red':'green');
     document.getElementById('p-holdings-val').textContent=rupee(d.holdings_value||0);
 
-    // Holdings table
+    // Holdings table with enhanced data
     const hldEl=document.getElementById('p-holdings');
+    const pTotalEl=document.getElementById('p-holdings-total');
     const activeHoldings=(d.holdings||[]).filter(h=>parseInt(h.quantity||0)>0);
+    
+    // Update holdings count
+    document.getElementById('holdings-count').textContent = `(${activeHoldings.length})`;
+    
     if(activeHoldings.length){
-      hldEl.innerHTML=activeHoldings.map(h=>{
+      // Calculate totals
+      let totalInvested = 0;
+      let totalCurrent = 0;
+      let totalPnl = 0;
+      let totalDayPnl = 0;
+      let totalQty = 0;
+      
+      const holdingsRows = activeHoldings.map(h=>{
         const qty=parseInt(h.quantity||0);
         const avg=parseFloat(h.average_price||0);
         const ltp=parseFloat(h.last_price||avg);
-        const pnl=(ltp-avg)*qty;
-        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(1):'0.0';
-        return `<tr>
-          <td style="font-weight:700;color:#f9fafb">${h.tradingsymbol}</td>
-          <td style="text-align:center">${qty}</td>
-          <td>${rupee(avg)}</td>
-          <td>${rupee(ltp)}</td>
-          <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
-          <td class="${pnlClass(retPct)}">${pct(retPct)}</td>
+        const closePrice=parseFloat(h.close_price||avg); // Previous close for day change
+        const invested=avg*qty;
+        const current=ltp*qty;
+        const pnl=current-invested;
+        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(2):'0.00';
+        const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
+        const dayPnl=(ltp-closePrice)*qty;
+        
+        // Get position data for SL/Target/AI Score
+        const position = (d.positions || []).find(p => p.symbol === h.tradingsymbol);
+        const trailSL = position && position.stop_loss ? rupee(position.stop_loss) : '—';
+        const target = position && position.target ? rupee(position.target) : '—';
+        const aiScore = position && position.trade_score ? position.trade_score.toFixed(0) : '—';
+        const daysHeld = position && position.days_held ? position.days_held : '—';
+        
+        // Progress bar for price relative to SL and Target
+        let progressBar = '';
+        if (position && position.stop_loss && position.target && ltp > 0) {
+          const sl = position.stop_loss;
+          const tgt = position.target;
+          const range = tgt - sl;
+          const position_pct = ((ltp - sl) / range * 100).toFixed(0);
+          const clamped_pct = Math.max(0, Math.min(100, position_pct));
+          progressBar = `
+            <div style="width:60px;height:6px;background:#1f2937;border-radius:3px;overflow:hidden">
+              <div style="width:${clamped_pct}%;height:100%;background:${clamped_pct < 50 ? '#ef4444' : clamped_pct < 80 ? '#f59e0b' : '#10b981'};transition:width 0.3s"></div>
+            </div>
+          `;
+        }
+        
+        // Accumulate totals
+        totalInvested += invested;
+        totalCurrent += current;
+        totalPnl += pnl;
+        totalDayPnl += dayPnl;
+        totalQty += qty;
+        
+        // Row background based on P&L
+        const rowBg = pnl > 0 ? 'rgba(34, 197, 94, 0.05)' : pnl < 0 ? 'rgba(239, 68, 68, 0.05)' : '';
+        
+        return `<tr style="background:${rowBg}">
+          <td style="font-weight:700;color:#f9fafb;padding:10px 8px">${h.tradingsymbol}</td>
+          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(avg)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(ltp)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(invested)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(current)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(retPct)}">${pct(retPct)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(dayPct)}">${pct(dayPct)}</td>
+          <td style="text-align:center;padding:10px 8px">${daysHeld}</td>
+          <td style="text-align:right;padding:10px 8px">${trailSL}</td>
+          <td style="text-align:right;padding:10px 8px">${target}</td>
+          <td style="text-align:right;padding:10px 8px">${aiScore}</td>
         </tr>`;
       }).join('');
+      
+      hldEl.innerHTML = holdingsRows;
+      
+      // Update totals
+      const totalChangePct = totalInvested > 0 ? ((totalCurrent - totalInvested) / totalInvested * 100).toFixed(2) : '0.00';
+      const totalDayChangePct = totalCurrent > 0 ? (totalDayPnl / (totalCurrent - totalDayPnl) * 100).toFixed(2) : '0.00';
+      
+      document.getElementById('total-qty').textContent = totalQty;
+      document.getElementById('p-total-invested').textContent = rupee(totalInvested);
+      document.getElementById('p-total-current').textContent = rupee(totalCurrent);
+      document.getElementById('p-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('p-total-pnl').className = pnlClass(totalPnl);
+      document.getElementById('p-total-change-pct').textContent = pct(totalChangePct);
+      document.getElementById('p-total-change-pct').className = pnlClass(totalChangePct);
+      document.getElementById('p-total-day-pct').textContent = pct(totalDayChangePct);
+      document.getElementById('p-total-day-pct').className = pnlClass(totalDayChangePct);
+      
+      // Show totals row
+      totalEl.style.display = 'table-footer-group';
+      
+      // Update portfolio summary
+      document.getElementById('p-summary-investment').textContent = rupee(totalInvested);
+      document.getElementById('p-summary-current').textContent = rupee(totalCurrent);
+      document.getElementById('p-summary-day-pnl').textContent = pnlStr(totalDayPnl);
+      document.getElementById('p-summary-day-pnl').className = pnlClass(totalDayPnl);
+      document.getElementById('p-summary-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('p-summary-total-pnl').className = pnlClass(totalPnl);
+      
     } else {
-      hldEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr>';
+      hldEl.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr>';
+      pTotalEl.style.display = 'none';
+      
+      // Reset summary
+      document.getElementById('p-summary-investment').textContent = '₹—';
+      document.getElementById('p-summary-current').textContent = '₹—';
+      document.getElementById('p-summary-day-pnl').textContent = '₹—';
+      document.getElementById('p-summary-total-pnl').textContent = '₹—';
     }
 
     // Trade History table
@@ -4021,6 +4290,8 @@ def api_data():
             pos['stop_loss']    = sl
             pos['target']       = tgt
             pos['trailing_stop']= tsl
+            # Add trade score from risk manager if available
+            pos['trade_score']  = _rm.get('trade_score', 0)
 
         # ── Enrich with journal metadata (first entry, days held, re-entry) ──
         try:
