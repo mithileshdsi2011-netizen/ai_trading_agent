@@ -499,7 +499,7 @@ class _Portfolio:
             for cum, (_, row) in zip(cum_pnl, df_sorted.iterrows())
         }
         # Fill every calendar day from start to end, carrying forward last equity
-        _eq_dates = pd.date_range(start=start_dt, end=end_dt, freq='B')  # business days
+        _eq_dates = pd.date_range(start=start, end=end, freq='B')  # business days
         _last_eq = initial_capital
         eq_curve = []
         for _d in _eq_dates:

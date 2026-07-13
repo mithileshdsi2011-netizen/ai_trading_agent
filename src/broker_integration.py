@@ -106,18 +106,29 @@ class BrokerIntegration:
                 'entry_time': datetime.now().isoformat()
             }
         elif action == 'SELL':
-            # Check if we have position to sell
-            if symbol in self.paper_portfolio['positions']:
-                position = self.paper_portfolio['positions'][symbol]
-                self.paper_portfolio['cash'] += price * quantity
-                del self.paper_portfolio['positions'][symbol]
-            else:
+            # Check if we have enough position to sell
+            if symbol not in self.paper_portfolio['positions']:
                 logger.warning(f"No position to sell for {symbol}")
                 return {
                     'success': False,
                     'error': 'No position to sell',
                     'order_id': None
                 }
+            position = self.paper_portfolio['positions'][symbol]
+            available = position['quantity']
+            if quantity > available:
+                logger.warning(
+                    f"Insufficient quantity to sell for {symbol}: requested {quantity}, available {available}"
+                )
+                return {
+                    'success': False,
+                    'error': f'Insufficient quantity: requested {quantity}, available {available}',
+                    'order_id': None
+                }
+            self.paper_portfolio['cash'] += price * quantity
+            position['quantity'] -= quantity
+            if position['quantity'] == 0:
+                del self.paper_portfolio['positions'][symbol]
         
         order_id = f"PAPER_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         

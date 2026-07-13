@@ -3,7 +3,7 @@ Personal Trading Dashboard
 Run: ./run_with_venv.sh dashboard.py
 Open: http://localhost:5001
 """
-import os, sys, json, threading, logging, time
+import os, sys, json, threading, logging, time, socket, subprocess
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, jsonify, request
 import pytz
@@ -40,6 +40,67 @@ _HEALTH: dict = {
     "start_time":     datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
 }
 _HEALTH_LOCK = threading.Lock()
+
+# ── Token server auto-start helper ─────────────────────────────────────────────
+_TOKEN_SERVER_PROC: subprocess.Popen | None = None
+_TOKEN_SERVER_LOCK = threading.Lock()
+
+
+def _is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _ensure_token_server() -> dict:
+    """
+    Ensure the Kite token receiver server (get_kite_token.py) is running on port 8080.
+    Returns a dict with the Kite login URL and status.
+    """
+    global _TOKEN_SERVER_PROC
+    with _TOKEN_SERVER_LOCK:
+        if _is_port_open(8080):
+            return {"started": False, "already_running": True, "login_url": _kite_login_url()}
+
+        proj_dir = os.path.dirname(os.path.abspath(__file__))
+        python = os.path.join(proj_dir, "venv", "bin", "python3")
+        script = os.path.join(proj_dir, "get_kite_token.py")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{proj_dir}:{proj_dir}/src"
+
+        try:
+            _TOKEN_SERVER_PROC = subprocess.Popen(
+                [python, script],
+                cwd=proj_dir,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to start token server: {e}")
+            return {"started": False, "error": str(e), "login_url": _kite_login_url()}
+
+        # Wait up to 5 seconds for the server to be listening
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _is_port_open(8080):
+                return {"started": True, "already_running": False, "login_url": _kite_login_url()}
+            time.sleep(0.2)
+
+        return {
+            "started": False,
+            "error": "Token server did not start listening on port 8080 within 5 seconds",
+            "login_url": _kite_login_url(),
+        }
+
+
+def _kite_login_url() -> str:
+    """Build the Kite Connect login URL from config."""
+    api_key = getattr(config, "KITE_API_KEY", "") or "veq6w4lv31v27ogd"
+    return f"https://kite.trade/connect/login?api_key={api_key}&v=3"
 
 
 def _heartbeat_loop():
@@ -89,10 +150,12 @@ _IP_CACHE_LOCK = threading.Lock()
 def _refresh_ip_cache():
     """Fetch public IP in background thread and cache for 5 min."""
     import urllib.request as _ur
+    import ssl as _ssl
+    _ctx = _ssl._create_unverified_context()
     try:
         for _url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                _raw = _ur.urlopen(_url, timeout=5).read().decode().strip()
+                _raw = _ur.urlopen(_url, timeout=5, context=_ctx).read().decode().strip()
                 if _raw and '.' in _raw and len(_raw) < 20:
                     with _IP_CACHE_LOCK:
                         _IP_CACHE["ipv4"] = _raw
@@ -101,7 +164,7 @@ def _refresh_ip_cache():
             except Exception:
                 continue
         try:
-            _v6 = _ur.urlopen('https://api6.ipify.org', timeout=4).read().decode().strip()
+            _v6 = _ur.urlopen('https://api6.ipify.org', timeout=4, context=_ctx).read().decode().strip()
             with _IP_CACHE_LOCK:
                 _IP_CACHE["ipv6"] = _v6 if ':' in _v6 else 'Not available'
         except Exception:
@@ -799,9 +862,41 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
 <title>AI Swing Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/chart.umd.min.js?v=2"></script>
+<script>
+// Report JS errors to server for debugging
+window.onerror=function(msg, url, line, col, err){
+  try{
+    fetch('/api/js-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:String(msg), url:String(url), line:line, col:col, stack:(err&&err.stack)||''})});
+  }catch(e){}
+};
+// Diagnostic: try a ping fetch immediately and display any error in the header
+try{
+  fetch('/api/data').then(function(r){return r.json();}).then(function(d){
+    var el=document.getElementById('last-updated');
+    if(el) el.textContent='API reachable — loading...';
+  }).catch(function(e){
+    var el=document.getElementById('last-updated');
+    if(el) el.textContent='FETCH ERROR: '+e.message;
+  });
+}catch(e){
+  var el=document.getElementById('last-updated');
+  if(el) el.textContent='JS ERROR: '+e.message;
+}
+// If this cached copy fails to initialize within 4s, force a no-cache reload once
+if(!location.search.includes('nocache=')){
+  setTimeout(function(){
+    var el=document.getElementById('last-updated');
+    if(el && el.textContent.indexOf('Initializing')!==-1){
+      location.href=location.href.split('?')[0]+'?nocache='+Date.now();
+    }
+  },4000);
+}
+</script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0f1e;color:#e2e8f0;font-family:'Inter',system-ui,sans-serif;min-height:100vh}
@@ -1102,18 +1197,69 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 4: Open Positions Table -->
+  <!-- Row 4: Portfolio Summary -->
+  <div class="card mb-4" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border: 1px solid #475569;">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📊 Portfolio Summary</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total Investment</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="d-summary-investment">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Current Value</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="d-summary-current">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Today's P&L</div>
+        <div style="font-size:16px;font-weight:700" id="d-summary-day-pnl">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total P&L</div>
+        <div style="font-size:16px;font-weight:700" id="d-summary-total-pnl">₹—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 5: Open Positions Table -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
-      📈 Open Positions <span class="pulse green" style="font-size:11px">● LIVE</span>
+      📈 Open Positions / Holdings <span id="d-holdings-count" style="color:#3b82f6">(0)</span> <span class="pulse green" style="font-size:11px">● LIVE</span>
     </div>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
-      <thead><tr>
-        <th style="text-align:left">Symbol</th><th>Qty</th><th>Avg</th><th>CMP</th>
-        <th>P&amp;L</th><th>Days</th><th>Trail SL</th><th>Target</th><th>AI %</th>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#1f2937">
+        <th style="text-align:left;padding:10px 8px">Instrument</th>
+        <th style="text-align:right;padding:10px 8px">Qty</th>
+        <th style="text-align:right;padding:10px 8px">Avg Cost</th>
+        <th style="text-align:right;padding:10px 8px">LTP</th>
+        <th style="text-align:right;padding:10px 8px">Invested</th>
+        <th style="text-align:right;padding:10px 8px">Current Value</th>
+        <th style="text-align:right;padding:10px 8px">Total P&L</th>
+        <th style="text-align:right;padding:10px 8px">Net Change %</th>
+        <th style="text-align:right;padding:10px 8px">Day Change %</th>
+        <th style="text-align:center;padding:10px 8px">Days Held</th>
+        <th style="text-align:right;padding:10px 8px">Trail SL</th>
+        <th style="text-align:right;padding:10px 8px">Target</th>
+        <th style="text-align:right;padding:10px 8px">AI Score</th>
       </tr></thead>
-      <tbody id="d-positions"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tbody id="d-positions"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tfoot id="d-positions-total" style="display:none;background:#1f2937;font-weight:600">
+        <tr>
+          <td style="padding:10px 8px;text-align:left">Total</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-qty">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-avg">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-ltp">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-invested">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-current">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-pnl">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-change-pct">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-day-pct">—</td>
+          <td style="padding:10px 8px;text-align:center">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+        </tr>
+      </tfoot>
     </table>
     </div>
   </div>
@@ -1222,15 +1368,69 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Portfolio Summary -->
+  <div class="card mb-4" style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border: 1px solid #475569;">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📊 Portfolio Summary</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total Investment</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="p-summary-investment">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Current Value</div>
+        <div style="font-size:16px;font-weight:700;color:#f1f5f9" id="p-summary-current">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Today's P&L</div>
+        <div style="font-size:16px;font-weight:700" id="p-summary-day-pnl">₹—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">Total P&L</div>
+        <div style="font-size:16px;font-weight:700" id="p-summary-total-pnl">₹—</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Holdings Table -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">💼 Delivery Holdings</div>
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
+      📈 Open Positions / Holdings <span id="holdings-count" style="color:#3b82f6">(0)</span>
+    </div>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
-      <thead><tr>
-        <th style="text-align:left">Symbol</th><th>Qty</th><th>Avg Cost</th><th>LTP</th><th>P&amp;L</th><th>Return %</th>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#1f2937">
+        <th style="text-align:left;padding:10px 8px">Instrument</th>
+        <th style="text-align:right;padding:10px 8px">Qty</th>
+        <th style="text-align:right;padding:10px 8px">Avg Cost</th>
+        <th style="text-align:right;padding:10px 8px">LTP</th>
+        <th style="text-align:right;padding:10px 8px">Invested</th>
+        <th style="text-align:right;padding:10px 8px">Current Value</th>
+        <th style="text-align:right;padding:10px 8px">Total P&L</th>
+        <th style="text-align:right;padding:10px 8px">Net Change %</th>
+        <th style="text-align:right;padding:10px 8px">Day Change %</th>
+        <th style="text-align:center;padding:10px 8px">Days Held</th>
+        <th style="text-align:right;padding:10px 8px">Trail SL</th>
+        <th style="text-align:right;padding:10px 8px">Target</th>
+        <th style="text-align:right;padding:10px 8px">AI Score</th>
       </tr></thead>
-      <tbody id="p-holdings"><tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr></tbody>
+      <tbody id="p-holdings"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr></tbody>
+      <tfoot id="p-holdings-total" style="display:none;background:#1f2937;font-weight:600">
+        <tr>
+          <td style="padding:10px 8px;text-align:left">Total</td>
+          <td style="padding:10px 8px;text-align:right" id="total-qty">—</td>
+          <td style="padding:10px 8px;text-align:right" id="total-avg">—</td>
+          <td style="padding:10px 8px;text-align:right" id="total-ltp">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-invested">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-current">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-pnl">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-change-pct">—</td>
+          <td style="padding:10px 8px;text-align:right" id="p-total-day-pct">—</td>
+          <td style="padding:10px 8px;text-align:center">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+        </tr>
+      </tfoot>
     </table>
     </div>
   </div>
@@ -1801,7 +2001,7 @@ tr:last-child td{border:none}
          style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
         🔗 Update IP Whitelist
       </a>
-      <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+      <a href="#" onclick="startKiteAuth(this); return false;"
          style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
         🔐 Re-authenticate Kite
       </a>
@@ -1826,7 +2026,7 @@ tr:last-child td{border:none}
            style="display:inline-block;background:#f59e0b;color:#000;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
           🔗 Open Kite Console &rarr;
         </a>
-        <a href="https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3" target="_blank"
+        <a href="#" onclick="startKiteAuth(this); return false;"
            style="display:inline-block;background:#3b82f6;color:#fff;border-radius:8px;padding:10px 22px;font-size:14px;font-weight:700;text-decoration:none">
           🔐 Re-authenticate Kite &rarr;
         </a>
@@ -2373,6 +2573,7 @@ let jChartCumulative=null, jChartScoreBucket=null, jChartSector=null, jChartExit
 const CHART_COLORS=['#3b82f6','#22c55e','#eab308','#a78bfa','#ef4444','#06b6d4','#f97316'];
 
 function makeOrUpdate(ref, ctx, cfg){
+  if(typeof Chart==='undefined') return null;
   if(ref){ref.data=cfg.data;ref.update();return ref;}
   return new Chart(ctx,cfg);
 }
@@ -2447,7 +2648,7 @@ async function load(){
     const rrEl=document.getElementById('d-rr');
     rrEl.textContent='1 : '+(rr>0?rr.toFixed(2):'—');
     rrEl.className='stat-value-sm '+(rr>=2?'green':rr>=1?'yellow':'red');
-    const dd=parseFloat(ph.drawdown||0);
+    const dd=parseFloat(ph.drawdown_pct||0);
     const ddEl2=document.getElementById('d-drawdown');
     ddEl2.textContent=dd.toFixed(2)+'%';ddEl2.className='stat-value-sm '+(dd<=1?'green':dd<=3?'yellow':'red');
 
@@ -2468,31 +2669,103 @@ async function load(){
       hm.innerHTML='<div style="color:#4b5563;font-size:13px">No open positions</div>';
     }
 
-    // Positions table
+    // Positions table with enhanced data
     const pb=document.getElementById('d-positions');
-    if(d.positions&&d.positions.length){
-      pb.innerHTML=d.positions.map(p=>{
-        const pnl=parseFloat(p.pnl||0);
+    const totalEl=document.getElementById('d-positions-total');
+    const positions=d.positions||[];
+    
+    // Update holdings count
+    document.getElementById('d-holdings-count').textContent = `(${positions.length})`;
+    
+    if(positions.length){
+      // Calculate totals
+      let totalInvested = 0;
+      let totalCurrent = 0;
+      let totalPnl = 0;
+      let totalDayPnl = 0;
+      let totalQty = 0;
+      
+      const positionsRows = positions.map(p=>{
+        const qty=parseInt(p.quantity||0);
         const avg=parseFloat(p.average_price||p.entry_price||0);
         const ltp=parseFloat(p.last_price||avg);
-        const trailSl=avg>0?rupee(avg*0.95):'—';
-        const tgt=avg>0?rupee(avg*1.10):'—';
-        const days=p.days_held||1;
-        const conf=p.confidence?Math.round(p.confidence*100)+'%':'—';
-        return `<tr>
-          <td style="font-weight:700;color:#f9fafb">${p.tradingsymbol||p.symbol}</td>
-          <td style="text-align:center">${p.quantity}</td>
-          <td>${rupee(avg)}</td>
-          <td>${rupee(ltp)}</td>
-          <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
-          <td style="text-align:center">${days}</td>
-          <td class="red">${trailSl}</td>
-          <td class="green">${tgt}</td>
-          <td style="text-align:center;color:#a78bfa">${conf}</td>
+        const closePrice=parseFloat(p.close_price||avg); // Previous close for day change
+        const invested=avg*qty;
+        const current=ltp*qty;
+        const pnl=current-invested;
+        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(2):'0.00';
+        const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
+        const dayPnl=(ltp-closePrice)*qty;
+        
+        // Get SL/Target from position data
+        const trailSL = p.stop_loss ? rupee(p.stop_loss) : '—';
+        const target = p.target ? rupee(p.target) : '—';
+        const aiScore = p.trade_score ? p.trade_score.toFixed(0) : '—';
+        const daysHeld = p.days_held || 1;
+        
+        // Accumulate totals
+        totalInvested += invested;
+        totalCurrent += current;
+        totalPnl += pnl;
+        totalDayPnl += dayPnl;
+        totalQty += qty;
+        
+        // Row background based on P&L
+        const rowBg = pnl > 0 ? 'rgba(34, 197, 94, 0.05)' : pnl < 0 ? 'rgba(239, 68, 68, 0.05)' : '';
+        
+        return `<tr style="background:${rowBg}">
+          <td style="font-weight:700;color:#f9fafb;padding:10px 8px">${p.tradingsymbol||p.symbol}</td>
+          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(avg)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(ltp)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(invested)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(current)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(retPct)}">${pct(retPct)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(dayPct)}">${pct(dayPct)}</td>
+          <td style="text-align:center;padding:10px 8px">${daysHeld}</td>
+          <td style="text-align:right;padding:10px 8px">${trailSL}</td>
+          <td style="text-align:right;padding:10px 8px">${target}</td>
+          <td style="text-align:right;padding:10px 8px">${aiScore}</td>
         </tr>`;
       }).join('');
+      
+      pb.innerHTML = positionsRows;
+      
+      // Update totals
+      const totalChangePct = totalInvested > 0 ? ((totalCurrent - totalInvested) / totalInvested * 100).toFixed(2) : '0.00';
+      const totalDayChangePct = totalCurrent > 0 ? (totalDayPnl / (totalCurrent - totalDayPnl) * 100).toFixed(2) : '0.00';
+      
+      document.getElementById('d-total-qty').textContent = totalQty;
+      document.getElementById('d-total-invested').textContent = rupee(totalInvested);
+      document.getElementById('d-total-current').textContent = rupee(totalCurrent);
+      document.getElementById('d-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('d-total-pnl').className = pnlClass(totalPnl);
+      document.getElementById('d-total-change-pct').textContent = pct(totalChangePct);
+      document.getElementById('d-total-change-pct').className = pnlClass(totalChangePct);
+      document.getElementById('d-total-day-pct').textContent = pct(totalDayChangePct);
+      document.getElementById('d-total-day-pct').className = pnlClass(totalDayChangePct);
+      
+      // Show totals row
+      totalEl.style.display = 'table-footer-group';
+      
+      // Update portfolio summary
+      document.getElementById('d-summary-investment').textContent = rupee(totalInvested);
+      document.getElementById('d-summary-current').textContent = rupee(totalCurrent);
+      document.getElementById('d-summary-day-pnl').textContent = pnlStr(totalDayPnl);
+      document.getElementById('d-summary-day-pnl').className = pnlClass(totalDayPnl);
+      document.getElementById('d-summary-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('d-summary-total-pnl').className = pnlClass(totalPnl);
+      
     } else {
-      pb.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+      pb.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+      totalEl.style.display = 'none';
+      
+      // Reset summary
+      document.getElementById('d-summary-investment').textContent = '₹—';
+      document.getElementById('d-summary-current').textContent = '₹—';
+      document.getElementById('d-summary-day-pnl').textContent = '₹—';
+      document.getElementById('d-summary-total-pnl').textContent = '₹—';
     }
 
     // AI Opportunities — BUY signals only
@@ -2606,27 +2879,119 @@ async function load(){
     pmEl.className='stat-value '+(parseFloat(d.margin_blocked||0)>0?'red':'green');
     document.getElementById('p-holdings-val').textContent=rupee(d.holdings_value||0);
 
-    // Holdings table
+    // Holdings table with enhanced data
     const hldEl=document.getElementById('p-holdings');
+    const pTotalEl=document.getElementById('p-holdings-total');
     const activeHoldings=(d.holdings||[]).filter(h=>parseInt(h.quantity||0)>0);
+    
+    // Update holdings count
+    document.getElementById('holdings-count').textContent = `(${activeHoldings.length})`;
+    
     if(activeHoldings.length){
-      hldEl.innerHTML=activeHoldings.map(h=>{
+      // Calculate totals
+      let totalInvested = 0;
+      let totalCurrent = 0;
+      let totalPnl = 0;
+      let totalDayPnl = 0;
+      let totalQty = 0;
+      
+      const holdingsRows = activeHoldings.map(h=>{
         const qty=parseInt(h.quantity||0);
         const avg=parseFloat(h.average_price||0);
         const ltp=parseFloat(h.last_price||avg);
-        const pnl=(ltp-avg)*qty;
-        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(1):'0.0';
-        return `<tr>
-          <td style="font-weight:700;color:#f9fafb">${h.tradingsymbol}</td>
-          <td style="text-align:center">${qty}</td>
-          <td>${rupee(avg)}</td>
-          <td>${rupee(ltp)}</td>
-          <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
-          <td class="${pnlClass(retPct)}">${pct(retPct)}</td>
+        const closePrice=parseFloat(h.close_price||avg); // Previous close for day change
+        const invested=avg*qty;
+        const current=ltp*qty;
+        const pnl=current-invested;
+        const retPct=avg>0?((ltp-avg)/avg*100).toFixed(2):'0.00';
+        const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
+        const dayPnl=(ltp-closePrice)*qty;
+        
+        // Get position data for SL/Target/AI Score
+        const position = (d.positions || []).find(p => p.symbol === h.tradingsymbol);
+        const trailSL = position && position.stop_loss ? rupee(position.stop_loss) : '—';
+        const target = position && position.target ? rupee(position.target) : '—';
+        const aiScore = position && position.trade_score ? position.trade_score.toFixed(0) : '—';
+        const daysHeld = position && position.days_held ? position.days_held : '—';
+        
+        // Progress bar for price relative to SL and Target
+        let progressBar = '';
+        if (position && position.stop_loss && position.target && ltp > 0) {
+          const sl = position.stop_loss;
+          const tgt = position.target;
+          const range = tgt - sl;
+          const position_pct = ((ltp - sl) / range * 100).toFixed(0);
+          const clamped_pct = Math.max(0, Math.min(100, position_pct));
+          progressBar = `
+            <div style="width:60px;height:6px;background:#1f2937;border-radius:3px;overflow:hidden">
+              <div style="width:${clamped_pct}%;height:100%;background:${clamped_pct < 50 ? '#ef4444' : clamped_pct < 80 ? '#f59e0b' : '#10b981'};transition:width 0.3s"></div>
+            </div>
+          `;
+        }
+        
+        // Accumulate totals
+        totalInvested += invested;
+        totalCurrent += current;
+        totalPnl += pnl;
+        totalDayPnl += dayPnl;
+        totalQty += qty;
+        
+        // Row background based on P&L
+        const rowBg = pnl > 0 ? 'rgba(34, 197, 94, 0.05)' : pnl < 0 ? 'rgba(239, 68, 68, 0.05)' : '';
+        
+        return `<tr style="background:${rowBg}">
+          <td style="font-weight:700;color:#f9fafb;padding:10px 8px">${h.tradingsymbol}</td>
+          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(avg)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(ltp)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(invested)}</td>
+          <td style="text-align:right;padding:10px 8px">${rupee(current)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(retPct)}">${pct(retPct)}</td>
+          <td style="text-align:right;padding:10px 8px" class="${pnlClass(dayPct)}">${pct(dayPct)}</td>
+          <td style="text-align:center;padding:10px 8px">${daysHeld}</td>
+          <td style="text-align:right;padding:10px 8px">${trailSL}</td>
+          <td style="text-align:right;padding:10px 8px">${target}</td>
+          <td style="text-align:right;padding:10px 8px">${aiScore}</td>
         </tr>`;
       }).join('');
+      
+      hldEl.innerHTML = holdingsRows;
+      
+      // Update totals
+      const totalChangePct = totalInvested > 0 ? ((totalCurrent - totalInvested) / totalInvested * 100).toFixed(2) : '0.00';
+      const totalDayChangePct = totalCurrent > 0 ? (totalDayPnl / (totalCurrent - totalDayPnl) * 100).toFixed(2) : '0.00';
+      
+      document.getElementById('total-qty').textContent = totalQty;
+      document.getElementById('p-total-invested').textContent = rupee(totalInvested);
+      document.getElementById('p-total-current').textContent = rupee(totalCurrent);
+      document.getElementById('p-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('p-total-pnl').className = pnlClass(totalPnl);
+      document.getElementById('p-total-change-pct').textContent = pct(totalChangePct);
+      document.getElementById('p-total-change-pct').className = pnlClass(totalChangePct);
+      document.getElementById('p-total-day-pct').textContent = pct(totalDayChangePct);
+      document.getElementById('p-total-day-pct').className = pnlClass(totalDayChangePct);
+      
+      // Show totals row
+      totalEl.style.display = 'table-footer-group';
+      
+      // Update portfolio summary
+      document.getElementById('p-summary-investment').textContent = rupee(totalInvested);
+      document.getElementById('p-summary-current').textContent = rupee(totalCurrent);
+      document.getElementById('p-summary-day-pnl').textContent = pnlStr(totalDayPnl);
+      document.getElementById('p-summary-day-pnl').className = pnlClass(totalDayPnl);
+      document.getElementById('p-summary-total-pnl').textContent = pnlStr(totalPnl);
+      document.getElementById('p-summary-total-pnl').className = pnlClass(totalPnl);
+      
     } else {
-      hldEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr>';
+      hldEl.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No delivery holdings</td></tr>';
+      pTotalEl.style.display = 'none';
+      
+      // Reset summary
+      document.getElementById('p-summary-investment').textContent = '₹—';
+      document.getElementById('p-summary-current').textContent = '₹—';
+      document.getElementById('p-summary-day-pnl').textContent = '₹—';
+      document.getElementById('p-summary-total-pnl').textContent = '₹—';
     }
 
     // Trade History table
@@ -2719,33 +3084,29 @@ async function load(){
     const invested2=parseFloat(d.invested||0);
     const held=parseFloat(d.holdings_value||0);
     const margB=parseFloat(d.margin_blocked||0);
+    if(typeof Chart!=='undefined'){
     const allocCtx=document.getElementById('chart-allocation');
     if(allocCtx){
       const allocCfg={type:'doughnut',data:{labels:['Cash','Invested','Holdings','Margin'],datasets:[{data:[cash2,invested2,held,margB],backgroundColor:['#22c55e','#3b82f6','#a78bfa','#ef4444'],borderWidth:0}]},options:{plugins:{legend:{labels:{color:'#9ca3af',font:{size:11}}}},cutout:'65%',maintainAspectRatio:false}};
       if(chartAlloc){chartAlloc.data=allocCfg.data;chartAlloc.update();}else{chartAlloc=new Chart(allocCtx,allocCfg);}
     }
-
-    // Sector Chart
     const secData=Object.entries(an.sector_allocation||{Cash:100});
     const secCtx=document.getElementById('chart-sector');
     if(secCtx){
       const secCfg={type:'doughnut',data:{labels:secData.map(s=>s[0]),datasets:[{data:secData.map(s=>s[1]),backgroundColor:CHART_COLORS,borderWidth:0}]},options:{plugins:{legend:{labels:{color:'#9ca3af',font:{size:11}}}},cutout:'55%',maintainAspectRatio:false}};
       if(chartSector){chartSector.data=secCfg.data;chartSector.update();}else{chartSector=new Chart(secCtx,secCfg);}
     }
-
-    // Portfolio Value line (mock trend based on current value)
     const portCtx=document.getElementById('chart-portfolio');
     if(portCtx&&!chartPortfolio){
       chartPortfolio=new Chart(portCtx,{type:'line',data:{labels:['9:30','10:00','10:30','11:00','11:30','12:00','12:30','1:00','1:30','Now'],datasets:[{label:'Portfolio',data:[portVal-50,portVal-30,portVal-40,portVal-20,portVal-10,portVal+5,portVal+20,portVal+dpnl*0.3,portVal+dpnl*0.7,portVal],borderColor:'#3b82f6',backgroundColor:'#3b82f611',fill:true,tension:0.4,pointRadius:2}]},options:{scales:{x:{ticks:{color:'#4b5563',font:{size:10}}},y:{ticks:{color:'#4b5563',font:{size:10},callback:v=>'₹'+v.toLocaleString('en-IN')}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
-
-    // P&L Bar
     const pnlCtx=document.getElementById('chart-pnl');
     if(pnlCtx&&!chartPnl){
       const days=['Mon','Tue','Wed','Thu','Fri'];
       const vals=[52,-10,84,12,dpnl];
       chartPnl=new Chart(pnlCtx,{type:'bar',data:{labels:days,datasets:[{data:vals,backgroundColor:vals.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]},options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
+    } // end Chart guard
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
     const allSigs=d.signals||[];
@@ -2922,16 +3283,18 @@ async function load(){
     const amPnlEl=document.getElementById('a-monthly-pnl');
     amPnlEl.textContent=pnlStr(mPnl);amPnlEl.className='stat-value '+(mPnl>=0?'green':'red');
     const ddEl=document.getElementById('a-max-drawdown');
-    ddEl.textContent=parseFloat(ph.drawdown||0).toFixed(2)+'%';
+    ddEl.textContent=parseFloat(ph.drawdown_pct||0).toFixed(2)+'%';
     document.getElementById('a-total-trades').textContent=d.total_trades||0;
 
     // Win rate gauge (doughnut)
+    if(typeof Chart!=='undefined'){
     const wrCtx=document.getElementById('chart-winrate');
     if(wrCtx){
       const wrVal=Math.round(wr);
       const wrCfg={type:'doughnut',data:{labels:['Win','Loss'],datasets:[{data:[wrVal,100-wrVal],backgroundColor:[wrVal>=60?'#22c55e':wrVal>=40?'#eab308':'#ef4444','#1f2937'],borderWidth:0}]},options:{plugins:{legend:{display:false},tooltip:{enabled:false},beforeDraw(chart){const {ctx,chartArea:{top,left,width,height}}=chart;ctx.save();ctx.font='bold 28px Inter';ctx.fillStyle='#f9fafb';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(wrVal+'%',left+width/2,top+height/2);ctx.restore();}},cutout:'70%',maintainAspectRatio:false}};
       if(chartWinrate){chartWinrate.data=wrCfg.data;chartWinrate.update();}else{chartWinrate=new Chart(wrCtx,wrCfg);}
     }
+    } // end Chart guard
 
     // Trade Calendar (realized P&L per weekday, from backend)
     const calEl=document.getElementById('a-calendar');
@@ -3006,17 +3369,17 @@ async function load(){
     if(posMaxLbl) posMaxLbl.textContent=posMax+' max slots';
 
     // Daily P&L in health section
-    const dpnl=parseFloat(d.daily_pnl||0);
-    const dpnlEl=document.getElementById('bs-daily-pnl');
-    if(dpnlEl){dpnlEl.textContent=pnlStr(dpnl);dpnlEl.className='stat-value '+(dpnl>=0?'green':'red');}
+    const bsDpnl=parseFloat(d.daily_pnl||0);
+    const bsDpnlEl=document.getElementById('bs-daily-pnl');
+    if(bsDpnlEl){bsDpnlEl.textContent=pnlStr(bsDpnl);bsDpnlEl.className='stat-value '+(bsDpnl>=0?'green':'red');}
 
     // Drawdown from portfolio_health
-    const ph=d.portfolio_health||{};
-    const ddEl=document.getElementById('bs-drawdown');
-    if(ddEl){
-      const dd=parseFloat(ph.drawdown_pct||0);
-      ddEl.textContent=dd.toFixed(2)+'%';
-      ddEl.className='stat-value '+(dd<5?'green':dd<10?'yellow':'red');
+    const bsPh=d.portfolio_health||{};
+    const bsDdEl=document.getElementById('bs-drawdown');
+    if(bsDdEl){
+      const bsDd=parseFloat(bsPh.drawdown_pct||0);
+      bsDdEl.textContent=bsDd.toFixed(2)+'%';
+      bsDdEl.className='stat-value '+(bsDd<5?'green':bsDd<10?'yellow':'red');
     }
 
     // Win rate from journal (loaded separately in loadJournal)
@@ -3038,7 +3401,10 @@ async function load(){
 
     prevData=d;
 
-  }catch(e){console.error('Dashboard error:',e);}
+  }catch(e){
+    console.error('Dashboard error:',e);
+    document.getElementById('last-updated').textContent='JS ERROR: '+e.message;
+  }
 }
 
 // ─── Journal loader ──────────────────────────────────────────────────────────
@@ -3071,6 +3437,7 @@ async function loadJournal(){
     document.getElementById('j-avghold').textContent=(j.avg_hold_days||0).toFixed(1)+' days';
 
     // Cumulative P&L chart
+    if(typeof Chart!=='undefined'){
     const cumData=j.cumulative_pnl||[];
     const cumCtx=document.getElementById('j-chart-cumulative');
     if(cumCtx){
@@ -3155,6 +3522,7 @@ async function loadJournal(){
       },options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>v+'%'},max:100,min:0}},plugins:{legend:{display:false}},maintainAspectRatio:false}};
       if(jChartRegime){jChartRegime.data=cfg.data;jChartRegime.update();}else{jChartRegime=new Chart(regCtx,cfg);}
     }
+    } // end Chart guard
 
     // Trade log table — merge open + closed trades, newest first
     const closedTrades=j.recent_trades||[];
@@ -3358,6 +3726,35 @@ function updateIpStatus(d){
   }
 }
 
+async function startKiteAuth(btn){
+  const KITE_LOGIN_URL = 'https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3';
+  let authWindow = null;
+  try{
+    // Open Kite login synchronously so the popup is not blocked by the browser.
+    authWindow = window.open(KITE_LOGIN_URL, '_blank');
+    if(!authWindow){
+      alert('Popup blocked. Please allow popups for this dashboard and try again.');
+      return;
+    }
+    if(btn) { btn.style.opacity = '0.6'; btn.style.pointerEvents = 'none'; }
+    // Start the local token receiver server in the background.
+    // By the time the user finishes logging in, localhost:8080 will be ready.
+    const res = await fetch('/api/start-token-server', {method: 'POST'}).then(r=>r.json());
+    if(res.error && !res.already_running){
+      console.error('Token server start warning:', res.error);
+    } else if(res.started){
+      console.log('Token server started on port 8080');
+    } else if(res.already_running){
+      console.log('Token server already running on port 8080');
+    }
+  }catch(e){
+    console.error('Kite auth start error', e);
+    alert('Failed to start Kite authentication. Please check the logs.');
+  } finally {
+    if(btn) { btn.style.opacity = ''; btn.style.pointerEvents = ''; }
+  }
+}
+
 async function refreshIpStatus(){
   try{
     const d=await fetch('/api/data').then(r=>r.json());
@@ -3485,7 +3882,7 @@ function _btRenderResults(data){
 
   // Equity curve
   const eq = data.equity_curve || [];
-  if(eq.length > 1){
+  if(eq.length > 1 && typeof Chart!=='undefined'){
     const labels = eq.map(p=>p.date);
     const vals   = eq.map(p=>p.equity);
     const ctx    = document.getElementById('bt-equity-chart').getContext('2d');
@@ -3658,7 +4055,23 @@ def get_kite():
 
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    from flask import make_response, redirect, request
+    # Force browsers that have an old cached HTML to load a fresh, cache-busted URL
+    if request.args.get('v') != '3':
+        return redirect('/?v=3', code=302)
+    resp = make_response(render_template_string(HTML))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
+@app.route('/api/js-error', methods=['POST'])
+def js_error():
+    data = request.get_json(silent=True) or {}
+    msg = data.get('message', 'unknown')
+    stack = data.get('stack', '')
+    app.logger.error('JS ERROR from browser: %s | stack: %s', msg, stack[:1000])
+    return jsonify({'ok': True})
 
 
 @app.route('/api/data')
@@ -3877,6 +4290,8 @@ def api_data():
             pos['stop_loss']    = sl
             pos['target']       = tgt
             pos['trailing_stop']= tsl
+            # Add trade score from risk manager if available
+            pos['trade_score']  = _rm.get('trade_score', 0)
 
         # ── Enrich with journal metadata (first entry, days held, re-entry) ──
         try:
@@ -4056,7 +4471,8 @@ def api_data():
         buys  = [o for o in completed if o.get('transaction_type') == 'BUY']
         sells = [o for o in completed if o.get('transaction_type') == 'SELL']
         data['total_trades'] = len(completed)
-        data['win_rate'] = len(sells) / len(buys) if buys else 0
+        win_sells = [o for o in sells if (o.get('pnl') or 0) > 0]
+        data['win_rate'] = round(len(win_sells) / len(sells) * 100, 1) if sells else 0
         # daily_pnl = unrealized (from positions) + realized (from today's closed trades)
         realized_pnl = sum(o.get('pnl', 0) for o in sells)
         unrealized_pnl = data.get('daily_pnl', 0)  # set earlier from positions
@@ -4278,6 +4694,23 @@ def api_data():
         current_ip   = _IP_CACHE["ipv4"]
         current_ipv6 = _IP_CACHE["ipv6"]
 
+    # Fallback: synchronous IP fetch if background cache hasn't populated yet
+    if current_ip == 'unknown':
+        try:
+            import urllib.request as _ur
+            import ssl as _ssl
+            _ctx = _ssl._create_unverified_context()
+            for _url in ('https://api.ipify.org','https://ifconfig.me/ip','https://icanhazip.com'):
+                try:
+                    _raw = _ur.urlopen(_url, timeout=4, context=_ctx).read().decode().strip()
+                    if _raw and '.' in _raw and len(_raw) < 20:
+                        current_ip = _raw
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     # Network interface type (WiFi / Ethernet / VPN / unknown)
     try:
         if _HAS_PSUTIL:
@@ -4379,9 +4812,21 @@ def api_data():
     data['trading_status']      = trading_status
     data['trading_status_color']= trading_status_color
     data['kite_whitelist_url']  = 'https://developers.kite.trade/profile'
-    data['kite_login_url']      = 'https://kite.trade/connect/login?api_key=veq6w4lv31v27ogd&v=3'
+    data['kite_login_url']      = _kite_login_url()
 
     return jsonify(data)
+
+
+@app.route('/api/start-token-server', methods=['POST'])
+def api_start_token_server():
+    """
+    Start the Kite token receiver server on port 8080 (if not already running)
+    and return the Kite login URL. The frontend can then open the URL in a new tab
+    so the user is redirected back to localhost:8080 after login without any
+    manual script startup.
+    """
+    result = _ensure_token_server()
+    return jsonify(result)
 
 
 @app.route('/api/ask', methods=['POST'])

@@ -626,6 +626,43 @@ class OrderExecutor:
             
             order_result = self.broker.place_order(sell_signal)
             
+            if order_result['success']:
+                try:
+                    open_pos = next(
+                        (p for p in self.risk_manager.positions
+                         if p.symbol == exit_signal['symbol']
+                         and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL, PositionStatus.CLOSED}),
+                        None
+                    )
+                    entry_price = open_pos.entry_price if open_pos else exit_signal['price']
+                    entry_date = open_pos.entry_time.isoformat() if open_pos else datetime.now().isoformat()
+                    _SECTOR_MAP2 = {
+                        'HDFCBANK': 'Banking', 'ICICIBANK': 'Banking', 'KOTAKBANK': 'Banking',
+                        'AXISBANK': 'Banking', 'SBIN': 'Banking', 'TCS': 'IT', 'INFY': 'IT',
+                        'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'RELIANCE': 'Energy',
+                        'SUNPHARMA': 'Pharma', 'DRREDDY': 'Pharma', 'MARUTI': 'Auto',
+                        'TATAMOTORS': 'Auto', 'BHARTIARTL': 'Telecom',
+                    }
+                    charges = getattr(open_pos, 'charges', 0) or 0
+                    gross_pnl = exit_signal.get('pnl', 0)
+                    net_pnl = gross_pnl - charges
+                    self.journal.log_entry(
+                        symbol=exit_signal['symbol'],
+                        action='SELL',
+                        price=exit_signal['price'],
+                        quantity=exit_signal['quantity'],
+                        exit_reason='End of day close',
+                        entry_price=entry_price,
+                        entry_date=entry_date,
+                        gross_pnl=gross_pnl,
+                        net_pnl=net_pnl,
+                        charges=charges,
+                        sector=_SECTOR_MAP2.get(exit_signal['symbol'], 'Other'),
+                        trade_score=getattr(open_pos, '_trade_score', 0) if open_pos else 0,
+                    )
+                except Exception as je:
+                    logger.warning(f"Journal SELL log failed for EOD close: {je}")
+
             close_results.append({
                 'success': order_result['success'],
                 'order_id': order_result.get('order_id'),

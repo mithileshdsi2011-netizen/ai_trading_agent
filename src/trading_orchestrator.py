@@ -138,13 +138,16 @@ class TradingOrchestrator:
                         f"{self._kite_fail_count} consecutive failures. "
                         f"Run: python get_kite_token.py"
                     )
-                    self._alert(
-                        "🔴 KITE TOKEN ALERT",
-                        f"🔴 KITE TOKEN ALERT\n\n"
-                        f"kite_ok=False for {self._kite_fail_count} consecutive cycles.\n"
-                        f"Orders are BLOCKED.\n"
-                        f"Run: python get_kite_token.py to refresh token."
-                    )
+                    if self._is_trading_day():
+                        self._alert(
+                            "🔴 KITE TOKEN ALERT",
+                            f"🔴 KITE TOKEN ALERT\n\n"
+                            f"kite_ok=False for {self._kite_fail_count} consecutive cycles.\n"
+                            f"Orders are BLOCKED.\n"
+                            f"Run: python get_kite_token.py to refresh token."
+                        )
+                    else:
+                        logger.info("Kite token alert suppressed — not a trading day (weekend/holiday)")
                     self._kite_alert_sent = True  # suppress further alerts until recovery
                 else:
                     logger.warning(f"Kite health check failed (cycle {self._kite_fail_count}) — alert already sent, waiting for recovery")
@@ -771,6 +774,8 @@ class TradingOrchestrator:
     
     def _check_ip_whitelist(self):
         """Check if public IP has changed — alert ONCE per new IP via email + Telegram."""
+        if not self._is_trading_day():
+            return
         try:
             import urllib.request as _ur
             # Fallback chain — same as dashboard
@@ -846,6 +851,17 @@ class TradingOrchestrator:
             self.email.send_report(subject, html_body)
         except Exception as _ee:
             logger.warning(f"Email alert failed: {_ee}")
+
+    def _is_trading_day(self) -> bool:
+        """Return True only on NSE trading days (Mon–Fri, non-holiday)."""
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(ist)
+        if now.weekday() >= 5:
+            return False
+        today_str = now.strftime('%Y-%m-%d')
+        from market_data import MarketDataFetcher
+        return today_str not in MarketDataFetcher._NSE_HOLIDAYS
 
     def stop(self):
         """Stop the trading orchestrator"""
@@ -1247,6 +1263,9 @@ class TradingOrchestrator:
         Returns:
             Close results
         """
+        if not self._is_trading_day():
+            logger.info("End-of-day close skipped — not a trading day (weekend/holiday)")
+            return {}
         logger.info("Executing end-of-day close (3:00 PM IST)")
 
         if config.TRADING_MODE == "swing":
@@ -1286,11 +1305,17 @@ class TradingOrchestrator:
 
     def daily_reset(self):
         """Reset daily statistics"""
+        if not self._is_trading_day():
+            logger.info("Daily reset skipped — not a trading day (weekend/holiday)")
+            return
         logger.info("Executing daily reset")
         self.order_executor.reset_daily()
     
     def pre_market_check(self):
         """Pre-market check before trading starts"""
+        if not self._is_trading_day():
+            logger.info("Pre-market check skipped — not a trading day (weekend/holiday)")
+            return
         logger.info("Executing pre-market check (9:20 AM IST)")
 
         # Check if token is valid and refresh if needed
@@ -1391,7 +1416,10 @@ class TradingOrchestrator:
         }
     
     def daily_email_report(self):
-        """Send daily email report at 4:00 PM IST"""
+        """Send daily email report at 4:00 PM IST — trading days only."""
+        if not self._is_trading_day():
+            logger.info("Daily email report skipped — not a trading day (weekend/holiday)")
+            return
         try:
             summary = self.get_performance_report()
             positions = self.order_executor.broker.get_positions()
