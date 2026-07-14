@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 class TokenManager:
     """Manages Kite Connect access tokens with automatic refresh"""
     
+    _token_invalidated: bool = False  # set True when Zerodha rejects mid-session
+    
     def __init__(self):
         # Get the project root directory (parent of src)
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,9 +75,18 @@ class TokenManager:
         """Check if current token is valid"""
         if not self.access_token or not self.token_expiry:
             return False
-        
+        if TokenManager._token_invalidated:
+            return False
         # Add 1 hour buffer before expiry
         return datetime.now() < (self.token_expiry - timedelta(hours=1))
+    
+    def mark_token_invalid(self):
+        """Mark token as rejected by Zerodha mid-session (auth errors)"""
+        TokenManager._token_invalidated = True
+        logger.error(
+            "Kite token rejected mid-session. "
+            "Run: python get_kite_token.py to generate a fresh token."
+        )
     
     def get_access_token(self, request_token: Optional[str] = None) -> str:
         """

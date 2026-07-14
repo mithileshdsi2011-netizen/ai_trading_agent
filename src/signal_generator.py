@@ -11,6 +11,7 @@ import time
 from ai_research_agent import AIResearchAgent
 from risk_manager import RiskManager
 from config import config
+from decision_logger import DecisionLogger, create_decision_record
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,13 +23,15 @@ class SignalGenerator:
     def __init__(self):
         self.research_agent = AIResearchAgent()
         self._market_data = self.research_agent.market_data
+        self.decision_logger = DecisionLogger()
     
-    def generate_signal(self, symbol: str) -> Dict:
+    def generate_signal(self, symbol: str, risk_data: Dict = None) -> Dict:
         """
-        Generate complete trading signal for a stock
+        Generate complete trading signal for a stock with detailed decision logging
         
         Args:
             symbol: Stock symbol
+            risk_data: Risk management data for decision logging
         
         Returns:
             Dictionary with complete trading signal
@@ -38,11 +41,23 @@ class SignalGenerator:
         # Get research
         research = self.research_agent.research_stock(symbol)
         
+        # Initialize decision data
+        decision_data = {
+            'symbol': symbol,
+            'timestamp': datetime.now().isoformat(),
+            'research': research,
+            'final_decision': 'SKIP',
+            'rejection_reason': ''
+        }
+        
+        # Handle data errors
         if research['recommendation'] in ['NO_DATA', 'ERROR']:
+            decision_data['rejection_reason'] = research.get('reason', 'Insufficient data')
+            self._log_decision(decision_data, risk_data)
             return {
                 'symbol': symbol,
                 'action': 'SKIP',
-                'reason': research.get('reason', 'Insufficient data'),
+                'reason': decision_data['rejection_reason'],
                 'timestamp': datetime.now().isoformat()
             }
         
@@ -97,6 +112,13 @@ class SignalGenerator:
             'timestamp': datetime.now().isoformat(),
             '_research': research,  # full research for TradeScorer + news filter
         }
+        
+        # Log decision for transparency
+        decision_data.update({
+            'final_decision': action if action in ['BUY', 'SELL'] else 'SKIP',
+            'signal': signal
+        })
+        self._log_decision(decision_data, risk_data)
         
         logger.info(f"Signal generated for {symbol}: {action} at {current_price}")
         return signal
@@ -203,6 +225,49 @@ class SignalGenerator:
         else:
             return 'HOLD'
     
+    def _log_decision(self, decision_data: Dict, risk_data: Dict = None):
+        """Log detailed decision for transparency"""
+        try:
+            research = decision_data.get('research', {})
+            signal = decision_data.get('signal', {})
+            
+            # Create decision record
+            decision_record = create_decision_record(
+                symbol=decision_data['symbol'],
+                research_data={
+                    'overall_score': research.get('overall_score', 0),
+                    'confidence': research.get('confidence', 0),
+                    'technical_score': research.get('technical_score', 0),
+                    'news_sentiment_score': research.get('news_sentiment_score', 0),
+                    'sector_strength': research.get('sector_momentum', 0),
+                    'market_regime': research.get('market_regime', 'UNKNOWN'),
+                    'detailed_factors': research.get('detailed_factors', {}),
+                    'sector': research.get('sector', 'Unknown')
+                },
+                signal_data={
+                    'risk_reward_ratio': signal.get('risk_reward_ratio', 0),
+                    'position_size': signal.get('position_size', 0),
+                    'entry_price': signal.get('current_price', 0),
+                    'stop_loss': signal.get('stop_loss', 0),
+                    'target': signal.get('target', 0)
+                },
+                risk_data=risk_data or {
+                    'available_cash': 0,
+                    'open_positions': [],
+                    'holdings': [],
+                    'cooldown_status': False,
+                    'portfolio_exposure': 0,
+                    'max_position_size': 0
+                },
+                final_decision=decision_data['final_decision'],
+                rejection_reason=decision_data.get('rejection_reason', '')
+            )
+            
+            self.decision_logger.log_decision(decision_record)
+            
+        except Exception as e:
+            logger.warning(f"Could not log decision for {decision_data.get('symbol', 'Unknown')}: {e}")
+    
     # ── Pre-screening thresholds ──────────────────────────────────────────────
     _SCREEN_RSI_LOW  = 25.0   # oversold floor  (below = skip, likely falling knife)
     _SCREEN_RSI_HIGH = 78.0   # overbought ceil (above = skip, chasing top)
@@ -257,7 +322,7 @@ class SignalGenerator:
     # Workers for parallel scan: 8 threads balance throughput vs Kite rate limits
     _SCAN_WORKERS = 8
 
-    def generate_signals_for_watchlist(self, symbols: List[str]) -> List[Dict]:
+    def generate_signals_for_watchlist(self, symbols: List[str], risk_data: Dict = None) -> List[Dict]:
         """
         Two-stage pipeline with parallel execution:
           Stage 1 — Parallel quick screen (8 workers): RSI, DMA20, momentum, volume

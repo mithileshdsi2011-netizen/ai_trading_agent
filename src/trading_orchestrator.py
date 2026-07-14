@@ -22,6 +22,7 @@ from email_reports import EmailReporter
 from trade_scorer import TradeScorer, SCORE_SKIP
 from multi_timeframe import MultiTimeframeConfirmer
 from smart_exit import SmartExitAI
+from sell_decision_ai import SellDecisionAI
 from risk_manager import PositionStatus
 
 import os as _os
@@ -60,6 +61,7 @@ class TradingOrchestrator:
         self.scorer = TradeScorer()
         self.mtf = MultiTimeframeConfirmer(market_data=self.market_data)
         self.smart_exit = SmartExitAI(market_data=self.market_data)
+        self.sell_decision_ai = SellDecisionAI()
         self.is_running = False
         self.trade_log: List[Dict] = []   # capped at 500 entries (in-memory only)
         self._TRADE_LOG_MAX = 500
@@ -129,6 +131,14 @@ class TradingOrchestrator:
                         logger.info("Kite token reloaded from file successfully")
                 except Exception:
                     kite_ok = False
+                    # If Zerodha is explicitly rejecting the token, mark it invalid immediately
+                    _err_str = str(_kite_err).lower()
+                    if 'access_token' in _err_str or 'api_key' in _err_str or 'invalid token' in _err_str:
+                        try:
+                            from token_manager import TokenManager
+                            TokenManager().mark_token_invalid()
+                        except Exception:
+                            pass
                     logger.error(f"Kite health check FAILED: {_kite_err}")
             if not kite_ok:
                 self._kite_fail_count += 1
@@ -445,9 +455,19 @@ class TradingOrchestrator:
                     f"({len(self._morning_shortlist)} shortlist + {len(open_symbols)} holdings)"
                 )
 
+            # --- Prepare risk data for decision logging ---
+            risk_data = {
+                'available_cash': available_cash,
+                'open_positions': list(open_symbols),
+                'holdings': [p.symbol for p in self.order_executor.risk_manager.positions if p.status == PositionStatus.OPEN],
+                'cooldown_status': False,
+                'portfolio_exposure': current_invested / (available_cash + current_invested) if (available_cash + current_invested) > 0 else 0,
+                'max_position_size': per_stock_budget
+            }
+
             # --- Generate signals for universe ---
             logger.info(f"Generating signals for {len(universe)} stocks...")
-            signals = self.signal_generator.generate_signals_for_watchlist(universe)
+            signals = self.signal_generator.generate_signals_for_watchlist(universe, risk_data)
             cycle_result['signals_generated'] = signals
             logger.info(f"Generated {len(signals)} actionable signals")
 
@@ -632,44 +652,10 @@ class TradingOrchestrator:
                     # Record exit for re-entry engine
                     self._record_exit(sym, sell_signal.get('current_price', 0), 'signal')
             
-            # --- Smart Exit AI: evaluate open positions ---
-            open_positions = [
-                p for p in self.order_executor.risk_manager.positions
-                if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}
-            ]
-            if open_positions:
-                prices_map = {}
-                for p in open_positions:
-                    pr = self.market_data.get_realtime_price(p.symbol)
-                    if pr:
-                        prices_map[p.symbol] = pr
-                smart_exits = self.smart_exit.check_all(open_positions, prices_map, regime)
-                for se in smart_exits:
-                    logger.info(f"SmartExit: {se['symbol']} — {se['reason']}")
-                    exec_r = self.order_executor.execute_signal({
-                        'symbol': se['symbol'], 'action': 'SELL',
-                        'current_price': se['price'],
-                        'position_size': se['quantity'],
-                        'investment_amount': se['price'] * se['quantity'],
-                        'stop_loss': 0, 'target': 0,
-                        'risk_reward_ratio': 0, 'confidence': 1.0,
-                        'overall_score': 0, 'reasoning': se['reason'],
-                        'timestamp': datetime.now().isoformat(),
-                        # record exit for re-entry engine (checked after execute)
-                        '_smart_exit': True, '_exit_price': se['price'],
-                    })
-                    if exec_r['success']:
-                        cycle_result['orders_executed'].append(exec_r)
-                        self._append_trade_log(exec_r)
-                        self._record_exit(se['symbol'], se['price'], se.get('reason', 'smart_exit'))
-                        try:
-                            self.telegram.exit(se, exec_r.get('order_id', ''))
-                        except Exception:
-                            pass
-
-            # --- Monitor existing positions (SL / target / trailing) ---
-            logger.info("Monitoring existing positions...")
+            # --- Monitor existing positions (SL / target / trailing) - HIGHEST PRIORITY ---
+            logger.info("Monitoring existing positions (Stop Loss, Target, Trailing)...")
             position_updates = self.order_executor.monitor_positions()
+            cycle_result['positions_monitored'] = position_updates
 
             # --- Monitor CNC holdings (prior-day delivery positions) ---
             logger.info("Monitoring CNC holdings...")
@@ -677,7 +663,6 @@ class TradingOrchestrator:
             if holding_updates:
                 logger.info(f"Holdings exits: {len(holding_updates)}")
             position_updates = position_updates + holding_updates
-            cycle_result['positions_monitored'] = position_updates
 
             if position_updates:
                 logger.info(f"Position updates: {len(position_updates)}")
@@ -706,7 +691,110 @@ class TradingOrchestrator:
                             f"Net P&L: ₹{es.get('net_pnl',0):.2f}\n"
                             f"Reason: {es.get('reason','')}"
                         )
-            
+
+            # --- AI-Powered Sell Decision: evaluate remaining open positions ---
+            # Only run AI on positions that were NOT closed by SL/Target
+            open_positions = [
+                p for p in self.order_executor.risk_manager.positions
+                if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}
+            ]
+            if open_positions:
+                logger.info("Evaluating remaining positions with AI Sell Decision Engine...")
+                prices_map = {}
+                for p in open_positions:
+                    pr = self.market_data.get_realtime_price(p.symbol)
+                    if pr:
+                        prices_map[p.symbol] = pr
+                
+                # First, run AI Sell Decision Engine
+                ai_sell_decisions = []
+                for position in open_positions:
+                    current_price = prices_map.get(position.symbol)
+                    if current_price:
+                        decision = self.sell_decision_ai.evaluate_position(position, current_price)
+                        if decision.should_sell:
+                            ai_sell_decisions.append({
+                                'position': position,
+                                'decision': decision,
+                                'price': current_price
+                            })
+                            logger.info(
+                                f"AI Sell Decision: {position.symbol} - {decision.recommendation} "
+                                f"(confidence: {decision.confidence:.2f}) - {decision.reason}"
+                            )
+                
+                # Execute AI sell decisions
+                for decision_data in ai_sell_decisions:
+                    position = decision_data['position']
+                    decision = decision_data['decision']
+                    price = decision_data['price']
+                    
+                    # Determine quantity based on recommendation
+                    if decision.recommendation == 'REDUCE_PARTIAL':
+                        quantity = position.quantity // 2  # Sell half
+                        reason_suffix = " (partial exit)"
+                    else:
+                        quantity = position.quantity
+                        reason_suffix = " (full exit)"
+                    
+                    exec_r = self.order_executor.execute_signal({
+                        'symbol': position.symbol, 'action': 'SELL',
+                        'current_price': price,
+                        'position_size': quantity,
+                        'investment_amount': price * quantity,
+                        'stop_loss': 0, 'target': 0,
+                        'risk_reward_ratio': 0, 'confidence': decision.confidence,
+                        'overall_score': int((1 - decision.confidence) * 100),
+                        'reasoning': f"AI Sell Decision: {decision.reason}{reason_suffix}",
+                        'timestamp': datetime.now().isoformat(),
+                        '_ai_sell_decision': True, '_exit_price': price,
+                    })
+                    if exec_r['success']:
+                        cycle_result['orders_executed'].append(exec_r)
+                        self._append_trade_log(exec_r)
+                        self._record_exit(position.symbol, price, f"ai_sell_decision_{decision.recommendation}")
+                        try:
+                            self.telegram.exit({
+                                'symbol': position.symbol,
+                                'price': price,
+                                'quantity': quantity,
+                                'reason': decision.reason
+                            }, exec_r.get('order_id', ''))
+                        except Exception:
+                            pass
+                
+                # Then, run traditional Smart Exit for remaining positions
+                remaining_positions = [
+                    p for p in open_positions 
+                    if p.symbol not in [d['position'].symbol for d in ai_sell_decisions]
+                ]
+                
+                if remaining_positions:
+                    remaining_prices = {p.symbol: prices_map[p.symbol] for p in remaining_positions}
+                    smart_exits = self.smart_exit.check_all(remaining_positions, remaining_prices, regime)
+                    for se in smart_exits:
+                        logger.info(f"SmartExit: {se['symbol']} — {se['reason']}")
+                        exec_r = self.order_executor.execute_signal({
+                            'symbol': se['symbol'], 'action': 'SELL',
+                            'current_price': se['price'],
+                            'position_size': se['quantity'],
+                            'investment_amount': se['price'] * se['quantity'],
+                            'stop_loss': 0, 'target': 0,
+                            'risk_reward_ratio': 0, 'confidence': 1.0,
+                            'overall_score': 0, 'reasoning': se['reason'],
+                            'timestamp': datetime.now().isoformat(),
+                            '_smart_exit': True, '_exit_price': se['price'],
+                        })
+                        if exec_r['success']:
+                            cycle_result['orders_executed'].append(exec_r)
+                            self._append_trade_log(exec_r)
+                            self._record_exit(se['symbol'], se['price'], se.get('reason', 'smart_exit'))
+                            try:
+                                self.telegram.exit(se, exec_r.get('order_id', ''))
+                            except Exception:
+                                pass
+
+                        
             # Get execution summary
             summary = self.order_executor.get_execution_summary()
             logger.info(f"Execution summary: {json.dumps(summary, indent=2, default=str)}")
