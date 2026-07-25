@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from market_data import MarketDataFetcher
 from risk_manager import Position, PositionStatus
 from trade_scorer import TradeScorer
+from config import config
 from ai_research_agent import AIResearchAgent
 from sentiment_analysis import SentimentAnalyzer
 from market_regime import MarketRegimeDetector
@@ -110,8 +111,8 @@ class SellDecisionAI:
             # 6. Fundamental Outlook
             factors['fundamental_outlook'] = self._analyze_fundamental_outlook(symbol)
             
-            # 7. Recovery Probability
-            factors['recovery_probability'] = self._analyze_recovery_probability(
+            # 7. Recovery Probability & support distance
+            factors['recovery_probability'], factors['support_distance'] = self._analyze_recovery_probability(
                 symbol, current_price, position, pnl_pct
             )
             
@@ -391,11 +392,11 @@ class SellDecisionAI:
             if pnl_pct > -0.1:  # Less than 10% loss
                 recovery_score += 0.1
             
-            return min(max(recovery_score, 0), 1.0)
+            return min(max(recovery_score, 0), 1.0), support_distance
             
         except Exception as e:
             logger.debug(f"Recovery probability analysis failed for {symbol}: {e}")
-            return 0.5
+            return 0.5, 1.0
     
     def _calculate_sell_score(self, factors: Dict[str, float], pnl_pct: float) -> float:
         """Calculate overall sell score from all factors"""
@@ -424,47 +425,79 @@ class SellDecisionAI:
     def _make_decision(self, sell_score: float, factors: Dict[str, float],
                       pnl_pct: float, position: Position) -> SellDecision:
         """Make final sell decision based on score and context"""
-        
-        # Decision thresholds
-        if sell_score > 0.75:
-            recommendation = 'SELL'
-            should_sell = True
-        elif sell_score > 0.6:
-            recommendation = 'REDUCE_PARTIAL'
-            should_sell = True
+
+        if pnl_pct > 0:
+            # Profitable positions: score thresholds, but let big winners run
+            if pnl_pct > 0.15 and sell_score < 0.8:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - sell_score
+                reason = "Strong profit position - letting winner run"
+            elif sell_score > 0.75:
+                recommendation = 'SELL'
+                should_sell = True
+                confidence = sell_score
+                reason = f"SELL - AI decline confidence high ({sell_score:.2f})"
+            elif sell_score > 0.6:
+                recommendation = 'REDUCE_PARTIAL'
+                should_sell = True
+                confidence = sell_score
+                reason = f"REDUCE_PARTIAL - moderate decline signals ({sell_score:.2f})"
+            else:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - sell_score
+                reason = "HOLD - no strong sell signals"
         else:
-            recommendation = 'HOLD'
-            should_sell = False
-        
-        # Special cases for profitable positions
-        if pnl_pct > 0.15 and sell_score < 0.8:
-            # Let big winners run
-            recommendation = 'HOLD'
-            should_sell = False
-            confidence = 1.0 - sell_score
-            reason = "Strong profit position - letting winner run"
-        
-        # Special cases for losing positions
-        elif pnl_pct < -0.2 and sell_score > 0.4:
-            # Cut losses early
-            recommendation = 'SELL'
-            should_sell = True
-            confidence = sell_score
-            reason = "Significant loss with poor recovery prospects"
-        
-        else:
-            confidence = sell_score if should_sell else (1.0 - sell_score)
-            
-            # Build detailed reason
-            reasons = []
-            for factor, value in factors.items():
-                if value > 0.7:
-                    reasons.append(f"High {factor.replace('_', ' ')}")
-                elif value < 0.3:
-                    reasons.append(f"Low {factor.replace('_', ' ')}")
-            
-            reason = f"Score: {sell_score:.2f} - " + ", ".join(reasons[:3])
-        
+            # Losing position: conditional loss-management rules
+            loss = -pnl_pct
+            recovery = factors.get('recovery_probability', 0.5)
+            market_sell = factors.get('market_regime', 0.5)
+            sector_sell = factors.get('sector_strength', 0.5)
+            support_dist = factors.get('support_distance', 1.0)
+            sl_pct = config.SWING_STOP_LOSS_PERCENTAGE if config.TRADING_MODE == 'swing' else config.STOP_LOSS_PERCENTAGE
+
+            if loss < config.SMALL_LOSS_PCT:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - sell_score
+                reason = "HOLD - loss < 2%, avoid whipsaws"
+            elif recovery > config.RECOVERY_PROBABILITY_HOLD:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = recovery
+                reason = "HOLD - high recovery probability"
+            elif market_sell < config.BULLISH_MARKET_THRESHOLD:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - market_sell
+                reason = "HOLD - bullish market regime"
+            elif sector_sell < config.STRONG_SECTOR_THRESHOLD:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - sector_sell
+                reason = "HOLD - strong sector relative strength"
+            elif 0 <= support_dist < config.SUPPORT_DISTANCE_THRESHOLD:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = recovery
+                reason = "HOLD - price near strong support"
+            elif loss > sl_pct:
+                recommendation = 'SELL'
+                should_sell = True
+                confidence = sell_score
+                reason = f"SELL - loss exceeded stop threshold ({loss:.1%} > {sl_pct:.1%})"
+            elif sell_score > config.AI_DECLINE_CONFIDENCE_THRESHOLD:
+                recommendation = 'SELL'
+                should_sell = True
+                confidence = sell_score
+                reason = f"SELL - AI decline confidence > 90% ({sell_score:.2f})"
+            else:
+                recommendation = 'HOLD'
+                should_sell = False
+                confidence = 1.0 - sell_score
+                reason = "HOLD - waiting for clearer exit signal"
+
         return SellDecision(
             should_sell=should_sell,
             confidence=confidence,

@@ -17,10 +17,23 @@ echo "════════════════════════�
 echo "$(date '+%Y-%m-%d %H:%M:%S')  AUTO-START" >> "$LOG"
 echo "════════════════════════════════════════" >> "$LOG"
 
+# ── Prevent duplicate autostart instances ─────────────────────────
+LOCKFILE="$PROJ/data/.autostart.lock"
+if [ -f "$LOCKFILE" ]; then
+    OLD_PID=$(cat "$LOCKFILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "$(date '+%H:%M:%S')  Another autostart.sh already running (PID $OLD_PID). Exiting." >> "$LOG"
+        exit 0
+    fi
+fi
+echo $$ > "$LOCKFILE"
+
 # ── Kill any stale processes ─────────────────────────────────
 lsof -ti:5001 | xargs kill -9 2>/dev/null || true
 lsof -ti:8080 | xargs kill -9 2>/dev/null || true
 pkill -f "trading_orchestrator.py" 2>/dev/null || true
+pkill -f "start_trading.sh" 2>/dev/null || true
+pgrep -f "autostart.sh" | grep -v "^$$$" | xargs kill 2>/dev/null || true
 sleep 1
 
 # ── Check if Kite token is valid ─────────────────────────────

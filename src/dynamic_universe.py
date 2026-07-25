@@ -400,6 +400,10 @@ class DynamicUniverse:
         logger.info(f"Dynamic universe selected {len(symbols)} stocks: {symbols[:10]}…")
         return symbols
 
+    def get_universe(self, top_n: int = DEFAULT_TOP_N) -> List[str]:
+        """Alias for get_intraday_candidates; returns list of symbols."""
+        return self.get_intraday_candidates(top_n=top_n)
+
     def get_candidates_with_details(self, top_n: int = DEFAULT_TOP_N) -> List[Dict]:
         """Returns full detail dicts for top_n candidates."""
         if not self.kite:

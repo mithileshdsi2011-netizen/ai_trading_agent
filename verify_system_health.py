@@ -130,7 +130,7 @@ def check_overall_health():
             print("   ❌ Dashboard not running")
         
         # Check trading bot
-        result = subprocess.run(['pgrep', '-f', 'start_trading.py'], capture_output=True, text=True)
+        result = subprocess.run(['pgrep', '-f', 'trading_orchestrator.py'], capture_output=True, text=True)
         if result.returncode == 0:
             results['trading_bot'] = "✅ PASS - Running"
             print(f"   ✅ Trading bot running (PID: {result.stdout.strip()})")
@@ -163,8 +163,8 @@ def check_trading_readiness():
             results['market_data'] = f"✅ PASS - RELIANCE LTP: ₹{ltp}"
             print(f"   ✅ Market data working - RELIANCE LTP: ₹{ltp}")
         else:
-            results['market_data'] = "❌ FAIL - No quote data"
-            print("   ❌ No quote data received")
+            results['market_data'] = "⚠️ WARN - No quote data (market may be closed)"
+            print("   ⚠️  No quote data received (market may be closed)")
     except Exception as e:
         results['market_data'] = f"❌ FAIL: {e}"
         print(f"   ❌ Market data error: {e}")
@@ -200,14 +200,24 @@ def check_trading_readiness():
     try:
         from trade_scorer import TradeScorer
         scorer = TradeScorer()
-        score = scorer.score('RELIANCE', {
-            'price': 2500,
-            'rsi': 50,
-            'macd': 0,
-            'volume_ratio': 1.0,
-            'sentiment': 0.5,
-            'research': {'sector_momentum': 0.02}
-        })
+        score = scorer.score(
+            {'symbol': 'RELIANCE'},
+            {
+                'technical_analysis': {
+                    'trend': 'UPTREND',
+                    'rsi': 50,
+                    'macd_histogram': 0.5,
+                    'macd_histogram_prev': 0.2,
+                    'volume_ratio': 1.5,
+                },
+                'sentiment_analysis': {
+                    'score': 0.5,
+                    'news_count': 5
+                }
+            },
+            regime='SIDEWAYS',
+            sector_momentum=0.02
+        )
         results['trade_scorer'] = f"✅ PASS - Score: {score}/100"
         print(f"   ✅ Trade scoring working - Score: {score}/100")
     except Exception as e:

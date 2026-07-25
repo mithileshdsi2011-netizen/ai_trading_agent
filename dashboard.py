@@ -5340,7 +5340,7 @@ def api_journal():
         try:
             from broker_integration import BrokerIntegration
             _b = BrokerIntegration()
-            kite_orders = _b.kite.orders() or []
+            kite_orders = _b.kite.orders() or [] if _b.kite else []
             entries = j.all_entries()
             changed = False
             for ko in kite_orders:

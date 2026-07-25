@@ -92,6 +92,7 @@ class SellDecisionValidator:
             print(f"   Testing: {case['name']}")
             
             # Test Risk Manager behavior (runs FIRST in orchestrator)
+            self.risk_manager.positions = [case['position']]
             current_prices = {case['position'].symbol: case['position'].current_price}
             risk_signals = self.risk_manager.check_positions(current_prices)
             
@@ -144,6 +145,7 @@ class SellDecisionValidator:
         print(f"   Testing: Trailing Stop Hit (₹1030) at ₹1025")
         
         # Test Risk Manager behavior
+        self.risk_manager.positions = [position]
         current_prices = {position.symbol: position.current_price}
         risk_signals = self.risk_manager.check_positions(current_prices)
         
@@ -178,16 +180,16 @@ class SellDecisionValidator:
                 'expected_partial': True
             },
             {
-                'name': 'Full Target Hit',
+                'name': 'Above Partial Target',
                 'position': self.create_test_position(
                     symbol='TEST_TARGET',
                     entry_price=1000,
                     stop_loss=950,
                     target=1200,
-                    current_price=1200,  # Full target
+                    current_price=1200,  # Above partial target; fixed full target is no longer used
                     quantity=10
                 ),
-                'expected_target': True
+                'expected_partial': True
             }
         ]
         
@@ -196,6 +198,7 @@ class SellDecisionValidator:
             print(f"   Testing: {case['name']}")
             
             # Test Risk Manager behavior
+            self.risk_manager.positions = [case['position']]
             current_prices = {case['position'].symbol: case['position'].current_price}
             risk_signals = self.risk_manager.check_positions(current_prices)
             
@@ -236,6 +239,7 @@ class SellDecisionValidator:
         current_prices = {position.symbol: position.current_price}
         
         # Risk Manager decision
+        self.risk_manager.positions = [position]
         risk_signals = self.risk_manager.check_positions(current_prices)
         
         # AI decision
@@ -433,6 +437,7 @@ class SellDecisionValidator:
             print(f"   Simulating: {scenario['name']}")
             
             # Test all systems
+            self.risk_manager.positions = [scenario['position']]
             current_prices = {scenario['position'].symbol: scenario['position'].current_price}
             
             # Risk Manager

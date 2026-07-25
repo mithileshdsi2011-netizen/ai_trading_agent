@@ -456,6 +456,10 @@ class TradingOrchestrator:
                 )
 
             # --- Prepare risk data for decision logging ---
+            _open_slot_count_est = len([p for p in self.order_executor.risk_manager.positions
+                                        if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}])
+            _remaining_slots_est = max(1, config.MAX_POSITIONS - _open_slot_count_est)
+            per_stock_budget = budget / _remaining_slots_est
             risk_data = {
                 'available_cash': available_cash,
                 'open_positions': list(open_symbols),
@@ -746,6 +750,7 @@ class TradingOrchestrator:
                         'risk_reward_ratio': 0, 'confidence': decision.confidence,
                         'overall_score': int((1 - decision.confidence) * 100),
                         'reasoning': f"AI Sell Decision: {decision.reason}{reason_suffix}",
+                        'allow_loss_exit': True,
                         'timestamp': datetime.now().isoformat(),
                         '_ai_sell_decision': True, '_exit_price': price,
                     })
