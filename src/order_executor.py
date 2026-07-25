@@ -347,6 +347,9 @@ class OrderExecutor:
         action = signal.get('action', 'BUY')
         logger.info(f"Executing signal for {sym}")
 
+        if action == 'SELL':
+            return self._execute_sell(signal)
+
         # ── Hard paper-trading gate ────────────────────────────────────────────
         # BrokerIntegration.place_order() routes to _place_paper_order when
         # self.broker.paper_trading is True, so real orders are structurally
@@ -451,6 +454,62 @@ class OrderExecutor:
                 'signal': signal
             }
     
+    def _execute_sell(self, signal: Dict) -> Dict:
+        """Execute a SELL signal for an open/partial position with minimum-profit guard."""
+        sym = signal['symbol']
+        current_price = float(signal.get('current_price', 0) or 0)
+        reason = signal.get('reasoning', '')
+
+        position = next(
+            (p for p in self.risk_manager.positions
+             if p.symbol == sym and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}),
+            None
+        )
+        if not position:
+            logger.warning(f"SELL {sym}: no open/partial position found")
+            return {'success': False, 'reason': 'No open position', 'signal': signal}
+
+        # Minimum Profit Rule: sell below entry only when AI explicitly allows it or it is a stop-loss
+        price_below_entry = current_price < position.entry_price
+        explicit_stop = any(k in reason.lower() for k in ('stop', 'sl', 'stopped', 'loss'))
+        allow_loss_exit = bool(signal.get('allow_loss_exit', False))
+        if price_below_entry and not (allow_loss_exit or explicit_stop):
+            logger.info(
+                f"SELL {sym} blocked: price ₹{current_price:.2f} below entry ₹{position.entry_price:.2f} "
+                f"and reason '{reason}' is not an allowed loss exit"
+            )
+            return {'success': False, 'reason': 'Price below entry without allowed loss exit', 'signal': signal}
+
+        order_result = self.broker.place_order(signal)
+        if not order_result['success']:
+            logger.error(f"SELL order failed for {sym}: {order_result.get('error')}")
+            return {'success': False, 'error': order_result.get('error'), 'signal': signal}
+
+        exit_signal = self.risk_manager.close_position(sym, current_price, reason)
+        try:
+            self.journal.log_entry(
+                symbol=sym,
+                action='SELL',
+                price=current_price,
+                quantity=signal.get('position_size', position.quantity),
+                exit_reason=reason,
+                entry_price=position.entry_price,
+                entry_date=position.entry_time.isoformat() if position.entry_time else '',
+                gross_pnl=(current_price - position.entry_price) * signal.get('position_size', position.quantity),
+                net_pnl=exit_signal['net_pnl'] if exit_signal else 0,
+                charges=exit_signal['charges'] if exit_signal else 0,
+            )
+        except Exception as je:
+            logger.warning(f"Journal SELL log failed: {je}")
+
+        logger.info(f"SELL executed: {sym} @ ₹{current_price:.2f} Reason: {reason}")
+        return {
+            'success': True,
+            'order_id': order_result.get('order_id'),
+            'exit_signal': exit_signal,
+            'paper_trading': order_result.get('paper_trading', False),
+        }
+
     def monitor_positions(self) -> List[Dict]:
         """
         Monitor open positions and execute stop loss / target exits

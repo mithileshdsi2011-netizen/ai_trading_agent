@@ -17,6 +17,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from token_manager import TokenManager
+from api_usage_monitor import api_monitor, monitored_api_call
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,22 +87,32 @@ class MarketDataFetcher:
         Raises the last exception if all retries fail.
         """
         with MarketDataFetcher._cb_lock:
-            if time.time() < MarketDataFetcher._cb_open_until:
+            remaining = MarketDataFetcher._cb_open_until - time.time()
+            if remaining > 0:
                 raise RuntimeError(
-                    f"Kite circuit open — retry after "
-                    f"{MarketDataFetcher._cb_open_until - time.time():.0f}s"
+                    f"Kite circuit open — retry after {remaining:.0f}s"
                 )
+            elif MarketDataFetcher._cb_open_until > 0:
+                # Circuit just elapsed — reset failure count so it can reopen fresh
+                MarketDataFetcher._cb_failures = 0
+                MarketDataFetcher._cb_open_until = 0.0
 
         last_exc = None
         for attempt in range(max_retries):
             try:
                 result = fn(*args, **kwargs)
-                # Successful call — reset failure counter
+                # Successful call — reset failure counter and circuit breaker
                 with MarketDataFetcher._cb_lock:
                     MarketDataFetcher._cb_failures = 0
+                    MarketDataFetcher._cb_open_until = 0.0
                 return result
             except Exception as exc:
                 last_exc = exc
+                exc_str = str(exc).lower()
+                # Auth errors (bad token) — no point retrying, raise immediately
+                if 'access_token' in exc_str or 'api_key' in exc_str or 'invalid token' in exc_str:
+                    logger.error(f"Kite auth error — token invalid. Run: python get_kite_token.py")
+                    raise exc
                 with MarketDataFetcher._cb_lock:
                     MarketDataFetcher._cb_failures += 1
                     if MarketDataFetcher._cb_failures >= MarketDataFetcher._CB_MAX_FAILURES:

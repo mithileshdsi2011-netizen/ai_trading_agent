@@ -87,6 +87,16 @@ class Config:
     TRAILING_STOP_ACTIVATION_PCT: float = float(_require("TRAILING_STOP_ACTIVATION_PCT", "0.05"))  # 5%
     TRAILING_STOP_TRAIL_PCT:      float = float(_require("TRAILING_STOP_TRAIL_PCT",      "0.03"))  # 3%
 
+    # ── Partial profit & conditional loss-exit thresholds ─────────────────────
+    PARTIAL_PROFIT_THRESHOLD:       float = float(_require("PARTIAL_PROFIT_THRESHOLD",       "0.05"))  # 5%
+    PARTIAL_PROFIT_FRACTION:        float = float(_require("PARTIAL_PROFIT_FRACTION",        "0.5"))   # 50%
+    SMALL_LOSS_PCT:                 float = float(_require("SMALL_LOSS_PCT",                 "0.02"))  # 2%
+    RECOVERY_PROBABILITY_HOLD:      float = float(_require("RECOVERY_PROBABILITY_HOLD",      "0.75"))  # 75%
+    BULLISH_MARKET_THRESHOLD:       float = float(_require("BULLISH_MARKET_THRESHOLD",       "0.25"))  # market_sell below this = bullish
+    STRONG_SECTOR_THRESHOLD:        float = float(_require("STRONG_SECTOR_THRESHOLD",        "0.25"))  # sector_sell below this = strong
+    SUPPORT_DISTANCE_THRESHOLD:     float = float(_require("SUPPORT_DISTANCE_THRESHOLD",     "0.05"))  # within 5% of support
+    AI_DECLINE_CONFIDENCE_THRESHOLD: float = float(_require("AI_DECLINE_CONFIDENCE_THRESHOLD", "0.90"))  # 90%
+
     # ── Risk limits ───────────────────────────────────────────────────────────
     DAILY_MAX_LOSS_PCT:     float = float(_require("DAILY_MAX_LOSS_PCT",     "0.05"))  # 5%
     MAX_CONSECUTIVE_LOSSES: int   = int  (_require("MAX_CONSECUTIVE_LOSSES", "3"))     # halt after 3 straight losses

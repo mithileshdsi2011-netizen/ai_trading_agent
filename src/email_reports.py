@@ -6,8 +6,8 @@ import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
-from typing import Dict, List
+from datetime import datetime, date
+from typing import Dict, List, Set
 
 from config import config
 
@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 class EmailReporter:
     """Sends email trading reports"""
 
+    # Class-level dedup: maps (date_str, subject_prefix) -> bool
+    # Shared across all instances so restarts within the same day also dedup.
+    _sent_today: dict = {}
+
     def __init__(self):
         self.enabled = config.EMAIL_ENABLED
         self.smtp_server = config.EMAIL_SMTP_SERVER
@@ -26,9 +30,29 @@ class EmailReporter:
         self.password = config.EMAIL_PASSWORD
         self.to_email = config.EMAIL_TO
 
+    def _dedup_key(self, subject: str) -> str:
+        """Return a dedup key: today's date + first 60 chars of subject."""
+        return f"{date.today().isoformat()}|{subject[:60]}"
+
+    def _already_sent(self, subject: str) -> bool:
+        """Return True if this subject was already sent today."""
+        return EmailReporter._sent_today.get(self._dedup_key(subject), False)
+
+    def _mark_sent(self, subject: str):
+        """Record that this subject was sent today."""
+        EmailReporter._sent_today[self._dedup_key(subject)] = True
+        # Prune old dates to avoid unbounded growth
+        today = date.today().isoformat()
+        EmailReporter._sent_today = {
+            k: v for k, v in EmailReporter._sent_today.items() if k.startswith(today)
+        }
+
     def send_report(self, subject: str, body: str) -> bool:
         if not self.enabled or not self.username or not self.password or not self.to_email:
             logger.info("Email reports disabled or not configured")
+            return False
+        if self._already_sent(subject):
+            logger.info(f"Email already sent today, skipping duplicate: {subject}")
             return False
         try:
             msg = MIMEMultipart()
@@ -43,6 +67,7 @@ class EmailReporter:
                 server.send_message(msg)
 
             logger.info(f"Email report sent: {subject}")
+            self._mark_sent(subject)
             return True
         except Exception as e:
             logger.error(f"Email report failed: {e}")

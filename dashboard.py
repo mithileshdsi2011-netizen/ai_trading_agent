@@ -1010,6 +1010,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('signals',this)">🤖 AI Signals</button>
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
   <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
+  <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
@@ -1783,6 +1784,56 @@ tr:last-child td{border:none}
 </div><!-- /tab-journal -->
 
 
+<!-- ===== TAB: SKIPPED OPPORTUNITIES ===== -->
+<div id="tab-skipped" class="tab-content">
+
+  <!-- Top KPIs -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+    <div class="card"><div class="stat-label">Total Evaluated</div><div class="stat-value blue" id="s-total-evaluated">—</div></div>
+    <div class="card"><div class="stat-label">Skipped</div><div class="stat-value orange" id="s-skipped">—</div></div>
+    <div class="card"><div class="stat-label">Executed</div><div class="stat-value green" id="s-executed">—</div></div>
+    <div class="card"><div class="stat-label">Skip Rate</div><div class="stat-value red" id="s-skip-rate">—</div></div>
+  </div>
+
+  <!-- Rejection Reasons Summary -->
+  <div class="card mb-4">
+    <h3 style="color:#f9fafb;font-size:16px;margin-bottom:12px">📊 Rejection Reasons Summary</h3>
+    <div id="s-rejection-reasons" style="font-size:13px;color:#9ca3af">Loading...</div>
+  </div>
+
+  <!-- Skipped Opportunities Table -->
+  <div class="card">
+    <h3 style="color:#f9fafb;font-size:16px;margin-bottom:12px">⚠️ Skipped Opportunities</h3>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#1f2937">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Confidence</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">R:R</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Rejection Reason</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Entry Price</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Sector</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Time</th>
+          </tr>
+        </thead>
+        <tbody id="s-skipped-table">
+          <tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Loading skipped opportunities...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Detailed Decision View -->
+  <div class="card mt-4">
+    <h3 style="color:#f9fafb;font-size:16px;margin-bottom:12px">🔍 Detailed Decision Analysis</h3>
+    <div id="s-detailed-decisions" style="font-size:13px;color:#9ca3af">Click on a stock to see detailed analysis...</div>
+  </div>
+
+</div><!-- /tab-skipped -->
+
+
 <!-- ===== TAB: ASK AI ===== -->
 <div id="tab-askai" class="tab-content">
   <div class="card chat-wrap" style="padding:0;overflow:hidden">
@@ -1944,6 +1995,25 @@ tr:last-child td{border:none}
         <div id="ip-trading-status" style="font-size:15px;font-weight:800;letter-spacing:.03em">—</div>
       </div>
       <button onclick="refreshIpStatus()" style="background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap">🔄 Refresh</button>
+    </div>
+
+    <!-- ── Kite Authentication Status Banner ───────────────────────────── -->
+    <div id="auth-status-card" style="border-radius:12px;padding:18px 24px;margin-bottom:20px;border:2px solid #334155;background:#1e293b;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div id="auth-status-icon" style="font-size:32px">⏳</div>
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:4px">Kite Authentication</div>
+        <div id="auth-status-text" style="font-size:17px;font-weight:700;color:#f1f5f9">Checking…</div>
+        <div id="auth-status-sub" style="font-size:12px;color:#64748b;margin-top:3px">—</div>
+      </div>
+      <div style="text-align:right;min-width:140px">
+        <div style="font-size:10px;color:#64748b;margin-bottom:4px">TOKEN EXPIRES</div>
+        <div id="auth-token-expiry" style="font-size:13px;font-weight:600;color:#94a3b8;font-family:monospace">—</div>
+        <div id="auth-token-ttl" style="font-size:11px;color:#64748b;margin-top:2px">—</div>
+      </div>
+      <a id="auth-reauth-btn" href="#" onclick="startKiteAuth(this);return false;"
+         style="display:none;background:#3b82f6;color:#fff;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">
+        🔐 Re-authenticate Now
+      </a>
     </div>
 
     <!-- ── 6-Card Grid ───────────────────────────────────────────────────── -->
@@ -2249,6 +2319,7 @@ function switchTab(id,btn){
   btn.classList.add('active');
   if(id==='ipstatus') refreshIpStatus();
   if(id==='morning') loadMorningReport();
+  if(id==='skipped') loadSkippedOpportunities();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -3569,6 +3640,105 @@ async function loadJournal(){
   }catch(e){console.error('Journal error:',e);}
 }
 
+// ─── Skipped Opportunities ──────────────────────────────────────────────────────
+async function loadSkippedOpportunities(){
+  try{
+    const response = await fetch('/api/skipped-opportunities').then(r => r.json());
+    const data = response.skipped_opportunities || [];
+    const summary = response.summary || {};
+    
+    // Update KPIs
+    document.getElementById('s-total-evaluated').textContent = summary.total_evaluated || 0;
+    document.getElementById('s-skipped').textContent = summary.skipped || 0;
+    document.getElementById('s-executed').textContent = summary.executed || 0;
+    document.getElementById('s-skip-rate').textContent = summary.skip_rate ? (summary.skip_rate * 100).toFixed(1) + '%' : '0%';
+    
+    // Update rejection reasons summary
+    const reasonsEl = document.getElementById('s-rejection-reasons');
+    if (summary.rejection_reasons && Object.keys(summary.rejection_reasons).length > 0) {
+      reasonsEl.innerHTML = Object.entries(summary.rejection_reasons)
+        .map(([reason, count]) => `<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span>${reason}</span><span style="color:#f9fafb;font-weight:600">${count}</span></div>`)
+        .join('');
+    } else {
+      reasonsEl.innerHTML = '<div style="color:#4b5563">No rejection reasons recorded</div>';
+    }
+    
+    // Update skipped opportunities table
+    const tableEl = document.getElementById('s-skipped-table');
+    if (data.length > 0) {
+      tableEl.innerHTML = data.map(item => {
+        const scoreColor = item.overall_score >= 80 ? '#16a34a' : item.overall_score >= 60 ? '#f59e0b' : '#dc2626';
+        const confidenceColor = item.confidence >= 0.8 ? '#16a34a' : item.confidence >= 0.6 ? '#f59e0b' : '#dc2626';
+        const rrColor = item.risk_reward_ratio >= 2 ? '#16a34a' : item.risk_reward_ratio >= 1.5 ? '#f59e0b' : '#dc2626';
+        
+        return `<tr style="border-bottom:1px solid #1f2937;cursor:pointer" onclick="showDetailedDecision('${item.symbol}')">
+          <td style="padding:8px;font-weight:700;color:#f9fafb">${item.symbol}</td>
+          <td style="padding:8px;color:${scoreColor}">${item.overall_score.toFixed(1)}</td>
+          <td style="padding:8px;color:${confidenceColor}">${(item.confidence * 100).toFixed(0)}%</td>
+          <td style="padding:8px;color:${rrColor}">${item.risk_reward_ratio.toFixed(2)}</td>
+          <td style="padding:8px;color:#9ca3af;font-size:11px">${item.rejection_reason}</td>
+          <td style="padding:8px;color:#60a5fa;font-family:monospace">₹${item.entry_price.toFixed(2)}</td>
+          <td style="padding:8px;color:#9ca3af">${item.sector}</td>
+          <td style="padding:8px;color:#4b5563;font-size:11px">${new Date(item.timestamp).toLocaleTimeString()}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      tableEl.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No skipped opportunities today</td></tr>';
+    }
+    
+    // Store data for detailed view
+    window.skippedData = data;
+    
+  }catch(e){
+    console.error('Skipped opportunities error:',e);
+    document.getElementById('s-skipped-table').innerHTML = '<tr><td colspan="8" style="text-align:center;color:#dc2626;padding:20px">Error loading data</td></tr>';
+  }
+}
+
+function showDetailedDecision(symbol){
+  const item = window.skippedData.find(d => d.symbol === symbol);
+  if (!item) return;
+  
+  const detailsEl = document.getElementById('s-detailed-decisions');
+  detailsEl.innerHTML = `
+    <div style="background:#1f2937;padding:16px;border-radius:8px;margin-bottom:16px">
+      <h4 style="color:#f9fafb;margin-bottom:12px">${symbol} - Detailed Analysis</h4>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+        <div><strong style="color:#9ca3af">Overall Score:</strong> <span style="color:#60a5fa">${item.overall_score.toFixed(1)}</span></div>
+        <div><strong style="color:#9ca3af">Confidence:</strong> <span style="color:#60a5fa">${(item.confidence * 100).toFixed(0)}%</span></div>
+        <div><strong style="color:#9ca3af">Technical Score:</strong> <span style="color:#60a5fa">${item.technical_score.toFixed(1)}</span></div>
+        <div><strong style="color:#9ca3af">News Sentiment:</strong> <span style="color:#60a5fa">${item.news_sentiment_score.toFixed(1)}</span></div>
+        <div><strong style="color:#9ca3af">Sector Strength:</strong> <span style="color:#60a5fa">${item.sector_strength.toFixed(1)}</span></div>
+        <div><strong style="color:#9ca3af">Market Regime:</strong> <span style="color:#60a5fa">${item.market_regime}</span></div>
+        <div><strong style="color:#9ca3af">Risk/Reward:</strong> <span style="color:#60a5fa">${item.risk_reward_ratio.toFixed(2)}</span></div>
+        <div><strong style="color:#9ca3af">Position Size:</strong> <span style="color:#60a5fa">${item.position_size_calculated}</span></div>
+      </div>
+    </div>
+    
+    <div style="background:#1f2937;padding:16px;border-radius:8px;margin-bottom:16px">
+      <h4 style="color:#f9fafb;margin-bottom:12px">Risk Management</h4>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+        <div><strong style="color:#9ca3af">Available Cash:</strong> <span style="color:#60a5fa">₹${item.available_cash.toFixed(0)}</span></div>
+        <div><strong style="color:#9ca3af">Portfolio Exposure:</strong> <span style="color:#60a5fa">${(item.portfolio_exposure * 100).toFixed(1)}%</span></div>
+        <div><strong style="color:#9ca3af">Open Positions:</strong> <span style="color:#60a5fa">${item.current_open_positions.length}</span></div>
+        <div><strong style="color:#9ca3af">Holdings:</strong> <span style="color:#60a5fa">${item.existing_holdings.length}</span></div>
+        <div><strong style="color:#9ca3af">Cooldown Status:</strong> <span style="color:#60a5fa">${item.cooldown_status ? 'Active' : 'Inactive'}</span></div>
+        <div><strong style="color:#9ca3af">Max Position Size:</strong> <span style="color:#60a5fa">₹${item.max_position_size.toFixed(0)}</span></div>
+      </div>
+    </div>
+    
+    <div style="background:#1f2937;padding:16px;border-radius:8px">
+      <h4 style="color:#f9fafb;margin-bottom:12px">Trade Parameters</h4>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+        <div><strong style="color:#9ca3af">Entry Price:</strong> <span style="color:#60a5fa">₹${item.entry_price.toFixed(2)}</span></div>
+        <div><strong style="color:#9ca3af">Stop Loss:</strong> <span style="color:#60a5fa">₹${item.stop_loss.toFixed(2)}</span></div>
+        <div><strong style="color:#9ca3af">Target:</strong> <span style="color:#60a5fa">₹${item.target.toFixed(2)}</span></div>
+        <div><strong style="color:#9ca3af">Rejection Reason:</strong> <span style="color:#dc2626">${item.rejection_reason}</span></div>
+      </div>
+    </div>
+  `;
+}
+
 // ─── IP Status ────────────────────────────────────────────────────────────────
 function updateIpStatus(d){
   const cur       = d.current_ip   || 'unknown';
@@ -3671,6 +3841,56 @@ function updateIpStatus(d){
   // ── Last API call card ────────────────────────────────────────────────────
   const elApi = document.getElementById('ip-last-api');
   if(elApi) elApi.textContent = lastApi;
+
+  // ── Kite Authentication Status card ───────────────────────────────────────
+  const kiteOk     = d.kite_ok !== false;   // true = token accepted by Zerodha
+  const tokenExpiry= d.token_expiry || '';  // e.g. "2026-07-15T14:12"
+  const authCard   = document.getElementById('auth-status-card');
+  const authIcon   = document.getElementById('auth-status-icon');
+  const authText   = document.getElementById('auth-status-text');
+  const authSub    = document.getElementById('auth-status-sub');
+  const authExpiry = document.getElementById('auth-token-expiry');
+  const authTtl    = document.getElementById('auth-token-ttl');
+  const authBtn    = document.getElementById('auth-reauth-btn');
+
+  if(authCard){
+    // Compute time-to-expiry
+    let ttlStr = '—', expiryDisp = '—';
+    if(tokenExpiry){
+      try{
+        const exp  = new Date(tokenExpiry.replace(' ','T'));
+        const diff = Math.round((exp.getTime() - Date.now()) / 60000);  // minutes
+        expiryDisp = exp.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:true});
+        if(diff <= 0) ttlStr = 'Expired';
+        else if(diff < 60) ttlStr = `Expires in ${diff} min`;
+        else ttlStr = `Expires in ${Math.round(diff/60)}h ${diff%60}m`;
+      }catch(_){}
+    }
+    authExpiry.textContent = expiryDisp;
+    authTtl.textContent    = ttlStr;
+
+    if(kiteOk){
+      // ── Authenticated ────────────────────────────────────────────────────
+      authCard.style.borderColor   = '#22c55e';
+      authCard.style.background    = '#0f2318';
+      authIcon.textContent         = '🔓';
+      authText.textContent         = 'Authentication Successful';
+      authText.style.color         = '#22c55e';
+      authSub.textContent          = 'Kite token is valid · Swing trading is active';
+      authSub.style.color          = '#4ade80';
+      authBtn.style.display        = 'none';
+    } else {
+      // ── Authentication Required ───────────────────────────────────────────
+      authCard.style.borderColor   = '#ef4444';
+      authCard.style.background    = '#1a0f0f';
+      authIcon.textContent         = '🔒';
+      authText.textContent         = 'Authentication Required';
+      authText.style.color         = '#ef4444';
+      authSub.textContent          = 'Token rejected by Zerodha · No trades can execute · Run python get_kite_token.py';
+      authSub.style.color          = '#f87171';
+      authBtn.style.display        = 'inline-block';
+    }
+  }
 
   // ── Action box ────────────────────────────────────────────────────────────
   const actionBox = document.getElementById('ip-action-box');
@@ -4057,8 +4277,8 @@ def get_kite():
 def index():
     from flask import make_response, redirect, request
     # Force browsers that have an old cached HTML to load a fresh, cache-busted URL
-    if request.args.get('v') != '3':
-        return redirect('/?v=3', code=302)
+    if request.args.get('v') != '4':
+        return redirect('/?v=4', code=302)
     resp = make_response(render_template_string(HTML))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     resp.headers['Pragma'] = 'no-cache'
@@ -5120,7 +5340,7 @@ def api_journal():
         try:
             from broker_integration import BrokerIntegration
             _b = BrokerIntegration()
-            kite_orders = _b.kite.orders() or []
+            kite_orders = _b.kite.orders() or [] if _b.kite else []
             entries = j.all_entries()
             changed = False
             for ko in kite_orders:
@@ -5164,6 +5384,56 @@ def api_journal():
         return jsonify(analytics)
     except Exception as e:
         return jsonify({'error': str(e), 'total_trades': 0, 'open_trades_count': 0, 'open_trade_log': []})
+
+
+@app.route('/api/skipped-opportunities')
+def api_skipped_opportunities():
+    """Get today's skipped opportunities with detailed rejection reasons"""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from decision_logger import DecisionLogger
+        
+        logger = DecisionLogger()
+        skipped = logger.get_skipped_opportunities()
+        summary = logger.get_decision_summary()
+        
+        # Convert to JSON-serializable format
+        skipped_data = []
+        for decision in skipped:
+            skipped_data.append({
+                'symbol': decision.symbol,
+                'timestamp': decision.timestamp,
+                'overall_score': decision.overall_score,
+                'confidence': decision.confidence,
+                'technical_score': decision.technical_score,
+                'news_sentiment_score': decision.news_sentiment_score,
+                'sector_strength': decision.sector_strength,
+                'market_regime': decision.market_regime,
+                'risk_reward_ratio': decision.risk_reward_ratio,
+                'position_size_calculated': decision.position_size_calculated,
+                'available_cash': decision.available_cash,
+                'current_open_positions': decision.current_open_positions,
+                'existing_holdings': decision.existing_holdings,
+                'cooldown_status': decision.cooldown_status,
+                'portfolio_exposure': decision.portfolio_exposure,
+                'max_position_size': decision.max_position_size,
+                'final_decision': decision.final_decision,
+                'rejection_reason': decision.rejection_reason,
+                'detailed_factors': decision.detailed_factors,
+                'entry_price': decision.entry_price,
+                'stop_loss': decision.stop_loss,
+                'target': decision.target,
+                'sector': decision.sector
+            })
+        
+        return jsonify({
+            'skipped_opportunities': skipped_data,
+            'summary': summary,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Skipped opportunities API error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/morning-report')

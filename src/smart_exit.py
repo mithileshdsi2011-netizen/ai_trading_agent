@@ -48,6 +48,10 @@ class SmartExitAI:
         if position.status not in {PositionStatus.OPEN, PositionStatus.PARTIAL}:
             return None
 
+        # Minimum Profit Rule: SmartExit is not a stop-loss, so never sell at or below entry
+        if current_price <= position.entry_price:
+            return None
+
         symbol = position.symbol
         triggers_hit: List[str] = []
 
