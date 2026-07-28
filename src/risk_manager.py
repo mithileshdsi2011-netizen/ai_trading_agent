@@ -283,9 +283,11 @@ class RiskManager:
             logger.warning(f"R:R too low: {signal['risk_reward_ratio']:.2f} (min {config.MIN_RISK_REWARD})")
             return False
 
-        # Check confidence
-        if signal['confidence'] < config.MIN_CONFIDENCE:
-            logger.warning(f"Confidence too low: {signal['confidence']:.0%} (min {config.MIN_CONFIDENCE:.0%})")
+        # Check confidence using rounded percentages to avoid floating-point edge cases
+        conf_pct = round(signal['confidence'] * 100)
+        min_pct = round(config.MIN_CONFIDENCE * 100)
+        if conf_pct < min_pct:
+            logger.warning(f"Confidence too low: {conf_pct}% (min {min_pct}%)")
             return False
         
         # Sanity cap: investment must not exceed the full trading amount
@@ -322,8 +324,12 @@ class RiskManager:
 
         # Keep signal target unless overriding
         target = signal['target']
-        # First partial target: configurable (default +5% or ATR-based)
-        partial_target = entry_price * (1 + config.PARTIAL_PROFIT_THRESHOLD)
+        # First partial target: max(fixed 5%, 1.5x ATR as fraction) — volatility-adaptive
+        partial_profit_pct = max(
+            config.PARTIAL_PROFIT_THRESHOLD,
+            config.PARTIAL_PROFIT_ATR_MULTIPLIER * atr / entry_price
+        )
+        partial_target = entry_price * (1 + partial_profit_pct)
 
         # Volatility-based quantity
         per_slot = config.TRADING_AMOUNT / max(1, config.MAX_POSITIONS)
@@ -392,8 +398,9 @@ class RiskManager:
             effective_stop = max(position.stop_loss, position.trailing_stop or 0)
 
             # ── Partial profit booking ─────────────────────────────────
+            atr_pct = config.PARTIAL_PROFIT_ATR_MULTIPLIER * position.atr_at_entry / position.entry_price if position.atr_at_entry and position.entry_price else 0
             partial_target = getattr(position, '_partial_target',
-                                     position.entry_price * (1 + config.PARTIAL_PROFIT_THRESHOLD))
+                                     position.entry_price * (1 + max(config.PARTIAL_PROFIT_THRESHOLD, atr_pct)))
             if (not position.partial_booked
                     and position.status == PositionStatus.OPEN
                     and current_price >= partial_target

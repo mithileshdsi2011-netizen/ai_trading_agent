@@ -9,6 +9,11 @@ sys.path.insert(0, 'src')
 
 from datetime import datetime, timedelta
 from risk_manager import Position, PositionStatus, RiskManager
+import risk_manager
+
+# Use an isolated persistence file so validation tests never clobber live positions
+risk_manager.PERSISTENCE_FILE = os.path.join(os.path.dirname(__file__), 'data', 'positions_validate.json')
+
 from sell_decision_ai import SellDecisionAI
 from order_executor import OrderExecutor
 from smart_exit import SmartExitAI

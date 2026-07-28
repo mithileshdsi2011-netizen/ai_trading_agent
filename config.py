@@ -89,6 +89,7 @@ class Config:
 
     # ── Partial profit & conditional loss-exit thresholds ─────────────────────
     PARTIAL_PROFIT_THRESHOLD:       float = float(_require("PARTIAL_PROFIT_THRESHOLD",       "0.05"))  # 5%
+    PARTIAL_PROFIT_ATR_MULTIPLIER:  float = float(_require("PARTIAL_PROFIT_ATR_MULTIPLIER",  "1.5"))  # ATR multiple for adaptive partial target
     PARTIAL_PROFIT_FRACTION:        float = float(_require("PARTIAL_PROFIT_FRACTION",        "0.5"))   # 50%
     SMALL_LOSS_PCT:                 float = float(_require("SMALL_LOSS_PCT",                 "0.02"))  # 2%
     RECOVERY_PROBABILITY_HOLD:      float = float(_require("RECOVERY_PROBABILITY_HOLD",      "0.75"))  # 75%

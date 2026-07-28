@@ -1011,6 +1011,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
   <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
   <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
+  <button class="tab-btn" onclick="switchTab('explain',this)">🔍 AI Explain</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
@@ -1834,6 +1835,39 @@ tr:last-child td{border:none}
 </div><!-- /tab-skipped -->
 
 
+<!-- ===== TAB: AI EXPLAINABILITY ===== -->
+<div id="tab-explain" class="tab-content">
+  <div class="card mb-4">
+    <h3 style="color:#f9fafb;font-size:16px;margin-bottom:12px">🔍 AI Explainability — Why the bot acted</h3>
+    <p style="color:#9ca3af;font-size:13px;margin:0">Latest BUY, SELL, HOLD and SKIP decisions with the reason recorded by the engine.</p>
+  </div>
+
+  <div class="card">
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#1f2937">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Time</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Action</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Reason</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Conf.</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">P&L</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Price</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Qty</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Sector</th>
+          </tr>
+        </thead>
+        <tbody id="explain-table">
+          <tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /tab-explain -->
+
+
 <!-- ===== TAB: ASK AI ===== -->
 <div id="tab-askai" class="tab-content">
   <div class="card chat-wrap" style="padding:0;overflow:hidden">
@@ -2320,6 +2354,7 @@ function switchTab(id,btn){
   if(id==='ipstatus') refreshIpStatus();
   if(id==='morning') loadMorningReport();
   if(id==='skipped') loadSkippedOpportunities();
+  if(id==='explain') loadExplainability();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -2684,7 +2719,11 @@ async function load(){
     const mktEl=document.getElementById('hdr-market');
     if(d.market_open){mktEl.innerHTML='<span class="green">🟢 OPEN</span>';}
     else{mktEl.innerHTML='<span class="red">🔴 CLOSED</span>';}
-    document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' LIVE';
+    const bMode = (d.broker_mode || (d.paper_trading ? 'PAPER' : 'UNKNOWN')).toUpperCase();
+    const bStart = d.broker_startup_timestamp && d.broker_startup_timestamp !== '—'
+        ? ' · ' + new Date(d.broker_startup_timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+        : '';
+    document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
     document.getElementById('hdr-last-scan').textContent=nowStr;
     document.getElementById('hdr-next-scan').textContent=nextStr;
     const stEl=document.getElementById('hdr-status');
@@ -3739,6 +3778,44 @@ function showDetailedDecision(symbol){
   `;
 }
 
+// ─── AI Explainability ───────────────────────────────────────────────────────
+async function loadExplainability(){
+  try{
+    const r=await fetch('/api/explain');
+    const d=await r.json();
+    const actions=d.actions||[];
+    const tbody=document.getElementById('explain-table');
+    if(actions.length===0){
+      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
+      return;
+    }
+    const rupee=(n)=>{n=parseFloat(n)||0; return '₹'+n.toFixed(2);};
+    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return ts||'—';}};
+    tbody.innerHTML=actions.map(a=>{
+      const isBuy=a.action==='BUY';
+      const isSell=(typeof a.action==='string') && a.action.startsWith('SELL');
+      const actionColor=isBuy?'#16a34a':isSell?'#dc2626':'#9ca3af';
+      const pnl=parseFloat(a.pnl||0);
+      const pnlColor=pnl>0?'#16a34a':pnl<0?'#dc2626':'#9ca3af';
+      return `<tr style="border-bottom:1px solid #1f2937">
+        <td style="padding:8px;color:#9ca3af;font-family:monospace;font-size:11px">${fmtTime(a.timestamp)}</td>
+        <td style="padding:8px;font-weight:700;color:#f9fafb">${a.symbol||'—'}</td>
+        <td style="padding:8px;color:${actionColor};font-weight:600">${a.action||'—'}</td>
+        <td style="padding:8px;color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</td>
+        <td style="padding:8px;color:#60a5fa">${a.score!=null?a.score.toFixed(1):'—'}</td>
+        <td style="padding:8px;color:#f59e0b">${a.confidence!=null?(a.confidence*100).toFixed(0)+'%':'—'}</td>
+        <td style="padding:8px;color:${pnlColor}">${pnl!==0?rupee(pnl):'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.price?rupee(a.price):'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.quantity||'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.sector||'Unknown'}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    console.error('Explainability load error:',e);
+    document.getElementById('explain-table').innerHTML='<tr><td colspan="10" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
+  }
+}
+
 // ─── IP Status ────────────────────────────────────────────────────────────────
 function updateIpStatus(d){
   const cur       = d.current_ip   || 'unknown';
@@ -4355,6 +4432,27 @@ def api_data():
             "market_regime": "UNKNOWN"
         }
     }
+
+    # Load broker mode status (written by broker_integration.py at startup)
+    try:
+        _bs_path = os.path.join(os.path.dirname(__file__), 'data', 'broker_status.json')
+        if os.path.exists(_bs_path):
+            with open(_bs_path) as _bf:
+                _bs = json.load(_bf)
+            data['broker_mode'] = _bs.get('mode', 'UNKNOWN')
+            data['broker_live_ready'] = _bs.get('live_ready', False)
+            data['broker_startup_timestamp'] = _bs.get('startup_timestamp', '—')
+            data['broker_error'] = _bs.get('error', None)
+        else:
+            data['broker_mode'] = 'PAPER' if config.PAPER_TRADING else 'LIVE'
+            data['broker_live_ready'] = not config.PAPER_TRADING and (kite is not None)
+            data['broker_startup_timestamp'] = '—'
+            data['broker_error'] = 'Broker status not yet recorded — restart trading orchestrator'
+    except Exception:
+        data['broker_mode'] = 'UNKNOWN'
+        data['broker_live_ready'] = False
+        data['broker_startup_timestamp'] = '—'
+        data['broker_error'] = None
 
     if not kite:
         return jsonify(data)
@@ -5394,6 +5492,13 @@ def api_skipped_opportunities():
         from decision_logger import DecisionLogger
         
         logger = DecisionLogger()
+        # Always rebuild from the live trading log so the dashboard reflects the latest cycle
+        logger.decisions_today = logger._parse_log_decisions()
+        # Remove repeated (symbol, final_decision) records, keeping the most recent one
+        seen_decisions = {}
+        for d in reversed(logger.decisions_today):
+            seen_decisions[(d.symbol, d.final_decision)] = d
+        logger.decisions_today = list(seen_decisions.values())
         skipped = logger.get_skipped_opportunities()
         summary = logger.get_decision_summary()
         
@@ -5434,6 +5539,83 @@ def api_skipped_opportunities():
     except Exception as e:
         logger.error(f"Skipped opportunities API error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/explain')
+def api_explain():
+    """AI explainability panel: why each BUY, SELL, HOLD and SKIP happened."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from decision_logger import DecisionLogger
+
+        actions = []
+
+        # Executed trades from the journal
+        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
+        if os.path.exists(journal_path):
+            with open(journal_path, 'r') as f:
+                journal = json.load(f)
+            for t in journal:
+                if t.get('status') == 'CLOSED':
+                    actions.append({
+                        'timestamp': t.get('timestamp'),
+                        'symbol': t.get('symbol'),
+                        'action': f"SELL ({t.get('exit_reason', 'closed')})",
+                        'reason': t.get('exit_reason', 'Closed'),
+                        'confidence': t.get('confidence'),
+                        'score': t.get('trade_score'),
+                        'pnl': t.get('net_pnl'),
+                        'price': t.get('exit_price'),
+                        'quantity': t.get('quantity'),
+                        'sector': t.get('sector', 'Unknown')
+                    })
+                if t.get('action') == 'BUY':
+                    actions.append({
+                        'timestamp': t.get('timestamp'),
+                        'symbol': t.get('symbol'),
+                        'action': 'BUY',
+                        'reason': t.get('buy_reason', 'AI signal'),
+                        'confidence': t.get('confidence'),
+                        'score': t.get('trade_score'),
+                        'pnl': t.get('net_pnl'),
+                        'price': t.get('entry_price'),
+                        'quantity': t.get('quantity'),
+                        'sector': t.get('sector', 'Unknown')
+                    })
+
+        # Evaluated-but-skipped opportunities from the live trading log
+        dl = DecisionLogger()
+        dl.decisions_today = dl._parse_log_decisions()
+        for d in dl.decisions_today:
+            actions.append({
+                'timestamp': d.timestamp,
+                'symbol': d.symbol,
+                'action': d.final_decision,
+                'reason': d.rejection_reason or (
+                    f"BUY recorded in trading log | Score {d.overall_score:.0f}/100 | Conf {d.confidence:.0%}"
+                    if d.final_decision == 'BUY'
+                    else f"Signal evaluated ({d.final_decision}, score {d.overall_score:.0f}, conf {d.confidence:.0%}, rr {d.risk_reward_ratio:.2f})"
+                ),
+                'confidence': d.confidence,
+                'score': d.overall_score,
+                'pnl': 0.0,
+                'price': d.entry_price,
+                'quantity': d.position_size_calculated,
+                'sector': d.sector or 'Unknown'
+            })
+
+        # Deduplicate: keep the first authoritative record per (symbol, action) when iterating backwards;
+        # trade-journal entries (added first) are preserved over log-derived duplicates.
+        seen_actions = {}
+        for a in reversed(actions):
+            seen_actions[(a['symbol'], a['action'])] = a
+        actions = list(seen_actions.values())
+
+        actions.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+        return jsonify({'actions': actions[:100], 'count': len(actions), 'timestamp': datetime.now().isoformat()})
+    except Exception as e:
+        logger.error(f"Explain API error: {e}")
+        return jsonify({'error': str(e), 'actions': []}), 500
 
 
 @app.route('/api/morning-report')

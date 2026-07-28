@@ -5,6 +5,7 @@ Provides transparency for why stocks were bought, held, or skipped
 """
 import json
 import os
+import re
 from datetime import datetime, date
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
@@ -62,6 +63,14 @@ class DecisionLogger:
         except Exception as e:
             logger.warning(f"Could not load today's decisions: {e}")
             self.decisions_today = []
+        # Fallback: if no persisted decisions, build them from today's trading log
+        if not self.decisions_today:
+            try:
+                self.decisions_today = self._parse_log_decisions()
+                if self.decisions_today:
+                    self._save_decisions()
+            except Exception as e:
+                logger.warning(f"Could not parse today's log decisions: {e}")
     
     def log_decision(self, decision: DecisionRecord):
         """Log a new decision record"""
@@ -121,6 +130,127 @@ class DecisionLogger:
                         continue
         except Exception as e:
             logger.warning(f"Could not clear old logs: {e}")
+
+    def _parse_log_decisions(self) -> List[DecisionRecord]:
+        """Reconstruct today's decisions from trading.log when no persisted JSON exists"""
+        parsed: List[DecisionRecord] = []
+        last_signal: Dict[str, Dict] = {}
+        log_dir = os.path.dirname(self.log_file)
+        log_path = os.path.join(os.path.dirname(log_dir), 'logs', 'trading.log')
+        if not os.path.exists(log_path):
+            return []
+        # Note: trading.log contains the current session lines without per-line dates,
+        # so we parse all Signal/Skipping/Executing BUY lines we find.
+        signal_re = re.compile(
+            r'^(?:INFO|WARNING):__main__:\s+Signal:\s+(\S+)\s+action=(\S+)\s+confidence=(\d+)%\s+score=([\d.]+)\s+rr=([\d.]+)\s+atr=([\d.]+)\s+trend=(\S+)(?:\s+reason=(.+))?$'
+        )
+        skip_re = re.compile(
+            r'^(?:INFO|WARNING):__main__:\s*Skipping\s+(\S+):\s+(.+?)$'
+        )
+        buy_re = re.compile(
+            r"^(?:INFO|WARNING):__main__:\s*Executing\s+BUY:\s+(\S+)\s+×(\d+)\s+@ ₹([\d.]+).*?Score:([\d.]+)/100\s+Conf:(\d+)%"
+        )
+
+        def _time_from_match(m) -> str:
+            return datetime.now().isoformat()
+
+        def _default_record(**kwargs) -> DecisionRecord:
+            defaults = dict(
+                timestamp=datetime.now().isoformat(),
+                overall_score=0.0,
+                confidence=0.0,
+                technical_score=0.0,
+                news_sentiment_score=0.0,
+                sector_strength=0.0,
+                market_regime='UNKNOWN',
+                risk_reward_ratio=0.0,
+                position_size_calculated=0,
+                available_cash=0.0,
+                current_open_positions=[],
+                existing_holdings=[],
+                cooldown_status=False,
+                portfolio_exposure=0.0,
+                max_position_size=0.0,
+                final_decision='HOLD',
+                rejection_reason='',
+                detailed_factors={},
+                entry_price=0.0,
+                stop_loss=0.0,
+                target=0.0,
+                sector='Unknown',
+            )
+            defaults.update(kwargs)
+            return DecisionRecord(**defaults)
+
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    # Parse every Signal / Skipping / Executing BUY line in the log.
+                    m = signal_re.match(line)
+                    if m:
+                        sym, action, conf, score, rr, atr, trend = m.groups()[:7]
+                        reason = m.group(8)
+                        conf_f = int(conf) / 100
+                        score_f = float(score) * 100
+                        rr_f = float(rr)
+                        last_signal[sym] = {
+                            'timestamp': _time_from_match(m),
+                            'overall_score': score_f,
+                            'confidence': conf_f,
+                            'risk_reward_ratio': rr_f,
+                            'market_regime': trend,
+                        }
+                        if action == 'BUY':
+                            # BUY signals are resolved later by Skipping or Executing BUY
+                            continue
+                        reason_text = reason.strip() if reason else ''
+                        if not reason_text:
+                            reason_text = f'Signal action={action} (score {score_f:.1f}, conf {conf_f:.0%}, rr {rr_f:.2f})'
+                        parsed.append(_default_record(
+                            symbol=sym,
+                            timestamp=_time_from_match(m),
+                            overall_score=score_f,
+                            confidence=conf_f,
+                            risk_reward_ratio=rr_f,
+                            market_regime=trend,
+                            final_decision=action,
+                            rejection_reason=reason_text,
+                        ))
+                        continue
+                    m = buy_re.match(line)
+                    if m:
+                        sym, qty, price, score, conf = m.groups()
+                        info = last_signal.get(sym, {})
+                        parsed.append(_default_record(
+                            symbol=sym,
+                            timestamp=_time_from_match(m),
+                            overall_score=float(score),
+                            confidence=int(conf) / 100,
+                            risk_reward_ratio=info.get('risk_reward_ratio', 0.0),
+                            market_regime=info.get('market_regime', 'UNKNOWN'),
+                            position_size_calculated=int(qty),
+                            entry_price=float(price),
+                            final_decision='BUY',
+                        ))
+                        continue
+                    m = skip_re.match(line)
+                    if m:
+                        sym, reason = m.groups()
+                        info = last_signal.get(sym, {})
+                        parsed.append(_default_record(
+                            symbol=sym,
+                            timestamp=_time_from_match(m),
+                            overall_score=info.get('overall_score', 0.0),
+                            confidence=info.get('confidence', 0.0),
+                            risk_reward_ratio=info.get('risk_reward_ratio', 0.0),
+                            market_regime=info.get('market_regime', 'UNKNOWN'),
+                            final_decision='SKIP',
+                            rejection_reason=reason.strip(),
+                        ))
+        except Exception as e:
+            logger.warning(f"Log parse error: {e}")
+        return parsed
 
 
 def create_decision_record(

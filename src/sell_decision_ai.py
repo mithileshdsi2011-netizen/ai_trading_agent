@@ -344,17 +344,17 @@ class SellDecisionAI:
             return 0.5
     
     def _analyze_recovery_probability(self, symbol: str, current_price: float,
-                                    position: Position, pnl_pct: float) -> float:
+                                    position: Position, pnl_pct: float) -> Tuple[float, float]:
         """Analyze probability of recovery from current position"""
         try:
             # If already profitable, recovery probability is less relevant
             if pnl_pct > 0:
-                return 0.3  # Lower sell probability for profitable positions
+                return 0.3, 1.0  # Lower sell probability for profitable positions
             
             # For losing positions, analyze recovery potential
             hist = self.market_data.get_stock_data(symbol, period='3mo', interval='1d')
             if hist is None or hist.empty:
-                return 0.5
+                return 0.5, 1.0
             
             # Calculate volatility and recent bounce potential
             returns = hist['Close'].pct_change().dropna()

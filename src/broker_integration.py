@@ -21,39 +21,89 @@ class BrokerIntegration:
     def __init__(self):
         self.kite = None
         self.paper_trading = config.PAPER_TRADING
+        self.live_ready = False
         self.token_manager = None
         self.paper_portfolio = {
             'cash': config.TRADING_AMOUNT,
             'positions': {},
             'orders': []
         }
-        
-        if not self.paper_trading:
-            self.token_manager = TokenManager()
-            self._init_kite_connect()
+        self.startup_timestamp = datetime.now().isoformat()
+
+        mode = 'PAPER' if self.paper_trading else 'LIVE'
+        error = None
+        try:
+            if not self.paper_trading:
+                self.token_manager = TokenManager()
+                self._init_kite_connect()
+                self._verify_static_ip()
+                self.live_ready = True
+                mode = 'LIVE'
+                logger.info(f"Broker initialized in LIVE mode at {self.startup_timestamp}")
+            else:
+                logger.info(f"Broker initialized in PAPER mode at {self.startup_timestamp}")
+            self._write_broker_status(mode, self.live_ready, None)
+        except Exception as e:
+            error = str(e)
+            self._write_broker_status('FAILED', False, error)
+            logger.error(f"Broker live initialization failed: {error}")
+            raise
     
     def _init_kite_connect(self):
-        """Initialize Kite Connect connection with token management"""
-        try:
-            from kiteconnect import KiteConnect
-            
-            # Try to initialize with existing token
+        """Initialize Kite Connect connection with token management (one-shot, no fallback)."""
+        from kiteconnect import KiteConnect
+        self.kite = self.token_manager.initialize_kite()
+        logger.info("Kite Connect initialized successfully with existing token")
+
+    def _verify_static_ip(self):
+        """Verify the current public IP matches the configured static/whitelisted IP."""
+        import urllib.request
+        import json as _json
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'static_ip_config.json'
+        )
+        if not os.path.exists(cfg_path):
+            logger.warning("Static IP config not found; skipping static IP verification")
+            return
+        with open(cfg_path) as f:
+            cfg = _json.load(f)
+        whitelisted = cfg.get('whitelisted_ip') or cfg.get('static_ip')
+        if not whitelisted:
+            logger.warning("No whitelisted_ip/static_ip in static_ip_config.json; skipping verification")
+            return
+        current_ip = None
+        for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                self.kite = self.token_manager.initialize_kite()
-                logger.info("Kite Connect initialized successfully with existing token")
-            except ValueError as e:
-                # Token expired, need request token
-                logger.warning(f"Token expired: {e}")
-                logger.info("Please run token refresh: python get_kite_token.py")
-                logger.warning("Falling back to paper trading mode")
-                self.paper_trading = True
-        
-        except ImportError:
-            logger.warning("kiteconnect not installed, using paper trading")
-            self.paper_trading = True
+                current_ip = urllib.request.urlopen(url, timeout=5).read().decode().strip()
+                break
+            except Exception:
+                continue
+        if not current_ip:
+            raise RuntimeError("Could not determine current public IP for static IP verification")
+        if current_ip != whitelisted:
+            raise RuntimeError(
+                f"Current public IP {current_ip} does not match whitelisted IP {whitelisted}. "
+                "Update data/static_ip_config.json or Kite Developer Console before starting."
+            )
+        logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
+
+    def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
+        """Persist broker mode and startup status for the dashboard."""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            status_path = os.path.join(root, 'data', 'broker_status.json')
+            os.makedirs(os.path.dirname(status_path), exist_ok=True)
+            with open(status_path, 'w') as f:
+                json.dump({
+                    'mode': mode,
+                    'live_ready': live_ready,
+                    'startup_timestamp': getattr(self, 'startup_timestamp', datetime.now().isoformat()),
+                    'error': error,
+                    'updated_at': datetime.now().isoformat()
+                }, f)
         except Exception as e:
-            logger.error(f"Error initializing Kite Connect: {e}")
-            self.paper_trading = True
+            logger.warning(f"Could not write broker_status.json: {e}")
     
     def place_order(self, signal: Dict) -> Dict:
         """

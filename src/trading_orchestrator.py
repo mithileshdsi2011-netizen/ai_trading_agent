@@ -62,6 +62,9 @@ class TradingOrchestrator:
         self.mtf = MultiTimeframeConfirmer(market_data=self.market_data)
         self.smart_exit = SmartExitAI(market_data=self.market_data)
         self.sell_decision_ai = SellDecisionAI()
+        broker = self.order_executor.broker
+        mode_str = 'PAPER' if broker.paper_trading else ('LIVE' if broker.live_ready else 'UNKNOWN')
+        logger.info(f"TradingOrchestrator initialized — broker mode: {mode_str}, startup: {broker.startup_timestamp}")
         self.is_running = False
         self.trade_log: List[Dict] = []   # capped at 500 entries (in-memory only)
         self._TRADE_LOG_MAX = 500
