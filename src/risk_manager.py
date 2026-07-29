@@ -83,6 +83,7 @@ class Position:
     atr_at_entry: float = 0.0   # ATR used for SL calculation
     partial_booked: bool = False # True once 50% sold at first target
     partial_qty: int = 0         # qty of the partial exit
+    sector: str = "Unknown"      # sector for correlation guard
 
 
 class RiskManager:
@@ -133,6 +134,7 @@ class RiskManager:
                         atr_at_entry=p.get('atr_at_entry', 0.0),
                         partial_booked=p.get('partial_booked', False),
                         partial_qty=p.get('partial_qty', 0),
+                        sector=p.get('sector', 'Unknown'),
                     )
                     loaded.append(pos)
                     logger.info(f"Restored position from file: {pos.symbol} {pos.quantity} @ {pos.entry_price}")
@@ -169,6 +171,7 @@ class RiskManager:
                         'atr_at_entry': p.atr_at_entry,
                         'partial_booked': p.partial_booked,
                         'partial_qty': p.partial_qty,
+                        'sector': p.sector,
                         'status': p.status.value,
                         'pnl': p.pnl,
                         'charges': p.charges,
@@ -273,10 +276,41 @@ class RiskManager:
             logger.warning(f"Duplicate position: {symbol} already open")
             return False
         
+        # Check sector concentration
+        sector = (signal.get('_research') or {}).get('sector', 'Unknown')
+        if sector != 'Unknown':
+            sector_count = sum(
+                1 for p in self.positions
+                if p.status in (PositionStatus.OPEN, PositionStatus.PARTIAL) and p.sector == sector
+            )
+            if sector_count >= config.MAX_SECTOR_POSITIONS:
+                logger.warning(f"Sector {sector} already has {sector_count} positions (max {config.MAX_SECTOR_POSITIONS}) - skipping {symbol}")
+                return False
+        
         # Check daily loss limit
         if self.daily_pnl < -self.max_daily_loss:
             logger.warning(f"Daily loss limit reached: {self.daily_pnl:.2f}")
             return False
+        
+        # Check portfolio heat (total open unrealised risk)
+        open_risk = sum(
+            max(p.entry_price - p.stop_loss, 0) * p.quantity
+            for p in self.positions
+            if p.status in (PositionStatus.OPEN, PositionStatus.PARTIAL) and p.stop_loss
+        )
+        entry_price = signal.get('current_price', signal.get('price', 0.0))
+        atr = signal.get('atr', 0.0)
+        qty = signal.get('position_size', 0)
+        if entry_price > 0 and atr > 0 and qty > 0:
+            sl_multiplier = float(os.environ.get('ATR_SL_MULTIPLIER', '2.0'))
+            provisional_sl = self.atr_stop_loss(entry_price, atr, sl_multiplier)
+            new_risk = max(entry_price - provisional_sl, 0) * qty
+            if open_risk + new_risk > config.MAX_PORTFOLIO_RISK:
+                logger.warning(
+                    f"Portfolio heat limit reached: open ₹{open_risk:.0f} + new ₹{new_risk:.0f} "
+                    f"> max ₹{config.MAX_PORTFOLIO_RISK:.0f} — skipping {symbol}"
+                )
+                return False
         
         # Check risk-reward ratio
         if signal['risk_reward_ratio'] < config.MIN_RISK_REWARD:
@@ -285,9 +319,18 @@ class RiskManager:
 
         # Check confidence using rounded percentages to avoid floating-point edge cases
         conf_pct = round(signal['confidence'] * 100)
-        min_pct = round(config.MIN_CONFIDENCE * 100)
+        regime = signal.get('market_regime', 'SIDEWAYS')
+        if regime == 'BULL':
+            threshold = config.MIN_CONFIDENCE_BULL
+        elif regime == 'BEAR':
+            threshold = config.MIN_CONFIDENCE_BEAR
+        elif regime == 'SIDEWAYS':
+            threshold = config.MIN_CONFIDENCE_SIDEWAYS
+        else:
+            threshold = config.MIN_CONFIDENCE
+        min_pct = round(threshold * 100)
         if conf_pct < min_pct:
-            logger.warning(f"Confidence too low: {conf_pct}% (min {min_pct}%)")
+            logger.warning(f"Confidence too low for {regime}: {conf_pct}% (min {min_pct}%)")
             return False
         
         # Sanity cap: investment must not exceed the full trading amount
@@ -350,6 +393,7 @@ class RiskManager:
             highest_price=entry_price,
             trailing_stop=round(stop_loss, 2) if config.TRAILING_STOP_ENABLED else None,
             atr_at_entry=atr,
+            sector=(signal.get('_research') or {}).get('sector', 'Unknown'),
         )
         # store partial target on the object for check_positions
         position._partial_target = partial_target

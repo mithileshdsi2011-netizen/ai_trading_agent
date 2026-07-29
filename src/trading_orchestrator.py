@@ -5,6 +5,7 @@ Coordinates all components for automated trading
 import logging
 import os
 import schedule
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -76,6 +77,7 @@ class TradingOrchestrator:
         self._KITE_FAIL_ALERT_THRESHOLD: int = 2
         self._kite_alert_sent: bool = False   # send alert only once per outage
         self._last_alerted_ip: str = ''          # track which IP we already alerted on
+        self._run_once_lock = threading.Lock()   # prevent overlapping trading cycles
         # Morning shortlist cache — built once per trading day from full 150-stock scan,
         # reused every 15-min cycle to avoid rescanning all 150 stocks repeatedly.
         self._morning_shortlist: List[str] = []   # top-40 symbols for intraday cycles
@@ -542,7 +544,10 @@ class TradingOrchestrator:
                         logger.warning(f"Skipping {sym}: earnings/corporate action within 3 days")
                         continue
 
-                    # ── 4. Bear regime guard ───────────────────────────────────
+                    # ── 4. Regime deterioration guard ──────────────────────────
+                    if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
+                        logger.warning(f"Skipping {sym}: no new BUYs in VOLATILE regime")
+                        continue
                     if regime == 'BEAR':
                         logger.warning(f"Skipping {sym}: no new BUYs in BEAR regime")
                         continue
@@ -573,6 +578,17 @@ class TradingOrchestrator:
                         logger.warning(f"Skipping {sym}: R:R {rr:.2f} below minimum {config.MIN_RISK_REWARD}:1")
                         continue
 
+                    # ── 6b. SIDEWAYS regime tightened filters ──────────────────
+                    if regime == 'SIDEWAYS':
+                        signal_conf = best_signal.get('confidence', 0.0)
+                        if score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN or signal_conf < config.MIN_CONFIDENCE_SIDEWAYS:
+                            logger.warning(
+                                f"Skipping {sym}: SIDEWAYS regime — "
+                                f"score {score_result['total_score']}/100 (min {config.SIDEWAYS_BUY_SCORE_MIN}) "
+                                f"or confidence {signal_conf:.0%} (min {config.MIN_CONFIDENCE_SIDEWAYS:.0%}) too low"
+                            )
+                            continue
+
                     # ── 7. Multi-timeframe confirmation ────────────────────────
                     mtf_result = self.mtf.confirm(sym)
                     if not mtf_result['aligned']:
@@ -598,12 +614,14 @@ class TradingOrchestrator:
                         best_signal['_reentry_meta'] = reentry_result
                         best_signal['_reentry_meta']['reentry_confidence'] = best_signal.get('confidence', 0)
 
-                    # ── Adaptive position size (score × confidence) ────────────
+                    # ── Adaptive position size (score × confidence tier) ────────
                     price      = best_signal.get('current_price', 1)
                     confidence = best_signal.get('confidence', 0.5)
-                    # Combined multiplier: score fraction × confidence tier
-                    conf_mult  = self._confidence_multiplier(confidence)
-                    slot_budget = per_stock_budget * score_result['size_fraction'] * conf_mult
+                    # Target allocation tier × score fraction
+                    conf_mult  = self._confidence_multiplier(confidence, per_stock_budget)
+                    # Reduce position size in SIDEWAYS regime
+                    regime_size_factor = config.SIDEWAYS_SIZE_FACTOR if regime == 'SIDEWAYS' else 1.0
+                    slot_budget = per_stock_budget * score_result['size_fraction'] * conf_mult * regime_size_factor
                     qty = max(1, int(slot_budget / price))
                     best_signal['position_size']     = qty
                     best_signal['investment_amount'] = qty * price
@@ -822,6 +840,16 @@ class TradingOrchestrator:
         
         return cycle_result
     
+    def _run_once_wrapper(self):
+        """Non-reentrant wrapper so long cycles cannot overlap and don't schedule twice."""
+        if not self._run_once_lock.acquire(blocking=False):
+            logger.warning("Previous trading cycle still running — skipping scheduled cycle")
+            return {}
+        try:
+            return self.run_once()
+        finally:
+            self._run_once_lock.release()
+    
     def run_scheduled(self, interval_minutes: int = 15):
         """
         Run trading on a schedule
@@ -832,8 +860,8 @@ class TradingOrchestrator:
         logger.info(f"Starting scheduled trading with {interval_minutes} minute intervals")
         self.is_running = True
         
-        # Schedule trading cycles
-        schedule.every(interval_minutes).minutes.do(self.run_once)
+        # Schedule trading cycles (non-reentrant wrapper prevents overlaps)
+        schedule.every(interval_minutes).minutes.do(self._run_once_wrapper)
         
         # Schedule end-of-day close at 14:55 IST — 5 min before cutoff
         schedule.every().day.at("14:55").do(self.end_of_day_close)
@@ -853,20 +881,16 @@ class TradingOrchestrator:
         # Run one cycle immediately on startup so we don't wait up to 15 min
         logger.info("Running immediate startup cycle...")
         try:
-            self.run_once()
+            self._run_once_wrapper()
         except Exception as startup_err:
             logger.error(f"Startup cycle error: {startup_err}")
 
-        try:
-            while self.is_running:
+        while self.is_running:
+            try:
                 schedule.run_pending()
-                time.sleep(60)  # Check every minute
-        except KeyboardInterrupt:
-            logger.info("Trading stopped by user")
-            self.is_running = False
-        except Exception as e:
-            logger.error(f"Error in scheduled trading: {e}")
-            self.is_running = False
+            except Exception as e:
+                logger.error(f"Scheduled job error: {e}")
+            time.sleep(60)  # Check every minute
     
     def _check_ip_whitelist(self):
         """Check if public IP has changed — alert ONCE per new IP via email + Telegram."""
@@ -1231,22 +1255,22 @@ class TradingOrchestrator:
         return False
 
     @staticmethod
-    def _confidence_multiplier(confidence: float) -> float:
+    def _confidence_multiplier(confidence: float, per_stock_budget: float) -> float:
         """
-        Map confidence to a position size multiplier.
-        ≥0.90 → 1.00 (full)
-        0.80–0.89 → 0.80
-        0.70–0.79 → 0.65
-        <0.70 → 0.50
+        Map confidence to a target allocation tier, then return the multiplier
+        needed to reach that target relative to the equal per-stock budget.
         """
-        if confidence >= 0.90:
-            return 1.00
-        elif confidence >= 0.80:
-            return 0.80
+        if confidence >= 0.95:
+            target = config.CONFIDENCE_ALLOCATION_95
+        elif confidence >= 0.85:
+            target = config.CONFIDENCE_ALLOCATION_85
         elif confidence >= 0.70:
-            return 0.65
+            target = config.CONFIDENCE_ALLOCATION_70
         else:
-            return 0.50
+            target = config.CONFIDENCE_ALLOCATION_70 * 0.5
+        if per_stock_budget <= 0:
+            return 1.0
+        return max(0.2, min(3.0, target / per_stock_budget))
 
     @staticmethod
     def _has_negative_news(signal: Dict) -> bool:
@@ -1384,6 +1408,9 @@ class TradingOrchestrator:
             self._send_eod_reports()
             # Reset daily statistics after close
             self.daily_reset()
+        
+        # Clear pending SELL notifications at end of day (retries stop until next session)
+        self.order_executor.reset_pending_sells()
 
         return result
     
@@ -1422,32 +1449,6 @@ class TradingOrchestrator:
             except Exception as e:
                 logger.error(f"Token validation failed: {e}")
                 logger.warning("Please refresh token before market open")
-
-        # ── CDSL reminder: if any CNC holdings exist, ask user to authorise ──
-        try:
-            holdings = self.order_executor.broker.kite.holdings() if (
-                self.order_executor.broker.kite) else []
-            if holdings:
-                syms = [h.get('tradingsymbol') for h in holdings
-                        if (h.get('quantity', 0) or 0) + (h.get('t1_quantity', 0) or 0) > 0]
-                if syms:
-                    # Reset CDSL alert tracker daily so alerts fire again if needed
-                    self.order_executor._cdsl_alert_sent.clear()
-                    msg = (
-                        f"🔐 <b>CDSL AUTHORISATION REMINDER</b>\n\n"
-                        f"You hold <b>{len(syms)} CNC positions</b>: "
-                        f"{', '.join(syms)}\n\n"
-                        f"The bot will auto-sell these when SL/target is hit — "
-                        f"but Zerodha requires daily CDSL authorisation first.\n\n"
-                        f"<b>Authorise now (takes 30 seconds):</b>\n"
-                        f"🔗 https://kite.zerodha.com/holdings\n\n"
-                        f"Tap <b>Authorise</b> at the top of the Holdings page. "
-                        f"Bot will then auto-sell without any further action from you."
-                    )
-                    self._alert("🔐 CDSL Auth Required Before Trading", msg)
-                    logger.info(f"CDSL reminder sent for: {syms}")
-        except Exception as _ce:
-            logger.debug(f"CDSL pre-market check skipped: {_ce}")
 
         # Check system status
         logger.info("System ready for trading")

@@ -4,10 +4,13 @@ Executes orders and manages order lifecycle
 """
 from typing import Dict, List, Optional
 import logging
+import json
+import os
 from datetime import datetime, timedelta
 import time
 
-from broker_integration import BrokerIntegration
+from broker_integration import BrokerIntegration, get_error_policy
+from email_reports import EmailReporter
 from risk_manager import RiskManager, Position, PositionStatus
 from market_data import MarketDataFetcher
 from telegram_alerts import TelegramAlerter
@@ -31,9 +34,186 @@ class OrderExecutor:
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
         self._pending_order_symbols: set = set()
-        # Tracks CDSL-auth alerts already sent today to avoid spamming per cycle
-        self._cdsl_alert_sent: set = set()
+        # Tracks SELL attempts that failed at the broker so they can be retried and surfaced in the dashboard.
+        self._pending_sells_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'pending_sells.json'
+        )
+        self._pending_sells: Dict[str, Dict] = self._load_pending_sells()
+        self.email = EmailReporter()
         self._load_existing_positions()
+
+    def _load_pending_sells(self) -> Dict[str, Dict]:
+        """Load persisted pending SELL state so the dashboard can survive restarts."""
+        try:
+            if os.path.exists(self._pending_sells_file):
+                with open(self._pending_sells_file) as _f:
+                    _items = json.load(_f)
+                    if isinstance(_items, dict):
+                        return _items
+                    if isinstance(_items, list):
+                        return {p['symbol']: p for p in _items if p.get('symbol')}
+        except Exception as _e:
+            logger.warning(f"Could not load pending sells: {_e}")
+        return {}
+
+    def _save_pending_sells(self):
+        try:
+            os.makedirs(os.path.dirname(self._pending_sells_file), exist_ok=True)
+            with open(self._pending_sells_file, 'w') as _f:
+                json.dump(self.get_pending_sells(), _f, default=str)
+        except Exception as _e:
+            logger.warning(f"Could not save pending sells: {_e}")
+
+    def _send_error_notification(self, symbol: str, category: str, error: str, exit_reason: str,
+                                    retry_count: int, recovery_path: str) -> bool:
+        """Send one actionable alert via Telegram and email. Returns True if any channel succeeds."""
+        try:
+            subject = f"SELL failed for {symbol}: {category}"
+            body = (
+                f"<b>SELL order failed for {symbol}</b><br><br>"
+                f"Exit reason: {exit_reason}<br>"
+                f"Broker error: {error}<br>"
+                f"Failure category: {category}<br>"
+                f"Retry count: {retry_count}<br>"
+                f"Recovery: {recovery_path}<br><br>"
+                f"The bot will retry automatically when possible."
+            )
+            ok_email = False
+            try:
+                ok_email = self.email.send_report(subject, body)
+            except Exception as _email_err:
+                logger.warning(f"Email notification failed for {symbol}: {_email_err}")
+
+            ok_telegram = False
+            try:
+                self.telegram._send(body)
+                ok_telegram = True
+            except Exception as _tg_err:
+                logger.warning(f"Telegram notification failed for {symbol}: {_tg_err}")
+
+            return ok_email or ok_telegram
+        except Exception as _e:
+            logger.warning(f"Could not send error notification for {symbol}: {_e}")
+        return False
+
+    def _next_market_open(self, from_dt: Optional[datetime] = None) -> datetime:
+        """Return the next NSE market open timestamp (naive local time)."""
+        now = from_dt or datetime.now()
+        market_time = datetime.strptime(config.MARKET_OPEN, "%H:%M").time()
+        candidate = datetime.combine(now.date(), market_time)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        # Skip weekends (5=Saturday, 6=Sunday)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
+
+    def _compute_next_retry(self, category: str, retry_count: int) -> Optional[datetime]:
+        """Calculate the next allowed retry time for a failed SELL based on category policy."""
+        policy = get_error_policy(category)
+        retry_policy = policy.get('retry_policy')
+        now = datetime.now()
+        if not policy.get('retry', False) or retry_policy == 'manual':
+            return None
+        if retry_policy == 'next_session':
+            return self._next_market_open(now)
+        if retry_policy == 'exponential_backoff':
+            # 60s * 2^(retry-1), capped at 30 minutes
+            seconds = min(60 * (2 ** (max(retry_count, 1) - 1)), 1800)
+            return now + timedelta(seconds=seconds)
+        # every_cycle: default to the 15-minute trading cycle used by the orchestrator
+        return now + timedelta(minutes=15)
+
+    def _should_attempt_sell(self, symbol: str) -> bool:
+        """Respect the retry queue: do not re-attempt a SELL before its scheduled next retry."""
+        pending = self._pending_sells.get(symbol)
+        if not pending:
+            return True
+        next_retry = pending.get('next_retry')
+        if next_retry is None:
+            return False
+        return datetime.now() >= datetime.fromisoformat(next_retry)
+
+    def _record_sell_failure(self, symbol: str, order_result: Dict, exit_reason: str):
+        """Track a failed SELL, schedule the next retry, and send at most one notification per category per symbol."""
+        category = order_result.get('error_category', 'other')
+        policy = get_error_policy(category)
+        previous = self._pending_sells.get(symbol, {})
+        retry_count = previous.get('retry_count', 0) + 1
+        notifications_sent = previous.get('notifications_sent', [])
+        if not isinstance(notifications_sent, list):
+            notifications_sent = []
+        if category not in notifications_sent and policy.get('notify'):
+            if self._send_error_notification(
+                symbol, category,
+                order_result.get('error', 'Unknown'),
+                exit_reason, retry_count,
+                policy['recovery_path']
+            ):
+                notifications_sent = list(notifications_sent)
+                notifications_sent.append(category)
+
+        notification_sent = category in notifications_sent
+        next_retry = self._compute_next_retry(category, retry_count)
+
+        self._pending_sells[symbol] = {
+            'symbol': symbol,
+            'exit_reason': exit_reason,
+            'broker_status': order_result.get('error', 'Unknown'),
+            'failure_category': category,
+            'retry': policy['retry'],
+            'retry_policy': policy['retry_policy'],
+            'continue_trading': policy['continue_trading'],
+            'notify': policy['notify'],
+            'recovery_path': policy['recovery_path'],
+            'retry_count': retry_count,
+            'last_attempt': datetime.now().isoformat(),
+            'next_retry': next_retry.isoformat() if next_retry else None,
+            'last_error': order_result.get('error', 'Unknown'),
+            'notifications_sent': notifications_sent,
+            'notification_sent': notification_sent,
+        }
+        self._save_pending_sells()
+        self._log_sell_failure(
+            symbol, order_result, category, retry_count,
+            notification_sent, exit_reason, policy['recovery_path'], next_retry
+        )
+
+    def _log_sell_failure(self, symbol: str, order_result: Dict, category: str, retry_count: int,
+                          notification_sent: bool, exit_reason: str, recovery_path: str,
+                          next_retry: Optional[datetime]):
+        next_retry_str = next_retry.isoformat() if next_retry else 'manual / awaiting user action'
+        logger.warning(
+            f"SELL Attempt:\n"
+            f"Symbol: {symbol}\n"
+            f"Broker Response: {order_result.get('error', 'Unknown')}\n"
+            f"Failure Category: {category}\n"
+            f"Action: Retry Next Cycle\n"
+            f"Retry Count: {retry_count}\n"
+            f"Next Retry: {next_retry_str}\n"
+            f"Notification: {'Sent' if notification_sent else 'Not Sent'}\n"
+            f"Recovery: {recovery_path}\n"
+            f"Reason: {exit_reason}"
+        )
+
+    def _clear_sell_pending(self, symbol: str):
+        if symbol in self._pending_sells:
+            del self._pending_sells[symbol]
+            self._save_pending_sells()
+
+    def reset_pending_sells(self):
+        """Clear all pending SELL records. Called at daily reset and end-of-day close."""
+        self._pending_sells.clear()
+        self._save_pending_sells()
+
+    def get_pending_sells(self) -> List[Dict]:
+        """Return current pending SELL actions for the dashboard."""
+        return sorted(
+            list(self._pending_sells.values()),
+            key=lambda x: x.get('next_retry') or x.get('last_attempt', ''),
+            reverse=False,
+        )
     
     def _load_existing_positions(self):
         """
@@ -247,6 +427,12 @@ class OrderExecutor:
                 continue
 
             logger.info(f'Holdings exit triggered — {position.symbol}: {exit_reason}')
+
+            if not self._should_attempt_sell(position.symbol):
+                queued = self._pending_sells[position.symbol].get('next_retry') or 'manual'
+                logger.info(f"SELL for {position.symbol} queued until {queued}")
+                continue
+
             sell_signal = {
                 'symbol':            position.symbol,
                 'action':            'SELL',
@@ -289,6 +475,7 @@ class OrderExecutor:
                     'exit_signal': exit_signal_out,
                     'timestamp':   datetime.now().isoformat(),
                 })
+                self._clear_sell_pending(position.symbol)
                 try:
                     self.telegram.exit(exit_signal_out, order_result.get('order_id', ''))
                 except Exception:
@@ -309,27 +496,8 @@ class OrderExecutor:
                 except Exception as je:
                     logger.warning(f'Journal SELL log failed for holding: {je}')
             else:
-                if order_result.get('cdsl_auth_required'):
-                    # Position stays OPEN — bot will retry next cycle once authorised
-                    logger.error(
-                        f'CDSL auth required for {position.symbol} — '
-                        f'position kept OPEN, will retry after authorisation'
-                    )
-                    if position.symbol not in self._cdsl_alert_sent:
-                        try:
-                            self.telegram._send(
-                                f'🔐 <b>CDSL AUTHORISATION REQUIRED</b>\n\n'
-                                f'Bot wants to sell <b>{position.symbol}</b> '
-                                f'({exit_reason}) but needs demat authorisation first.\n\n'
-                                f'<b>Action:</b> Open Kite → Portfolio → Holdings → tap <b>Authorise</b>\n'
-                                f'🔗 https://kite.zerodha.com/holdings\n\n'
-                                f'Bot will auto-sell on the next cycle once authorised.'
-                            )
-                        except Exception:
-                            pass
-                        self._cdsl_alert_sent.add(position.symbol)
-                else:
-                    logger.error(f'Holdings SELL order FAILED for {position.symbol}: {order_result}')
+                self._record_sell_failure(position.symbol, order_result, exit_reason)
+                logger.error(f'Holdings SELL order FAILED for {position.symbol}: {order_result}')
 
         return executed_exits
 
@@ -480,11 +648,18 @@ class OrderExecutor:
             )
             return {'success': False, 'reason': 'Price below entry without allowed loss exit', 'signal': signal}
 
+        if not self._should_attempt_sell(sym):
+            queued = self._pending_sells[sym].get('next_retry') or 'manual'
+            logger.info(f"SELL for {sym} queued until {queued}")
+            return {'success': False, 'error': 'Queued for retry', 'signal': signal}
+
         order_result = self.broker.place_order(signal)
         if not order_result['success']:
+            self._record_sell_failure(sym, order_result, reason)
             logger.error(f"SELL order failed for {sym}: {order_result.get('error')}")
             return {'success': False, 'error': order_result.get('error'), 'signal': signal}
 
+        self._clear_sell_pending(sym)
         exit_signal = self.risk_manager.close_position(sym, current_price, reason)
         try:
             self.journal.log_entry(
@@ -569,6 +744,11 @@ class OrderExecutor:
                 'timestamp': datetime.now().isoformat()
             }
             
+            if not self._should_attempt_sell(exit_signal['symbol']):
+                queued = self._pending_sells[exit_signal['symbol']].get('next_retry') or 'manual'
+                logger.info(f"SELL for {exit_signal['symbol']} queued until {queued}")
+                continue
+
             # Execute sell order
             order_result = self.broker.place_order(sell_signal)
             
@@ -584,6 +764,8 @@ class OrderExecutor:
                     self.telegram.exit(exit_signal, order_result.get('order_id', ''))
                 except Exception as te:
                     logger.error(f"Telegram exit alert error: {te}")
+
+                self._clear_sell_pending(exit_signal['symbol'])
 
                 # Auto-log exit to trade journal
                 try:
@@ -623,6 +805,7 @@ class OrderExecutor:
                 except Exception as je:
                     logger.warning(f"Journal SELL log failed: {je}")
             else:
+                self._record_sell_failure(exit_signal['symbol'], order_result, exit_signal['reason'])
                 logger.error(f"Exit execution failed for {exit_signal['symbol']}")
         
         return executed_exits
@@ -686,6 +869,7 @@ class OrderExecutor:
             order_result = self.broker.place_order(sell_signal)
             
             if order_result['success']:
+                self._clear_sell_pending(exit_signal['symbol'])
                 try:
                     open_pos = next(
                         (p for p in self.risk_manager.positions
@@ -721,6 +905,8 @@ class OrderExecutor:
                     )
                 except Exception as je:
                     logger.warning(f"Journal SELL log failed for EOD close: {je}")
+            else:
+                self._record_sell_failure(exit_signal['symbol'], order_result, 'End of day close')
 
             close_results.append({
                 'success': order_result['success'],
@@ -758,6 +944,7 @@ class OrderExecutor:
         return self.risk_manager.should_stop_trading()
     
     def reset_daily(self):
-        """Reset daily statistics"""
+        """Reset daily statistics and pending SELL notifications"""
         self.risk_manager.reset_daily()
+        self.reset_pending_sells()
         logger.info("Order executor daily reset completed")

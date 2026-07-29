@@ -71,14 +71,17 @@ class SellDecisionAI:
         symbol = position.symbol
         pnl_pct = (current_price - position.entry_price) / position.entry_price
         
+        # Position age in calendar days
+        holding_days = (datetime.now() - position.entry_time).days
+        
         # Gather all factors
         factors = self._analyze_all_factors(symbol, current_price, position, pnl_pct)
         
         # Calculate overall sell score
-        sell_score = self._calculate_sell_score(factors, pnl_pct)
+        sell_score = self._calculate_sell_score(factors, pnl_pct, holding_days)
         
         # Make decision based on score and context
-        decision = self._make_decision(sell_score, factors, pnl_pct, position)
+        decision = self._make_decision(sell_score, factors, pnl_pct, position, holding_days)
         
         logger.info(
             f"SellDecisionAI for {symbol}: {decision.recommendation} "
@@ -398,8 +401,8 @@ class SellDecisionAI:
             logger.debug(f"Recovery probability analysis failed for {symbol}: {e}")
             return 0.5, 1.0
     
-    def _calculate_sell_score(self, factors: Dict[str, float], pnl_pct: float) -> float:
-        """Calculate overall sell score from all factors"""
+    def _calculate_sell_score(self, factors: Dict[str, float], pnl_pct: float, holding_days: int = 0) -> float:
+        """Calculate overall sell score from all factors, tightening with age"""
         weighted_score = 0.0
         total_weight = 0.0
         
@@ -420,29 +423,54 @@ class SellDecisionAI:
         elif pnl_pct < -0.1:  # 10-15% loss
             base_score *= 1.2
         
+        # Age penalty: older positions become more likely to sell
+        if holding_days <= 2:
+            age_mult = 1.0
+        elif holding_days <= 5:
+            age_mult = 1.05
+        elif holding_days <= 10:
+            age_mult = 1.15
+        elif holding_days <= 20:
+            age_mult = 1.25
+        else:
+            age_mult = 1.35
+        base_score *= age_mult
+        
         return min(max(base_score, 0), 1.0)
     
     def _make_decision(self, sell_score: float, factors: Dict[str, float],
-                      pnl_pct: float, position: Position) -> SellDecision:
+                      pnl_pct: float, position: Position, holding_days: int = 0) -> SellDecision:
         """Make final sell decision based on score and context"""
+
+        # Progressive strictness as the trade ages
+        if holding_days <= 2:
+            age_strict = 0.0
+        elif holding_days <= 5:
+            age_strict = 0.03
+        elif holding_days <= 10:
+            age_strict = 0.07
+        elif holding_days <= 20:
+            age_strict = 0.12
+        else:
+            age_strict = 0.18
 
         if pnl_pct > 0:
             # Profitable positions: score thresholds, but let big winners run
-            if pnl_pct > 0.15 and sell_score < 0.8:
+            if pnl_pct > 0.15 and sell_score < (0.8 - age_strict):
                 recommendation = 'HOLD'
                 should_sell = False
                 confidence = 1.0 - sell_score
-                reason = "Strong profit position - letting winner run"
-            elif sell_score > 0.75:
+                reason = f"Strong profit position - letting winner run ({holding_days}d)"
+            elif sell_score > (0.75 - age_strict):
                 recommendation = 'SELL'
                 should_sell = True
                 confidence = sell_score
-                reason = f"SELL - AI decline confidence high ({sell_score:.2f})"
-            elif sell_score > 0.6:
+                reason = f"SELL - AI decline confidence high ({sell_score:.2f}, age {holding_days}d)"
+            elif sell_score > (0.6 - age_strict):
                 recommendation = 'REDUCE_PARTIAL'
                 should_sell = True
                 confidence = sell_score
-                reason = f"REDUCE_PARTIAL - moderate decline signals ({sell_score:.2f})"
+                reason = f"REDUCE_PARTIAL - moderate decline signals ({sell_score:.2f}, age {holding_days}d)"
             else:
                 recommendation = 'HOLD'
                 should_sell = False
