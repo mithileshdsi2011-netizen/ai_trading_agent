@@ -96,6 +96,8 @@ class RiskManager:
         self.max_daily_loss = config.TRADING_AMOUNT * config.DAILY_MAX_LOSS_PCT
         self._daily_blacklist: Set[str] = set()  # symbols SL-hit today
         self._blacklist_date: date = date.today()
+        # Track last full exit time per symbol for REENTRY_COOLDOWN_HOURS
+        self._last_exit_by_symbol: Dict[str, datetime] = {}
         self._load_positions()
 
     # ------------------------------------------------------------------
@@ -276,6 +278,17 @@ class RiskManager:
             logger.warning(f"Duplicate position: {symbol} already open")
             return False
         
+        # Check re-entry cooldown (REENTRY_COOLDOWN_HOURS after a full exit)
+        last_exit = self._last_exit_by_symbol.get(symbol)
+        if last_exit is not None:
+            hours_since = (datetime.now() - last_exit).total_seconds() / 3600
+            if hours_since < config.REENTRY_COOLDOWN_HOURS:
+                logger.warning(
+                    f"{symbol} re-entry blocked: {hours_since:.2f}h since exit "
+                    f"(cooldown {config.REENTRY_COOLDOWN_HOURS}h)"
+                )
+                return False
+        
         # Check sector concentration
         sector = (signal.get('_research') or {}).get('sector', 'Unknown')
         if sector != 'Unknown':
@@ -450,46 +463,37 @@ class RiskManager:
                     and current_price >= partial_target
                     and position.quantity >= 2):
                 partial_qty = max(1, int(position.quantity * config.PARTIAL_PROFIT_FRACTION))
-                exit_signal = {
+                exit_signals.append({
                     'symbol': position.symbol,
                     'action': 'SELL',
                     'price': current_price,
                     'quantity': partial_qty,
+                    'position_size': partial_qty,
                     'partial': True,
-                    'pnl': (current_price - position.entry_price) * partial_qty,
-                    'pnl_percentage': ((current_price - position.entry_price) / position.entry_price) * 100,
                     'reason': f"Partial profit (+{((current_price/position.entry_price)-1)*100:.1f}%)",
                     'status': PositionStatus.PARTIAL.value,
                     'timestamp': datetime.now().isoformat()
-                }
-                charges = _total_charges(
-                    position.entry_price * partial_qty,
-                    current_price * partial_qty
-                )
-                exit_signal['charges'] = charges
-                exit_signal['net_pnl'] = exit_signal['pnl'] - charges
-                position.partial_booked = True
-                position.partial_qty = partial_qty
-                position.quantity -= partial_qty
-                position.status = PositionStatus.PARTIAL
-                position.pnl += exit_signal['pnl']
-                position.charges += charges
-                position.net_pnl += exit_signal['net_pnl']
-                self.daily_pnl += exit_signal['pnl']
-                # Tighten stop to break-even after partial
-                position.stop_loss = max(position.stop_loss, position.entry_price)
-                self.save_positions()
-                exit_signals.append(exit_signal)
-                logger.info(f"Partial exit {position.symbol}: {partial_qty} @ ₹{current_price:.2f} P&L ₹{exit_signal['pnl']:.2f}")
+                })
+                logger.info(f"Partial exit {position.symbol}: {partial_qty} @ ₹{current_price:.2f} queued")
                 continue
 
             # ── Stop loss hit ──────────────────────────────────────────
             if current_price <= effective_stop:
-                exit_signal = self._close_position(position, current_price, PositionStatus.STOPPED_OUT)
-                if position.trailing_stop and current_price <= position.trailing_stop and current_price > position.stop_loss:
-                    exit_signal['reason'] = f"Trailing stop hit (₹{position.trailing_stop:.2f})"
+                sl_reason = (f"Trailing stop hit (₹{position.trailing_stop:.2f})"
+                             if position.trailing_stop and current_price <= position.trailing_stop
+                                and current_price > position.stop_loss
+                             else "Stop loss hit")
                 self.add_to_blacklist(position.symbol)  # blacklist after SL
-                exit_signals.append(exit_signal)
+                exit_signals.append({
+                    'symbol': position.symbol,
+                    'action': 'SELL',
+                    'price': current_price,
+                    'quantity': position.quantity,
+                    'position_size': position.quantity,
+                    'reason': sl_reason,
+                    'status': PositionStatus.STOPPED_OUT.value,
+                    'timestamp': datetime.now().isoformat()
+                })
 
             # ── Swing max hold days ────────────────────────────────────
             elif (position.planned_exit_date
@@ -501,50 +505,70 @@ class RiskManager:
                         f"{current_price:.2f} < entry {position.entry_price:.2f} — holding"
                     )
                     continue
-                exit_signal = self._close_position(position, current_price, PositionStatus.CLOSED)
-                exit_signal['reason'] = f"Max hold days reached ({config.SWING_MAX_HOLD_DAYS})"
-                exit_signals.append(exit_signal)
+                exit_signals.append({
+                    'symbol': position.symbol,
+                    'action': 'SELL',
+                    'price': current_price,
+                    'quantity': position.quantity,
+                    'position_size': position.quantity,
+                    'reason': f"Max hold days reached ({config.SWING_MAX_HOLD_DAYS})",
+                    'status': PositionStatus.CLOSED.value,
+                    'timestamp': datetime.now().isoformat()
+                })
         
         return exit_signals
     
-    def _close_position(self, position: Position, exit_price: float, status: PositionStatus, reason_override: str = None) -> Dict:
-        """Close a position and compute charges + net P&L."""
-        position.exit_price = exit_price
-        position.exit_time = datetime.now()
-        position.status = status
+    def _close_position(self, position: Position, exit_price: float, status: PositionStatus, reason_override: str = None, quantity: int = None) -> Dict:
+        """Close a position and compute charges + net P&L. Supports partial exits."""
+        close_qty = quantity if quantity is not None and quantity > 0 else position.quantity
+        close_qty = min(close_qty, position.quantity)
+        remaining = position.quantity - close_qty
 
-        gross_pnl = (exit_price - position.entry_price) * position.quantity
+        gross_pnl = (exit_price - position.entry_price) * close_qty
         position.pnl += gross_pnl
         position.pnl_percentage = ((exit_price - position.entry_price) / position.entry_price) * 100
 
-        # Brokerage + charges (round-trip for remaining qty)
+        # Brokerage + charges (round-trip for the quantity being closed)
         charges = _total_charges(
-            position.entry_price * position.quantity,
-            exit_price * position.quantity
+            position.entry_price * close_qty,
+            exit_price * close_qty
         )
         position.charges += charges
         position.net_pnl = position.pnl - position.charges
 
-        # Slippage: difference between signal price and fill (stored from signal)
-        position.slippage = exit_price - position.exit_price  # 0 here; broker fills in real mode
+        # Reduce quantity; mark partial if still open, otherwise closed
+        position.quantity = remaining
+        if remaining > 0:
+            position.status = PositionStatus.PARTIAL
+            position.partial_booked = True
+            position.partial_qty = close_qty
+            # Tighten stop to break-even after a partial exit
+            position.stop_loss = max(position.stop_loss, position.entry_price)
+        else:
+            position.status = status
+            position.exit_price = exit_price
+            position.exit_time = datetime.now()
+            # Slippage: difference between signal price and fill (stored from signal)
+            position.slippage = exit_price - position.exit_price  # 0 here; broker fills in real mode
+            self._last_exit_by_symbol[position.symbol] = position.exit_time
 
         self.daily_pnl += gross_pnl
         self.save_positions()
-        
+
         exit_signal = {
             'symbol': position.symbol,
             'action': 'SELL',
             'price': exit_price,
-            'quantity': position.quantity,
+            'quantity': close_qty,
             'pnl': position.pnl,
             'pnl_percentage': position.pnl_percentage,
             'charges': position.charges,
             'net_pnl': position.net_pnl,
-            'status': status.value,
+            'status': position.status.value,
             'reason': reason_override or self._get_exit_reason(status),
             'timestamp': datetime.now().isoformat()
         }
-        
+
         logger.info(
             f"Position closed: {position.symbol} @ ₹{exit_price:.2f} "
             f"Gross P&L: ₹{position.pnl:.2f} ({position.pnl_percentage:.2f}%) "
@@ -562,12 +586,12 @@ class RiskManager:
         }
         return reasons.get(status, "Unknown")
 
-    def close_position(self, symbol: str, exit_price: float, reason: str) -> Optional[Dict]:
+    def close_position(self, symbol: str, exit_price: float, reason: str, quantity: int = None) -> Optional[Dict]:
         """Close an open/partial position by symbol for external sell signals."""
         for position in self.positions:
             if (position.symbol == symbol
                     and position.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}):
-                return self._close_position(position, exit_price, PositionStatus.CLOSED, reason)
+                return self._close_position(position, exit_price, PositionStatus.CLOSED, reason, quantity)
         logger.warning(f"close_position: no open position for {symbol}")
         return None
     

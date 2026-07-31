@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.broker_integration import BrokerIntegration
-from src.config import config
+from config import config
 
 
 class TestBrokerIntegration:

@@ -27,6 +27,24 @@ class TradeJournal:
     def __init__(self, path: str = JOURNAL_FILE):
         self._path = path
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        self._backfill_attribution()
+
+    def _backfill_attribution(self):
+        """One-time idempotent migration: compute attribution for closed trades without it."""
+        try:
+            entries = self._load()
+            backfilled = 0
+            with self._file_lock:
+                for e in entries:
+                    if e.get('action') == 'BUY' and e.get('status') == 'CLOSED' and 'attribution' not in e:
+                        net_pnl = float(e.get('net_pnl') or 0)
+                        e['attribution'] = self._compute_attribution(e, net_pnl)
+                        backfilled += 1
+                if backfilled:
+                    self._save(entries)
+                    logger.info(f"Backfilled attribution for {backfilled} historical closed trade(s)")
+        except Exception as e:
+            logger.error(f"Attribution backfill failed: {e}")
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -38,6 +56,83 @@ class TradeJournal:
         except Exception as e:
             logger.error(f"Journal load error: {e}")
         return []
+
+    @staticmethod
+    def _compute_attribution(buy_entry: Dict, net_pnl: float) -> Dict:
+        """Derive strategy attribution from a closed BUY record."""
+        components = buy_entry.get('score_components', {}) or {}
+        positive = {k: v for k, v in components.items() if v > 0}
+        dominant = max(positive, key=positive.get) if positive else 'none'
+        net_pnl = float(net_pnl or 0)
+        win = net_pnl > 0
+
+        rsi = float(buy_entry.get('rsi', 50) or 0)
+        if rsi < 30:
+            rsi_bucket = '<30'
+        elif rsi < 40:
+            rsi_bucket = '30-40'
+        elif rsi <= 60:
+            rsi_bucket = '40-60'
+        elif rsi <= 65:
+            rsi_bucket = '60-65'
+        elif rsi <= 70:
+            rsi_bucket = '65-70'
+        else:
+            rsi_bucket = '>70'
+
+        vol_ratio = float(buy_entry.get('volume_ratio', 1.0) or 1.0)
+        if vol_ratio >= 2.5:
+            volume_bucket = '>=2.5'
+        elif vol_ratio >= 1.8:
+            volume_bucket = '1.8-2.5'
+        elif vol_ratio >= 1.3:
+            volume_bucket = '1.3-1.8'
+        elif vol_ratio >= 1.0:
+            volume_bucket = '1.0-1.3'
+        elif vol_ratio >= 0.7:
+            volume_bucket = '0.7-1.0'
+        else:
+            volume_bucket = '<0.7'
+
+        trend = buy_entry.get('trend', 'NEUTRAL')
+        regime = buy_entry.get('market_regime', 'UNKNOWN')
+        mtf = bool(buy_entry.get('mtf_aligned', False))
+
+        if win:
+            reason = f"Win driven by {dominant} and volume confirmation"
+        else:
+            mtf_note = " with MTF aligned" if mtf else " without MTF alignment"
+            reason = f"Loss: {dominant} dominated but failed{mtf_note}"
+
+        return {
+            'win': win,
+            'net_pnl': round(net_pnl, 2),
+            'dominant_component': dominant,
+            'trend': trend,
+            'regime': regime,
+            'mtf_aligned': mtf,
+            'rsi_bucket': rsi_bucket,
+            'volume_bucket': volume_bucket,
+            'why': reason,
+        }
+
+    def _factor_stats(self, trades: List[Dict], key_func) -> Dict:
+        """Helper: win rate and P&L by an arbitrary grouping key."""
+        groups: Dict[str, List[float]] = {}
+        for t in trades:
+            attr = t.get('attribution', {})
+            k = key_func(attr)
+            if k is None:
+                continue
+            groups.setdefault(k, []).append(float(t.get('net_pnl') or 0))
+        return {
+            k: {
+                'trades': len(v),
+                'win_rate': round(len([p for p in v if p > 0]) / len(v) * 100, 1) if v else 0,
+                'net_pnl': round(sum(v), 2),
+            }
+            for k, v in groups.items()
+        }
 
     def _save(self, entries: List[Dict]):
         try:
@@ -201,6 +296,7 @@ class TradeJournal:
                         e['net_pnl']      = entry['net_pnl']
                         e['charges']      = entry['charges']
                         e['status']       = 'CLOSED'
+                        e['attribution']  = self._compute_attribution(e, float(entry['net_pnl'] or 0))
                         break
 
             entries.append(entry)
@@ -218,6 +314,22 @@ class TradeJournal:
         return [e for e in self._load()
                 if e.get('status') == 'CLOSED' and e.get('action') == 'BUY']
 
+    def attribution_report(self) -> Dict:
+        """Win rate and P&L broken down by the factors that drove each trade."""
+        trades = self.closed_trades()
+        if not trades:
+            return {'total_trades': 0}
+
+        return {
+            'total_trades': len(trades),
+            'by_mtf': self._factor_stats(trades, lambda a: f"mtf_{'aligned' if a.get('mtf_aligned') else 'not_aligned'}"),
+            'by_rsi_bucket': self._factor_stats(trades, lambda a: a.get('rsi_bucket')),
+            'by_volume_bucket': self._factor_stats(trades, lambda a: a.get('volume_bucket')),
+            'by_trend': self._factor_stats(trades, lambda a: a.get('trend')),
+            'by_regime': self._factor_stats(trades, lambda a: a.get('regime')),
+            'by_dominant_component': self._factor_stats(trades, lambda a: a.get('dominant_component')),
+        }
+
     def analytics(self) -> Dict:
         """Compute all analytics over closed trades for the journal tab."""
         trades = self.closed_trades()
@@ -225,7 +337,7 @@ class TradeJournal:
             return {'total_trades': 0}
 
         pnls        = [float(t.get('net_pnl') or 0) for t in trades]
-        scores      = [float(t.get('trade_score') or 0) for t in trades]
+        scores      = [float(t['trade_score']) for t in trades if t.get('trade_score') is not None]
         wins        = [p for p in pnls if p > 0]
         losses      = [p for p in pnls if p < 0]
         total       = len(trades)
@@ -278,6 +390,7 @@ class TradeJournal:
                                         or 'macd' in reason.lower() or 'volume' in reason.lower() else
                 'Weekly Rebalance'   if 'rebalance' in reason.lower() else
                 'EOD Close'          if 'end of day' in reason.lower() or 'eod' in reason.lower() else
+                'Circuit Breaker'    if 'circuit' in reason.lower() or 'breaker' in reason.lower() else
                 'Manual'
             )
             by_exit.setdefault(label, []).append(t.get('net_pnl', 0))

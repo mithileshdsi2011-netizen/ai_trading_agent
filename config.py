@@ -81,6 +81,7 @@ class Config:
     # ── Capital management ────────────────────────────────────────────────────
     MAX_CAPITAL_USAGE:      float = float(_require("MAX_CAPITAL_USAGE",      "0.87"))  # 87%
     REENTRY_COOLDOWN_HOURS: float = float(_require("REENTRY_COOLDOWN_HOURS", "4.0"))
+    MIN_HOLD_HOURS:         float = float(_require("MIN_HOLD_HOURS",         "0.0"))
 
     # ── Trailing stop loss ────────────────────────────────────────────────────
     TRAILING_STOP_ENABLED:        bool  = _require("TRAILING_STOP_ENABLED",        "True").lower() == "true"
@@ -98,6 +99,10 @@ class Config:
     SUPPORT_DISTANCE_THRESHOLD:     float = float(_require("SUPPORT_DISTANCE_THRESHOLD",     "0.05"))  # within 5% of support
     AI_DECLINE_CONFIDENCE_THRESHOLD: float = float(_require("AI_DECLINE_CONFIDENCE_THRESHOLD", "0.90"))  # 90%
 
+    # ── Smart exit thresholds ─────────────────────────────────────────────────
+    SMARTEXIT_MIN_PROFIT_PCT:            float = float(_require("SMARTEXIT_MIN_PROFIT_PCT",            "0.015"))  # 1.5% minimum unrealised profit
+    SMARTEXIT_VOLUME_CONFIRMATION_RATIO: float = float(_require("SMARTEXIT_VOLUME_CONFIRMATION_RATIO", "0.80"))   # volume >= 80% of 20d avg for bearish candle / MACD
+
     # ── Risk limits ───────────────────────────────────────────────────────────
     DAILY_MAX_LOSS_PCT:     float = float(_require("DAILY_MAX_LOSS_PCT",     "0.05"))  # 5%
     MAX_PORTFOLIO_RISK:     float = float(_require("MAX_PORTFOLIO_RISK",     "2000.0")) # total open (unrealised) risk in ₹
@@ -107,11 +112,12 @@ class Config:
     # ── Confidence regime thresholds ──────────────────────────────────────────
     MIN_CONFIDENCE_BULL:     float = float(_require("MIN_CONFIDENCE_BULL",     "0.55"))  # 55% in bull
     MIN_CONFIDENCE_BEAR:     float = float(_require("MIN_CONFIDENCE_BEAR",     "0.70"))  # 70% in bear
-    MIN_CONFIDENCE_SIDEWAYS: float = float(_require("MIN_CONFIDENCE_SIDEWAYS", "0.65"))  # 65% in sideways
+    MIN_CONFIDENCE_SIDEWAYS: float = float(_require("MIN_CONFIDENCE_SIDEWAYS", "0.55"))  # 55% in sideways
 
     # ── Regime-based buy guards ───────────────────────────────────────────────
-    SIDEWAYS_BUY_SCORE_MIN: int   = int(_require("SIDEWAYS_BUY_SCORE_MIN",   "80"))     # min AI score for sideways
-    SIDEWAYS_SIZE_FACTOR:   float = float(_require("SIDEWAYS_SIZE_FACTOR",   "0.75"))   # reduce size in sideways
+    SIDEWAYS_BUY_SCORE_MIN:          int   = int  (_require("SIDEWAYS_BUY_SCORE_MIN",          "58"))     # min TradeScorer total for sideways (do not add extra gate)
+    SIDEWAYS_BUY_OVERALL_SCORE_MIN:  float = float(_require("SIDEWAYS_BUY_OVERALL_SCORE_MIN",  "0.30"))   # min AI overall score for sideways
+    SIDEWAYS_SIZE_FACTOR:            float = float(_require("SIDEWAYS_SIZE_FACTOR",            "0.75"))   # reduce size in sideways
     VOLATILE_BLOCK_BUYS:    bool  = _require("VOLATILE_BLOCK_BUYS",    "True").lower() == "true"  # no new buys in volatile
 
     # ── Confidence-based capital allocation tiers ─────────────────────────────

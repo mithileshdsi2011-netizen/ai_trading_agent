@@ -477,3 +477,6 @@ class MarketDataFetcher:
         ist = pytz.timezone('Asia/Kolkata')
         today_str = datetime.now(ist).strftime("%Y-%m-%d")
         return today_str in MarketDataFetcher._NSE_HOLIDAYS
+
+# Shadow the legacy MarketDataFetcher with the optimized, cached, batched implementation
+from market_data_optimized import MarketDataFetcher

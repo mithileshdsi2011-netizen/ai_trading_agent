@@ -25,6 +25,7 @@ from multi_timeframe import MultiTimeframeConfirmer
 from smart_exit import SmartExitAI
 from sell_decision_ai import SellDecisionAI
 from risk_manager import PositionStatus
+from decision_explainer import DecisionExplainer
 
 import os as _os
 _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'logs')
@@ -37,7 +38,7 @@ _console_handler = logging.StreamHandler()
 _console_handler.setLevel(logging.WARNING)   # only WARN/ERROR/CRITICAL to terminal
 _console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
 
-logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler])
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _console_handler], force=True)
 
 # Silence very chatty sub-modules in console (they still write to file)
 for _noisy in ('market_data', 'technical_analysis', 'ai_research_agent',
@@ -60,6 +61,7 @@ class TradingOrchestrator:
         self.telegram = TelegramAlerter()
         self.email = EmailReporter()
         self.scorer = TradeScorer()
+        self.explainer = DecisionExplainer()
         self.mtf = MultiTimeframeConfirmer(market_data=self.market_data)
         self.smart_exit = SmartExitAI(market_data=self.market_data)
         self.sell_decision_ai = SellDecisionAI()
@@ -82,6 +84,8 @@ class TradingOrchestrator:
         # reused every 15-min cycle to avoid rescanning all 150 stocks repeatedly.
         self._morning_shortlist: List[str] = []   # top-40 symbols for intraday cycles
         self._morning_shortlist_date: str = ''    # date when shortlist was built
+        # One-shot circuit breaker: once it fires today, do not re-fire
+        self._circuit_breaker_fired_today = False
     
     def run_once(self) -> Dict:
         """
@@ -92,6 +96,10 @@ class TradingOrchestrator:
         """
         logger.info("=" * 50)
         logger.info(f"Starting trading cycle at {datetime.now()}")
+        
+        # Reset per-cycle market data metrics and warm the rate limiter
+        self.market_data.new_cycle()
+        self.market_data._get_instruments()
         
         cycle_result = {
             'timestamp': datetime.now().isoformat(),
@@ -167,7 +175,7 @@ class TradingOrchestrator:
                 else:
                     logger.warning(f"Kite health check failed (cycle {self._kite_fail_count}) — alert already sent, waiting for recovery")
                 cycle_result['errors'].append(f'kite_ok=False ({self._kite_fail_count} cycles)')
-                return cycle_result
+                self.market_data.get_cycle_metrics(); return cycle_result
         # ──────────────────────────────────────────────────────────────────
 
         # Check if market is open (includes holiday check)
@@ -176,7 +184,7 @@ class TradingOrchestrator:
                 logger.info("NSE holiday today — bot paused, no trading")
             else:
                 logger.info("Market is closed — skipping trading cycle")
-            return cycle_result
+            self.market_data.get_cycle_metrics(); return cycle_result
 
         # Check if past intraday cutoff — only monitor/close, no new BUYs
         ist = pytz.timezone('Asia/Kolkata')
@@ -195,18 +203,18 @@ class TradingOrchestrator:
             )
             position_updates = self.order_executor.monitor_positions()
             cycle_result['positions_monitored'] = position_updates
-            return cycle_result
+            self.market_data.get_cycle_metrics(); return cycle_result
 
         if past_cutoff:
             if config.TRADING_MODE == "swing":
                 logger.warning(f"Past intraday cutoff ({config.INTRADAY_CUTOFF}) — swing mode: monitoring only, no new BUYs")
                 position_updates = self.order_executor.monitor_positions()
                 cycle_result['positions_monitored'] = position_updates
-                return cycle_result
+                self.market_data.get_cycle_metrics(); return cycle_result
             else:
                 logger.warning(f"Past intraday cutoff ({config.INTRADAY_CUTOFF}) — closing all positions, no new orders")
                 self.end_of_day_close()
-                return cycle_result
+                self.market_data.get_cycle_metrics(); return cycle_result
 
         # Check if we should stop trading (daily loss limit OR consecutive loss streak)
         if self.order_executor.should_stop_trading():
@@ -231,42 +239,49 @@ class TradingOrchestrator:
             # Still monitor and exit existing positions — never abandon open trades
             position_updates = self.order_executor.monitor_positions()
             cycle_result['positions_monitored'] = position_updates
-            return cycle_result
+            self.market_data.get_cycle_metrics(); return cycle_result
         
-        # Emergency circuit breaker: if drawdown > 15% from peak, sell all positions
+        # Emergency circuit breaker: if drawdown > 15% from intraday peak, sell all positions
         # Only fires if holdings API succeeds — never close on a timeout/error
         try:
+            ist = pytz.timezone('Asia/Kolkata')
+            today_str = datetime.now(ist).strftime('%Y-%m-%d')
             holdings = self.order_executor.broker.get_holdings()
             total_value = holdings.get('total_value', 0)
-            # Use peak value file as baseline; fall back to total_value itself (no false trigger)
+            # Use peak value file as baseline; reset to current value on a new day
             peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
             try:
                 with open(peak_path) as _pf:
                     _pd = json.load(_pf)
-                    peak_value = float(_pd.get('peak_value', total_value))
+                    saved_date = _pd.get('date', '')
+                    saved_peak = float(_pd.get('peak_value', total_value)) if saved_date == today_str else total_value
             except Exception:
-                peak_value = total_value
+                saved_peak = total_value
             # Update peak if current value is higher
-            if total_value > peak_value:
-                peak_value = total_value
-                try:
-                    with open(peak_path, 'w') as _pf:
-                        json.dump({'peak_value': peak_value}, _pf)
-                except Exception:
-                    pass
+            peak_value = max(saved_peak, total_value)
+            try:
+                os.makedirs(os.path.dirname(peak_path), exist_ok=True)
+                with open(peak_path, 'w') as _pf:
+                    json.dump({'peak_value': peak_value, 'date': today_str}, _pf)
+            except Exception:
+                pass
             # Only trigger if we have real data (total_value > 0) and genuine drawdown > 15%
             if total_value > 0 and peak_value > 0:
                 drawdown = (peak_value - total_value) / peak_value
                 if drawdown > 0.15:
-                    logger.error(f"EMERGENCY CIRCUIT BREAKER: drawdown {drawdown:.2%} from peak ₹{peak_value:.0f} — closing all positions")
-                    close_results = self.order_executor.close_all_positions()
-                    cycle_result['close_results'] = close_results
-                    cycle_result['errors'].append(f"Circuit breaker triggered: drawdown {drawdown:.2%}")
-                    self._alert(
-                        "🔴 EMERGENCY CIRCUIT BREAKER",
-                        f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed."
-                    )
-                    return cycle_result
+                    if self._circuit_breaker_fired_today:
+                        logger.warning("Circuit breaker already triggered today; not closing again")
+                    else:
+                        self._circuit_breaker_fired_today = True
+                        logger.error(f"EMERGENCY CIRCUIT BREAKER: drawdown {drawdown:.2%} from peak ₹{peak_value:.0f} — closing all positions")
+                        close_results = self.order_executor.close_all_positions('Circuit breaker')
+                        cycle_result['close_results'] = close_results
+                        cycle_result['errors'].append(f"Circuit breaker triggered: drawdown {drawdown:.2%}")
+                        self._alert(
+                            "🔴 EMERGENCY CIRCUIT BREAKER",
+                            f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed."
+                        )
+                        self.market_data.get_cycle_metrics(); return cycle_result
         except Exception as e:
             logger.warning(f"Circuit breaker check failed (skipping): {e}")
         
@@ -362,7 +377,7 @@ class TradingOrchestrator:
                         logger.error(f"Bear regime smart exit error: {be}")
                     position_updates = self.order_executor.monitor_positions()
                     cycle_result['positions_monitored'] = position_updates
-                    return cycle_result
+                    self.market_data.get_cycle_metrics(); return cycle_result
 
             # ── MORNING SHORTLIST: full 150-stock scan once per day ─────────────
             # On the FIRST cycle each trading day, scan all 150 stocks and cache
@@ -474,6 +489,13 @@ class TradingOrchestrator:
                 'max_position_size': per_stock_budget
             }
 
+            # --- Centralized two-stage prefetch: quotes (lightweight) + daily history ---
+            try:
+                self.market_data.prefetch_quotes(universe)
+                self.market_data.prefetch_historical(universe, '3mo', '1d')
+            except Exception as _pfe:
+                logger.warning(f"Cycle market data prefetch failed: {_pfe}")
+
             # --- Generate signals for universe ---
             logger.info(f"Generating signals for {len(universe)} stocks...")
             signals = self.signal_generator.generate_signals_for_watchlist(universe, risk_data)
@@ -558,41 +580,97 @@ class TradingOrchestrator:
                         continue
 
                     # ── 5. Trade Scoring ───────────────────────────────────────
+                    mtf_result = self.mtf.confirm(sym)
                     research = best_signal.get('_research', {})
                     score_result = self.scorer.score(
                         signal=best_signal,
                         research=research,
                         regime=regime,
                         sector_momentum=research.get('sector_momentum', 0.0),
+                        mtf_aligned=mtf_result['aligned'],
+                    )
+                    comp = score_result['components']
+                    decision = 'SKIP' if score_result['skip'] else 'BUY'
+                    logger.info(
+                        f"TradeScore {sym}: "
+                        f"trade_score={score_result['total_score']} "
+                        f"overall_score={best_signal.get('overall_score', 0.0):.2f} "
+                        f"confidence={best_signal.get('confidence', 0.0):.2f} "
+                        f"trend={comp.get('trend', 0)} "
+                        f"rsi={comp.get('rsi', 0)} "
+                        f"macd={comp.get('macd', 0)} "
+                        f"volume={comp.get('volume', 0)} "
+                        f"sector={comp.get('sector', 0)} "
+                        f"sentiment={comp.get('sentiment', 0)} "
+                        f"regime={comp.get('regime', 0)} "
+                        f"mtf={mtf_result['aligned']} "
+                        f"decision={decision}"
                     )
                     if score_result['skip']:
-                        logger.info(
-                            f"Skipping {sym}: score {score_result['total_score']}/100 "
-                            f"({score_result['grade']}) below threshold"
-                        )
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason="Trade score below effective skip threshold",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=best_signal.get('confidence', 0.0),
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            regime=regime,
+                        ))
                         continue
 
                     # ── 6. Minimum R:R guard (1.5:1) ──────────────────────────
                     rr = best_signal.get('risk_reward_ratio', 0)
                     if rr < config.MIN_RISK_REWARD:
-                        logger.warning(f"Skipping {sym}: R:R {rr:.2f} below minimum {config.MIN_RISK_REWARD}:1")
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason=f"R:R {rr:.2f} below minimum {config.MIN_RISK_REWARD}:1",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=best_signal.get('confidence', 0.0),
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            rr=rr,
+                            regime=regime,
+                        ))
                         continue
 
                     # ── 6b. SIDEWAYS regime tightened filters ──────────────────
                     if regime == 'SIDEWAYS':
                         signal_conf = best_signal.get('confidence', 0.0)
-                        if score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN or signal_conf < config.MIN_CONFIDENCE_SIDEWAYS:
-                            logger.warning(
-                                f"Skipping {sym}: SIDEWAYS regime — "
-                                f"score {score_result['total_score']}/100 (min {config.SIDEWAYS_BUY_SCORE_MIN}) "
-                                f"or confidence {signal_conf:.0%} (min {config.MIN_CONFIDENCE_SIDEWAYS:.0%}) too low"
-                            )
+                        overall_score = best_signal.get('overall_score', 0.0)
+                        if (score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN
+                                or signal_conf < config.MIN_CONFIDENCE_SIDEWAYS
+                                or overall_score <= config.SIDEWAYS_BUY_OVERALL_SCORE_MIN):
+                            reasons = []
+                            if score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN:
+                                reasons.append(f"score {score_result['total_score']} < {config.SIDEWAYS_BUY_SCORE_MIN}")
+                            if signal_conf < config.MIN_CONFIDENCE_SIDEWAYS:
+                                reasons.append(f"confidence {signal_conf:.0%} < {config.MIN_CONFIDENCE_SIDEWAYS:.0%}")
+                            if overall_score <= config.SIDEWAYS_BUY_OVERALL_SCORE_MIN:
+                                reasons.append(f"overall {overall_score:.2f} <= {config.SIDEWAYS_BUY_OVERALL_SCORE_MIN}")
+                            logger.warning(self.explainer.format_skip(
+                                symbol=sym,
+                                reason="SIDEWAYS gate: " + ", ".join(reasons),
+                                score_result=score_result,
+                                mtf_result=mtf_result,
+                                confidence=signal_conf,
+                                overall_score=overall_score,
+                                rr=rr,
+                                regime=regime,
+                            ))
                             continue
 
                     # ── 7. Multi-timeframe confirmation ────────────────────────
-                    mtf_result = self.mtf.confirm(sym)
                     if not mtf_result['aligned']:
-                        logger.warning(f"Skipping {sym}: MTF not aligned — {mtf_result['reason']}")
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason=f"MTF not aligned — {mtf_result['reason']}",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=best_signal.get('confidence', 0.0),
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            rr=rr,
+                            regime=regime,
+                        ))
                         continue
 
                     # ── 8. Re-entry gate (all conditions) ─────────────────────
@@ -608,7 +686,16 @@ class TradingOrchestrator:
                         max_allowed_invested=available_cash * config.MAX_CAPITAL_USAGE,
                     )
                     if isinstance(reentry_result, str):  # blocked — reason string
-                        logger.info(f"Skipping {sym}: re-entry not ready — {reentry_result}")
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason=f"Re-entry not ready — {reentry_result}",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=best_signal.get('confidence', 0.0),
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            rr=rr,
+                            regime=regime,
+                        ))
                         continue
                     if isinstance(reentry_result, dict):  # approved re-entry — attach metadata
                         best_signal['_reentry_meta'] = reentry_result
@@ -634,17 +721,27 @@ class TradingOrchestrator:
                     projected_invested = current_invested + best_signal['investment_amount']
                     max_allowed_invested = available_cash * config.MAX_CAPITAL_USAGE
                     if projected_invested > max_allowed_invested:
-                        logger.warning(
-                            f"Skipping {sym}: capital limit (₹{projected_invested:.0f} > ₹{max_allowed_invested:.0f})"
-                        )
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason=f"Capital limit (₹{projected_invested:.0f} > ₹{max_allowed_invested:.0f})",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=confidence,
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            rr=rr,
+                            regime=regime,
+                        ))
                         continue
 
-                    logger.info(
-                        f"Executing BUY: {sym} ×{qty} @ ₹{price:.2f} = ₹{qty*price:.2f} "
-                        f"| Score:{score_result['total_score']}/100 "
-                        f"Conf:{confidence:.0%} SizeFrac:{score_result['size_fraction']:.0%} "
-                        f"MTF:{'strict' if mtf_result['strict'] else 'relaxed'}"
-                    )
+                    logger.info(self.explainer.format_buy(
+                        symbol=sym,
+                        score_result=score_result,
+                        mtf_result=mtf_result,
+                        confidence=confidence,
+                        overall_score=best_signal.get('overall_score', 0.0),
+                        rr=rr,
+                        regime=regime,
+                    ))
                     execution_result = self.order_executor.execute_signal(best_signal)
                     cycle_result['orders_executed'].append(execution_result)
                     if execution_result['success']:
@@ -835,10 +932,25 @@ class TradingOrchestrator:
             logger.error(f"Error in trading cycle: {e}")
             cycle_result['errors'].append(str(e))
         
+        # Log per-cycle market data metrics for dashboard / diagnostics
+        try:
+            _metrics = self.market_data.get_cycle_metrics()
+            logger.info(
+                f"Market data metrics: API={_metrics['api_calls']} "
+                f"cache_hits={_metrics['cache_hits']} "
+                f"cache_misses={_metrics['cache_misses']} "
+                f"hit={_metrics['cache_hit_ratio']:.1%} "
+                f"miss={_metrics['cache_miss_ratio']:.1%} "
+                f"circuit_breakers={_metrics['circuit_breakers']} "
+                f"scan_time={_metrics['cycle_elapsed_seconds']:.1f}s"
+            )
+        except Exception:
+            pass
+
         logger.info(f"Trading cycle completed at {datetime.now()}")
         logger.info("=" * 50)
         
-        return cycle_result
+        self.market_data.get_cycle_metrics(); return cycle_result
     
     def _run_once_wrapper(self):
         """Non-reentrant wrapper so long cycles cannot overlap and don't schedule twice."""
@@ -1432,14 +1544,34 @@ class TradingOrchestrator:
             logger.info("Daily reset skipped — not a trading day (weekend/holiday)")
             return
         logger.info("Executing daily reset")
+        self._circuit_breaker_fired_today = False
         self.order_executor.reset_daily()
     
+    def _reset_peak_value(self) -> None:
+        """Reset the daily peak value to the current opening portfolio value."""
+        try:
+            holdings = self.order_executor.broker.get_holdings()
+            total_value = holdings.get('total_value', 0)
+            if total_value <= 0:
+                return
+            peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
+            os.makedirs(os.path.dirname(peak_path), exist_ok=True)
+            today_str = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d')
+            with open(peak_path, 'w') as _pf:
+                json.dump({'peak_value': total_value, 'date': today_str}, _pf)
+            logger.info(f"Daily peak value reset to ₹{total_value:.2f}")
+        except Exception as e:
+            logger.warning(f"Peak value reset failed: {e}")
+
     def pre_market_check(self):
         """Pre-market check before trading starts"""
         if not self._is_trading_day():
             logger.info("Pre-market check skipped — not a trading day (weekend/holiday)")
             return
         logger.info("Executing pre-market check (9:20 AM IST)")
+        # Reset daily circuit-breaker state and opening peak
+        self._circuit_breaker_fired_today = False
+        self._reset_peak_value()
 
         # Check if token is valid and refresh if needed
         if not self.order_executor.broker.paper_trading:
@@ -1462,6 +1594,17 @@ class TradingOrchestrator:
         else:
             logger.info(f"Intraday SL: {config.STOP_LOSS_PERCENTAGE*100:.1f}% | Target: {config.TARGET_PERCENTAGE*100:.1f}%")
         logger.info(f"Dynamic universe size: {config.DYNAMIC_UNIVERSE_SIZE} stocks (live NSE scan)")
+
+        # Pre-market data warming: fetch 3mo/1d once before 9:15 so first cycle is cache-hot
+        try:
+            _prefetch = list(self.dynamic_universe.get_universe(top_n=200))
+            _prefetch = list(dict.fromkeys(list(_prefetch) + ['NIFTY 50']))
+            logger.info(f"Pre-market prefetch starting for {len(_prefetch)} symbols...")
+            self.market_data.prefetch_historical(_prefetch, '3mo', '1d')
+            self.market_data.prefetch_quotes(_prefetch)
+            logger.info("Pre-market prefetch completed")
+        except Exception as _pme:
+            logger.warning(f"Pre-market prefetch failed: {_pme}")
     
     def _append_trade_log(self, entry: Dict) -> None:
         self.trade_log.append(entry)

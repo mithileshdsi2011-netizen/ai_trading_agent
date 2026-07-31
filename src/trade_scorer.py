@@ -29,6 +29,22 @@ WEIGHTS = {
     'sector':        7,   # Sector strength (reduced — supplementary)
 }
 
+# Regime-dependent trend points — demand higher quality in choppy/weak markets
+TREND_POINTS = {
+    'BULL': {
+        'STRONG_UPTREND': 25, 'BULLISH': 25, 'UPTREND': 18,
+        'NEUTRAL': 0, 'DOWNTREND': 0, 'BEARISH': 0, 'STRONG_DOWNTREND': 0,
+    },
+    'SIDEWAYS': {
+        'STRONG_UPTREND': 15, 'BULLISH': 15, 'UPTREND': 10,
+        'NEUTRAL': 0, 'DOWNTREND': 0, 'BEARISH': 0, 'STRONG_DOWNTREND': 0,
+    },
+    'BEAR': {
+        'STRONG_UPTREND': 8, 'BULLISH': 8, 'UPTREND': 5,
+        'NEUTRAL': 0, 'DOWNTREND': 0, 'BEARISH': 0, 'STRONG_DOWNTREND': 0,
+    },
+}
+
 # ── Score thresholds ───────────────────────────────────────────────────────────
 SCORE_FULL     = 80   # 100% position
 SCORE_75PCT    = 75   # 75% position
@@ -54,6 +70,7 @@ class TradeScorer:
         research: Dict,
         regime: str = "SIDEWAYS",
         sector_momentum: float = 0.0,   # positive = sector outperforming
+        mtf_aligned: bool = True,
     ) -> Dict:
         """
         Score a trade signal.
@@ -63,6 +80,7 @@ class TradeScorer:
             research:         Output of AIResearchAgent.research_stock()
             regime:           Market regime string: BULL / BEAR / SIDEWAYS
             sector_momentum:  Float −1..1; positive = sector is stronger than index
+            mtf_aligned:      Multi-timeframe alignment flag (default True)
 
         Returns:
             Dict with keys: total_score, components, size_fraction, skip
@@ -73,20 +91,15 @@ class TradeScorer:
 
         components: Dict[str, float] = {}
 
-        # ── 1. TREND (25 pts) — primary quality gate ──────────────────────────
+        # ── 1. TREND — regime-dependent quality gate ───────────────────────────
+        regime_upper = str(regime).upper()
+        regime_key = regime_upper if regime_upper in TREND_POINTS else 'SIDEWAYS'
         trend = tech.get('trend', 'NEUTRAL')
-        if trend in ('STRONG_UPTREND', 'BULLISH'):       # legacy BULLISH alias
-            components['trend'] = 25
-        elif trend == 'UPTREND':
-            components['trend'] = 18
-        elif trend == 'NEUTRAL':
-            components['trend'] = 0   # no credit for flat/choppy market
-        elif trend in ('DOWNTREND', 'BEARISH'):           # legacy BEARISH alias
-            components['trend'] = 0
-        elif trend == 'STRONG_DOWNTREND':
-            components['trend'] = 0
-        else:
-            components['trend'] = 0
+        components['trend'] = TREND_POINTS[regime_key].get(trend, 0)
+
+        # In SIDEWAYS, a strong daily trend without MTF confirmation is suspect
+        if regime_key == 'SIDEWAYS' and not mtf_aligned and components['trend'] > 0:
+            components['trend'] //= 2
 
         # ── 2. RSI (15 pts) ────────────────────────────────────────────────────
         rsi = tech.get('rsi', 50)
@@ -97,8 +110,10 @@ class TradeScorer:
                 components['rsi'] = 15
             elif rsi < 30:               # oversold bounce
                 components['rsi'] = 13
-            elif 60 < rsi <= 70:         # mild overbought but momentum
+            elif 60 < rsi <= 65:         # mild overbought — still acceptable
                 components['rsi'] = 8
+            elif 65 < rsi <= 70:         # upper overbought — penalise
+                components['rsi'] = 3
             else:                        # >70 overbought
                 components['rsi'] = 2
         else:
@@ -140,7 +155,7 @@ class TradeScorer:
         sent_score = senti.get('score', 0.0)   # −1 to 1
         news_count = senti.get('news_count', 0)
         if news_count == 0:
-            components['sentiment'] = 4     # no news → slightly below neutral
+            components['sentiment'] = 0     # no news → no credit
         else:
             # map −1..1 → 0..8
             components['sentiment'] = max(0, min(8, int((sent_score + 1) / 2 * 8)))
@@ -155,8 +170,7 @@ class TradeScorer:
             components['regime'] = 0
         else:
             components['regime'] = 5
-
-        # ── 7. SECTOR STRENGTH (7 pts) ─────────────────────────────────────────
+# ── 7. SECTOR STRENGTH (7 pts) ─────────────────────────────────────────
         # sector_momentum: +1 = sector 10%+ outperforming index; −1 = underperforming
         pts = max(0, min(7, int((sector_momentum + 1) / 2 * 7)))
         components['sector'] = pts

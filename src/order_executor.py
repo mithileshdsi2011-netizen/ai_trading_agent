@@ -371,7 +371,7 @@ class OrderExecutor:
             try:
                 keys = [f'NSE:{s}' for s in symbols]
                 ltp_data = self.market_data._kite_call_with_retry(
-                    self.market_data.kite.ltp, keys
+                    self.market_data.kite.ltp, 'ltp', *keys
                 ) or {}
                 for s in symbols:
                     val = ltp_data.get(f'NSE:{s}', {}).get('last_price', 0)
@@ -447,54 +447,24 @@ class OrderExecutor:
                 'reasoning':         exit_reason,
                 'timestamp':         datetime.now().isoformat(),
             }
-            order_result = self.broker.place_order(sell_signal)
-            gross_pnl = (ltp - position.entry_price) * position.quantity
+            order_result = self.execute_signal(sell_signal)
 
             if order_result['success']:
-                position.status = PositionStatus.CLOSED
-                position.exit_price = ltp
-                position.exit_time = datetime.now()
+                exit_signal_out = order_result.get('exit_signal')
                 logger.info(
                     f'Holding SOLD {position.symbol} ×{position.quantity} '
-                    f'@ ₹{ltp:.2f} | P&L ₹{gross_pnl:+.2f} | {exit_reason}'
+                    f'@ ₹{ltp:.2f} | P&L ₹{position.pnl:+.2f} | {exit_reason}'
                 )
-                exit_signal_out = {
-                    'symbol':      position.symbol,
-                    'action':      'SELL',
-                    'price':       ltp,
-                    'quantity':    position.quantity,
-                    'pnl':         gross_pnl,
-                    'pnl_percentage': pnl_pct,
-                    'reason':      exit_reason,
-                    'partial':     False,
-                    'timestamp':   datetime.now().isoformat(),
-                }
                 executed_exits.append({
                     'success':     True,
-                    'order_id':    order_result['order_id'],
+                    'order_id':    order_result.get('order_id'),
                     'exit_signal': exit_signal_out,
                     'timestamp':   datetime.now().isoformat(),
                 })
-                self._clear_sell_pending(position.symbol)
                 try:
                     self.telegram.exit(exit_signal_out, order_result.get('order_id', ''))
                 except Exception:
                     pass
-                try:
-                    self.journal.log_entry(
-                        symbol=position.symbol, action='SELL',
-                        price=ltp, quantity=position.quantity,
-                        exit_reason=exit_reason,
-                        entry_price=position.entry_price,
-                        entry_date=position.entry_time.isoformat(),
-                        gross_pnl=gross_pnl,
-                        net_pnl=gross_pnl,
-                        charges=0,
-                        sector='Other',
-                        trade_score=0,
-                    )
-                except Exception as je:
-                    logger.warning(f'Journal SELL log failed for holding: {je}')
             else:
                 self._record_sell_failure(position.symbol, order_result, exit_reason)
                 logger.error(f'Holdings SELL order FAILED for {position.symbol}: {order_result}')
@@ -626,7 +596,7 @@ class OrderExecutor:
         """Execute a SELL signal for an open/partial position with minimum-profit guard."""
         sym = signal['symbol']
         current_price = float(signal.get('current_price', 0) or 0)
-        reason = signal.get('reasoning', '')
+        reason = signal.get('reasoning', '') or 'Manual close'
 
         position = next(
             (p for p in self.risk_manager.positions
@@ -636,6 +606,15 @@ class OrderExecutor:
         if not position:
             logger.warning(f"SELL {sym}: no open/partial position found")
             return {'success': False, 'reason': 'No open position', 'signal': signal}
+
+        # Minimum holding period guard (configurable via MIN_HOLD_HOURS)
+        if not any(k in reason.lower() for k in ('stop', 'target', 'max hold', 'end of day', 'circuit breaker')):
+            hours_held = (datetime.now() - position.entry_time).total_seconds() / 3600
+            if hours_held < config.MIN_HOLD_HOURS:
+                logger.warning(
+                    f"SELL {sym} blocked: held {hours_held:.2f}h < minimum {config.MIN_HOLD_HOURS}h"
+                )
+                return {'success': False, 'reason': 'Minimum holding period not met', 'signal': signal}
 
         # Minimum Profit Rule: sell below entry only when AI explicitly allows it or it is a stop-loss
         price_below_entry = current_price < position.entry_price
@@ -660,7 +639,7 @@ class OrderExecutor:
             return {'success': False, 'error': order_result.get('error'), 'signal': signal}
 
         self._clear_sell_pending(sym)
-        exit_signal = self.risk_manager.close_position(sym, current_price, reason)
+        exit_signal = self.risk_manager.close_position(sym, current_price, reason, position_size)
         try:
             self.journal.log_entry(
                 symbol=sym,
@@ -704,7 +683,7 @@ class OrderExecutor:
             try:
                 keys = [f"NSE:{s}" for s in symbols]
                 ltp_data = self.market_data._kite_call_with_retry(
-                    self.market_data.kite.ltp, keys
+                    self.market_data.kite.ltp, 'ltp', *keys
                 ) or {}
                 for s in symbols:
                     val = ltp_data.get(f"NSE:{s}", {}).get("last_price", 0)
@@ -749,14 +728,14 @@ class OrderExecutor:
                 logger.info(f"SELL for {exit_signal['symbol']} queued until {queued}")
                 continue
 
-            # Execute sell order
-            order_result = self.broker.place_order(sell_signal)
-            
+            # Execute sell order through the canonical signal pipeline
+            order_result = self.execute_signal(sell_signal)
+
             if order_result['success']:
                 executed_exits.append({
                     'success': True,
-                    'order_id': order_result['order_id'],
-                    'exit_signal': exit_signal,
+                    'order_id': order_result.get('order_id'),
+                    'exit_signal': order_result.get('exit_signal', exit_signal),
                     'timestamp': datetime.now().isoformat()
                 })
                 logger.info(f"Exit executed for {exit_signal['symbol']}: {exit_signal['reason']}")
@@ -764,65 +743,28 @@ class OrderExecutor:
                     self.telegram.exit(exit_signal, order_result.get('order_id', ''))
                 except Exception as te:
                     logger.error(f"Telegram exit alert error: {te}")
-
-                self._clear_sell_pending(exit_signal['symbol'])
-
-                # Auto-log exit to trade journal
-                try:
-                    # Find matching open position for entry context
-                    open_pos = next(
-                        (p for p in self.risk_manager.positions
-                         if p.symbol == exit_signal['symbol']
-                         and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL, PositionStatus.CLOSED}),
-                        None
-                    )
-                    entry_price = open_pos.entry_price if open_pos else exit_signal['price']
-                    entry_date  = open_pos.entry_time.isoformat() if open_pos else datetime.now().isoformat()
-                    _SECTOR_MAP2 = {
-                        'HDFCBANK':'Banking','ICICIBANK':'Banking','KOTAKBANK':'Banking',
-                        'AXISBANK':'Banking','SBIN':'Banking','TCS':'IT','INFY':'IT',
-                        'WIPRO':'IT','HCLTECH':'IT','TECHM':'IT','RELIANCE':'Energy',
-                        'SUNPHARMA':'Pharma','DRREDDY':'Pharma','MARUTI':'Auto',
-                        'TATAMOTORS':'Auto','BHARTIARTL':'Telecom',
-                    }
-                    charges = getattr(open_pos, 'charges', 0) or 0
-                    gross_pnl = exit_signal.get('pnl', 0)
-                    net_pnl   = gross_pnl - charges
-                    self.journal.log_entry(
-                        symbol=exit_signal['symbol'],
-                        action='SELL',
-                        price=exit_signal['price'],
-                        quantity=exit_signal['quantity'],
-                        exit_reason=exit_signal.get('reason', ''),
-                        entry_price=entry_price,
-                        entry_date=entry_date,
-                        gross_pnl=gross_pnl,
-                        net_pnl=net_pnl,
-                        charges=charges,
-                        sector=_SECTOR_MAP2.get(exit_signal['symbol'], 'Other'),
-                        trade_score=getattr(open_pos, '_trade_score', 0) if open_pos else 0,
-                    )
-                except Exception as je:
-                    logger.warning(f"Journal SELL log failed: {je}")
             else:
                 self._record_sell_failure(exit_signal['symbol'], order_result, exit_signal['reason'])
                 logger.error(f"Exit execution failed for {exit_signal['symbol']}")
         
         return executed_exits
     
-    def close_all_positions(self) -> List[Dict]:
+    def close_all_positions(self, reason: str = 'End of day close') -> List[Dict]:
         """
-        Close all open positions (typically at end of trading day)
-        
+        Close all open positions (e.g. end-of-day or emergency circuit breaker).
+
+        Args:
+            reason: Exit reason to record in position, journal, and logs.
+
         Returns:
             List of close results
         """
-        logger.info("Closing all positions")
-        
+        logger.info(f"Closing all positions ({reason})")
+
         positions = self.risk_manager.positions
         if not positions:
             return []
-        
+
         # Get current prices — batch LTP (1 API call)
         symbols = [p.symbol for p in positions if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}]
         current_prices = {}
@@ -844,77 +786,37 @@ class OrderExecutor:
             if p.symbol not in current_prices:
                 price = self.market_data.get_realtime_price(p.symbol)
                 current_prices[p.symbol] = price if price else p.entry_price
-        
-        # Close all positions
-        exit_signals = self.risk_manager.close_all_positions(current_prices)
-        
-        # Execute sell orders
+
         close_results = []
-        for exit_signal in exit_signals:
+        for p in positions:
+            if p.status not in {PositionStatus.OPEN, PositionStatus.PARTIAL}:
+                continue
+            current_price = current_prices.get(p.symbol, p.entry_price)
             sell_signal = {
-                'symbol': exit_signal['symbol'],
+                'symbol': p.symbol,
                 'action': 'SELL',
-                'current_price': exit_signal['price'],
-                'position_size': exit_signal['quantity'],
-                'investment_amount': exit_signal['price'] * exit_signal['quantity'],
+                'current_price': current_price,
+                'position_size': p.quantity,
+                'investment_amount': current_price * p.quantity,
                 'stop_loss': 0,
                 'target': 0,
                 'risk_reward_ratio': 0,
                 'confidence': 1.0,
                 'overall_score': 0,
-                'reasoning': 'End of day close',
+                'reasoning': reason,
+                'allow_loss_exit': True,
                 'timestamp': datetime.now().isoformat()
             }
-            
-            order_result = self.broker.place_order(sell_signal)
-            
-            if order_result['success']:
-                self._clear_sell_pending(exit_signal['symbol'])
-                try:
-                    open_pos = next(
-                        (p for p in self.risk_manager.positions
-                         if p.symbol == exit_signal['symbol']
-                         and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL, PositionStatus.CLOSED}),
-                        None
-                    )
-                    entry_price = open_pos.entry_price if open_pos else exit_signal['price']
-                    entry_date = open_pos.entry_time.isoformat() if open_pos else datetime.now().isoformat()
-                    _SECTOR_MAP2 = {
-                        'HDFCBANK': 'Banking', 'ICICIBANK': 'Banking', 'KOTAKBANK': 'Banking',
-                        'AXISBANK': 'Banking', 'SBIN': 'Banking', 'TCS': 'IT', 'INFY': 'IT',
-                        'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'RELIANCE': 'Energy',
-                        'SUNPHARMA': 'Pharma', 'DRREDDY': 'Pharma', 'MARUTI': 'Auto',
-                        'TATAMOTORS': 'Auto', 'BHARTIARTL': 'Telecom',
-                    }
-                    charges = getattr(open_pos, 'charges', 0) or 0
-                    gross_pnl = exit_signal.get('pnl', 0)
-                    net_pnl = gross_pnl - charges
-                    self.journal.log_entry(
-                        symbol=exit_signal['symbol'],
-                        action='SELL',
-                        price=exit_signal['price'],
-                        quantity=exit_signal['quantity'],
-                        exit_reason='End of day close',
-                        entry_price=entry_price,
-                        entry_date=entry_date,
-                        gross_pnl=gross_pnl,
-                        net_pnl=net_pnl,
-                        charges=charges,
-                        sector=_SECTOR_MAP2.get(exit_signal['symbol'], 'Other'),
-                        trade_score=getattr(open_pos, '_trade_score', 0) if open_pos else 0,
-                    )
-                except Exception as je:
-                    logger.warning(f"Journal SELL log failed for EOD close: {je}")
-            else:
-                self._record_sell_failure(exit_signal['symbol'], order_result, 'End of day close')
-
+            # Emergency closes should not be blocked by the retry queue
+            self._clear_sell_pending(p.symbol)
+            order_result = self.execute_signal(sell_signal)
             close_results.append({
-                'success': order_result['success'],
+                'success': order_result.get('success', False),
                 'order_id': order_result.get('order_id'),
-                'exit_signal': exit_signal,
+                'exit_signal': order_result.get('exit_signal'),
                 'timestamp': datetime.now().isoformat()
             })
-        
+
         return close_results
     
     def get_execution_summary(self) -> Dict:

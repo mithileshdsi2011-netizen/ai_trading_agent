@@ -360,6 +360,15 @@ class SignalGenerator:
             f"out of {len(symbols)} in {time.time()-t0:.1f}s → full analysis on {len(passed)}"
         )
 
+        # Warm detailed candles for the shortlist so full signal generation is cache-only
+        try:
+            _passed_syms = [sym for sym, _, _ in passed]
+            self._market_data.prefetch_historical(_passed_syms, '5d', '1h')
+            self._market_data.prefetch_historical(_passed_syms, '2d', '15m')
+            self._market_data.prefetch_historical(_passed_syms, '5d', '15m')
+        except Exception as _pfe:
+            logger.warning(f"Detailed prefetch for survivors failed: {_pfe}")
+
         # ── Stage 2: parallel full signal generation on survivors ─────────────
         signals = []
 

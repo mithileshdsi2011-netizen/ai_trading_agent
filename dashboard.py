@@ -196,12 +196,100 @@ def _build_trade_cards(journal_entries, positions, now_naive):
             'return_pct': round(return_pct, 2),
             'buy_reason': e.get('buy_reason') or '',
         })
+
+    # Pair SELL journal entries with BUY cards and add orphan SELL-only trades
+    try:
+        buy_lookup = {}
+        for c in cards:
+            if c.get('status') == 'Open':
+                continue
+            ed = _safe_dt(c.get('entry_date'))
+            if ed:
+                buy_lookup[(c['symbol'], ed.date().isoformat())] = c
+
+        # Most recent exits first so the latest SELL is paired with the BUY
+        sell_entries = sorted(
+            [x for x in journal_entries if x.get('action') == 'SELL' and x.get('status') == 'CLOSED'],
+            key=lambda x: str(x.get('exit_date', '')),
+            reverse=True,
+        )
+        for e in sell_entries:
+            sym = e.get('symbol', '')
+            entry_dt = _safe_dt(e.get('entry_date') or e.get('timestamp'))
+            if not entry_dt:
+                continue
+            ed_key = (sym, entry_dt.date().isoformat())
+            if ed_key in buy_lookup:
+                c = buy_lookup[ed_key]
+                if c.get('_sell_merged'):
+                    continue
+                exit_price = float(e.get('exit_price', 0)) if e.get('exit_price') is not None else None
+                if exit_price is None:
+                    continue
+                c['_sell_merged'] = True
+                entry_price = float(e.get('entry_price', 0) or 0)
+                if entry_price > 0:
+                    c['entry_price'] = round(entry_price, 2)
+                    c['invested'] = round(entry_price * c.get('quantity', 0), 2)
+                c['exit_price'] = round(exit_price, 2)
+                c['exit_date'] = e.get('exit_date')
+                c['gross_pnl'] = round(float(e.get('gross_pnl', 0) or 0), 2) if e.get('gross_pnl') is not None else c.get('gross_pnl')
+                c['charges'] = round(float(e.get('charges', 0) or 0), 2)
+                c['net_pnl'] = round(float(e.get('net_pnl', 0) or 0), 2) if e.get('net_pnl') is not None else c.get('net_pnl')
+                c['exit_reason'] = e.get('exit_reason') or c.get('exit_reason', '')
+                if c.get('invested') and c.get('net_pnl') is not None:
+                    c['return_pct'] = round((c['net_pnl'] / c['invested']) * 100, 2)
+                if c.get('entry_date') or c.get('exit_date'):
+                    c['holding_time'] = _duration_text(_safe_dt(c.get('entry_date')), _safe_dt(c.get('exit_date')))
+            else:
+                # Orphan SELL without a BUY record (e.g., a manually-held position sold)
+                qty = int(e.get('quantity', 0) or 0)
+                entry_price = float(e.get('entry_price', 0) or 0)
+                exit_price = float(e.get('exit_price', 0)) if e.get('exit_price') is not None else None
+                gross = e.get('gross_pnl')
+                charges = e.get('charges', 0) or 0
+                net = e.get('net_pnl')
+                invested = round(entry_price * qty, 2) if qty and entry_price else 0.0
+                return_pct = 0.0
+                if invested and net is not None and invested > 0:
+                    return_pct = (float(net) / invested) * 100
+                new_card = {
+                    'id': e.get('id'),
+                    'symbol': e.get('symbol', ''),
+                    'entry_date': entry_dt.isoformat(),
+                    'exit_date': e.get('exit_date'),
+                    'entry_price': round(entry_price, 2),
+                    'exit_price': round(exit_price, 2) if exit_price is not None else None,
+                    'quantity': qty,
+                    'invested': invested,
+                    'gross_pnl': round(float(gross), 2) if gross is not None else None,
+                    'charges': round(float(charges), 2),
+                    'net_pnl': round(float(net), 2) if net is not None else None,
+                    'exit_reason': e.get('exit_reason') or '',
+                    'trade_score': e.get('trade_score'),
+                    'confidence': e.get('confidence'),
+                    'sector': e.get('sector') or 'Unknown',
+                    'risk_reward_ratio': e.get('risk_reward_ratio'),
+                    'market_regime': e.get('market_regime'),
+                    'holding_time': _duration_text(entry_dt, _safe_dt(e.get('exit_date'))) if entry_dt else '',
+                    'status': 'Completed',
+                    'return_pct': round(return_pct, 2),
+                    'buy_reason': e.get('buy_reason') or '',
+                    'source': 'Kite',
+                }
+                cards.append(new_card)
+                buy_lookup[ed_key] = new_card
+    except Exception as _sell_err:
+        logger.warning(f"Could not pair SELL journal entries into trade cards: {_sell_err}")
+
     # Add live open positions from Kite/holdings that are not already represented by an open journal card
     try:
         open_symbols = {c['symbol'] for c in cards if c.get('status') == 'Open'}
         for p in (positions or []):
             sym = p.get('tradingsymbol') or p.get('symbol')
             qty = int(p.get('quantity', 0) or 0)
+            if p.get('status') == 'CLOSED':
+                continue
             if not sym or qty <= 0 or sym in open_symbols:
                 continue
             entry_dt = _safe_dt(p.get('entry_date') or p.get('entry_time') or p.get('buy_datetime'))
@@ -246,6 +334,8 @@ def _build_trade_events(trade_cards):
             'type': 'BUY',
             'quantity': c.get('quantity', 0),
             'price': c.get('entry_price'),
+            'buy_price': c.get('entry_price'),
+            'sell_price': None,
             'total_value': c.get('invested', 0),
             'pnl': None,
             'source': c.get('source') or 'Bot',
@@ -267,6 +357,8 @@ def _build_trade_events(trade_cards):
                 'type': 'SELL',
                 'quantity': c.get('quantity', 0),
                 'price': c.get('exit_price'),
+                'buy_price': c.get('entry_price'),
+                'sell_price': c.get('exit_price'),
                 'total_value': total_sell,
                 'pnl': c.get('net_pnl'),
                 'source': 'Bot',
@@ -824,40 +916,77 @@ def _generate_morning_report():
 
             raw_sigs = sg.generate_signals_for_watchlist(priority_syms)
 
-            # Sector-diversified top picks (max 3 per sector)
+            # Apply live trading filters consistent with background scan
             sec_count: dict = {}
             top_picks = []
+            watchlist = []
+            avoid = []
             for sig in raw_sigs:
-                if sig.get("action") not in ("BUY", "HOLD"):
-                    continue
                 sym  = sig.get("symbol", "")
                 sec  = _SMAP.get(sym, "Other")
-                if sec_count.get(sec, 0) >= 3:
-                    continue
+                act  = sig.get("action", "")
                 price = float(sig.get("current_price") or 0)
                 tgt   = float(sig.get("target") or 0)
                 sl    = float(sig.get("stop_loss") or 0)
                 exp_ret = round((tgt - price) / price * 100, 1) if price and tgt else 0
-                top_picks.append({
-                    "rank":        len(top_picks) + 1,
-                    "symbol":      sym,
-                    "score":       round(sig.get("overall_score", 0), 1),
-                    "confidence":  round((sig.get("confidence", 0)) * 100),
-                    "sector":      sec,
-                    "action":      sig.get("action"),
-                    "entry":       price,
-                    "target":      tgt,
-                    "stop_loss":   sl,
-                    "rr":          round(sig.get("risk_reward_ratio", 0), 2),
-                    "exp_return":  exp_ret,
-                    "trend":       sig.get("trend", ""),
-                    "reason":      (sig.get("reasoning", "") or "").split(".")[0][:80],
-                })
+
+                # Normalize score to 0-100 (same as dashboard background scan)
+                raw_score = float(sig.get('overall_score') or sig.get('trade_score') or 0)
+                score = round(raw_score * 100, 1) if raw_score <= 1.0 else round(raw_score, 1)
+                conf = float(sig.get('confidence', 0))
+                rr = float(sig.get('risk_reward_ratio', 0))
+                regime = sig.get('market_regime', '')
+
+                def _pick(reason=''):
+                    item = {
+                        "rank":        len(top_picks) + 1,
+                        "symbol":      sym,
+                        "score":       score,
+                        "confidence":  round(conf * 100),
+                        "sector":      sec,
+                        "action":      act,
+                        "entry":       price,
+                        "target":      tgt,
+                        "stop_loss":   sl,
+                        "rr":          round(rr, 2),
+                        "exp_return":  exp_ret,
+                        "trend":       sig.get("trend", ""),
+                        "reason":      (sig.get("reasoning", "") or "").split(".")[0][:80],
+                        "filter_note": reason,
+                    }
+                    return item
+
+                if act != 'BUY':
+                    watchlist.append(_pick(act or 'Not a BUY signal'))
+                    continue
+                if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
+                    watchlist.append(_pick('Volatile market regime'))
+                    continue
+                if exp_ret <= 0:
+                    avoid.append(_pick(f'Negative expected return ({exp_ret}%)'))
+                    continue
+                if score < _SCORE_SKIP_THRESHOLD:
+                    watchlist.append(_pick(f'Score {score:.0f} below {_SCORE_SKIP_THRESHOLD}'))
+                    continue
+                if conf < config.MIN_CONFIDENCE:
+                    watchlist.append(_pick(f'Confidence {conf:.0%} below {config.MIN_CONFIDENCE:.0%}'))
+                    continue
+                if rr < config.MIN_RISK_REWARD:
+                    watchlist.append(_pick(f'R:R {rr:.2f} below {config.MIN_RISK_REWARD}'))
+                    continue
+
+                # Tradeable pick — keep sector cap
+                if sec_count.get(sec, 0) >= 3:
+                    continue
+                top_picks.append(_pick())
                 sec_count[sec] = sec_count.get(sec, 0) + 1
+
                 if len(top_picks) >= 20:
                     break
 
             report["ai_top_picks"]      = top_picks
+            report["ai_watchlist"]     = watchlist[:20]
+            report["ai_avoid"]         = avoid[:20]
             report["morning_scan_syms"] = [p["symbol"] for p in top_picks]
         except Exception as e:
             logger.warning(f"Morning report: AI top picks error: {e}")
@@ -894,7 +1023,18 @@ def _generate_morning_report():
                         })
                 except Exception:
                     pass
-            report["stocks_to_avoid"] = avoid_list[:6]
+
+            # Add AI-flagged negative-expected-return / non-BUY signals
+            for p in report.get("ai_avoid", []):
+                avoid_list.append({
+                    "symbol":     p.get("symbol", ""),
+                    "price":      p.get("entry", 0),
+                    "change_pct": p.get("exp_return", 0),
+                    "reason":     p.get("filter_note", "AI filter"),
+                    "sector":     p.get("sector", "Other"),
+                })
+
+            report["stocks_to_avoid"] = avoid_list[:8]
         except Exception as e:
             logger.warning(f"Morning report: avoid list error: {e}")
 
@@ -1289,11 +1429,11 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Section 7: AI Top Picks -->
+  <!-- Section 7: AI Top Picks (tradeable) -->
   <div class="card mb-4" style="border:1px solid #22c55e44">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div style="font-size:14px;font-weight:800;color:#22c55e">🎯 AI Top Picks for Today</div>
-      <div style="font-size:11px;color:#4b5563">Sector-diversified · max 3 per sector</div>
+      <div style="font-size:14px;font-weight:800;color:#22c55e">🎯 AI Top Picks — Tradeable Today</div>
+      <div style="font-size:11px;color:#4b5563">Pass live filters · 0–100 AI score · max 3 per sector</div>
     </div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
@@ -1311,6 +1451,30 @@ tr:last-child td{border:none}
         <th style="font-size:11px;text-align:left">Reason</th>
       </tr></thead>
       <tbody id="mr-picks"><tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">—</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Section 7b: AI Watchlist (being monitored) -->
+  <div class="card mb-4" style="border:1px solid #f59e0b33">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-size:14px;font-weight:800;color:#f59e0b">👁️ Stocks Being Monitored (Watchlist)</div>
+      <div style="font-size:11px;color:#4b5563">Near entry but not yet tradeable</div>
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="font-size:11px;text-align:left">Symbol</th>
+        <th style="font-size:11px;text-align:center">Score</th>
+        <th style="font-size:11px;text-align:center">Conf.</th>
+        <th style="font-size:11px;text-align:left">Sector</th>
+        <th style="font-size:11px;text-align:right">Entry</th>
+        <th style="font-size:11px;text-align:right">Target</th>
+        <th style="font-size:11px;text-align:center">R:R</th>
+        <th style="font-size:11px;text-align:center">Exp.Ret</th>
+        <th style="font-size:11px;text-align:left">Why not tradeable</th>
+      </tr></thead>
+      <tbody id="mr-watchlist"><tr><td colspan="9" style="color:#4b5563;padding:20px;text-align:center">—</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1521,7 +1685,7 @@ tr:last-child td{border:none}
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
     <div class="card"><div class="stat-label">Portfolio Value</div><div class="stat-value" id="p-account-balance">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Cash + Holdings</div></div>
     <div class="card"><div class="stat-label">Available Cash</div><div class="stat-value green" id="p-cash">₹—</div></div>
-    <div class="card"><div class="stat-label">Margin Blocked</div><div class="stat-value red" id="p-margin">₹—</div></div>
+    <div class="card"><div class="stat-label">Margin Used</div><div class="stat-value" id="p-margin">₹—</div></div>
     <div class="card"><div class="stat-label">Holdings Value</div><div class="stat-value" id="p-holdings-val">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">At market price</div></div>
   </div>
 
@@ -1609,16 +1773,19 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Trade History Table -->
+  <!-- Recent Activity -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📋 Trade History (All Time)</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">🕒 Recent Activity (Last 5 Trades)</div>
+      <a href="#" onclick="switchTab('history', this)" style="font-size:11px;color:#60a5fa">View full history →</a>
+    </div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
         <th style="text-align:left">Date</th><th style="text-align:left">Symbol</th>
         <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>P&amp;L</th><th>P&amp;L %</th>
       </tr></thead>
-      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history</td></tr></tbody>
+      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1674,9 +1841,10 @@ tr:last-child td{border:none}
         <th>▼ to SL</th>
         <th>Target</th>
         <th>▲ to Tgt</th>
+        <th>AI Score</th>
         <th>Re-entry</th>
       </tr></thead>
-      <tbody id="pos-table"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tbody id="pos-table"><tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1708,9 +1876,10 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Trade Cards (paired BUY/SELL) -->
+  <!-- Open Positions -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Trade Cards</div>
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Open Positions</div>
+    <div style="font-size:11px;color:#6b7280;margin-bottom:12px">Live open trades from broker + journal. Completed trades are shown in the history table below.</div>
     <div id="h-trade-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">
       <div style="color:#4b5563;padding:20px;text-align:center">Loading...</div>
     </div>
@@ -1747,9 +1916,9 @@ tr:last-child td{border:none}
       <thead><tr>
         <th style="text-align:left">Date &amp; Time</th>
         <th style="text-align:left">Stock</th>
-        <th>Type</th><th>Qty</th><th>Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
+        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
       </tr></thead>
-      <tbody id="h-history-table"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
+      <tbody id="h-history-table"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1857,7 +2026,7 @@ tr:last-child td{border:none}
   </div>
 
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Profit Factor</div><div class="stat-value green" id="a-profit-factor">—</div></div>
+    <div class="card"><div class="stat-label" title="Profit Factor = Gross Profit / Gross Loss. It can be &#x221e; (infinity) when there are no losing trades; high values mean wins are much larger than losses.">Profit Factor <span style="cursor:help;color:#94a3b8">&#9432;</span></div><div class="stat-value green" id="a-profit-factor">—</div></div>
     <div class="card"><div class="stat-label">Average Win</div><div class="stat-value green" id="a-avg-win">—</div></div>
     <div class="card"><div class="stat-label">Average Loss</div><div class="stat-value red" id="a-avg-loss">—</div></div>
     <div class="card"><div class="stat-label">Expectancy</div><div class="stat-value" id="a-expectancy">—</div></div>
@@ -1907,7 +2076,7 @@ tr:last-child td{border:none}
     <div class="card"><div class="stat-label">Total Trades</div><div class="stat-value blue" id="j-total">—</div></div>
     <div class="card"><div class="stat-label">Win Rate</div><div class="stat-value" id="j-winrate">—</div></div>
     <div class="card"><div class="stat-label">Net P&amp;L (All Time)</div><div class="stat-value" id="j-netpnl">—</div></div>
-    <div class="card"><div class="stat-label">Profit Factor</div><div class="stat-value green" id="j-pf">—</div></div>
+    <div class="card"><div class="stat-label" title="Profit Factor = Gross Profit / Gross Loss. It can be &#x221e; (infinity) when there are no losing trades; high values mean wins are much larger than losses.">Profit Factor <span style="cursor:help;color:#94a3b8">&#9432;</span></div><div class="stat-value green" id="j-pf">—</div></div>
   </div>
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
     <div class="card"><div class="stat-label">Avg Win</div><div class="stat-value green" id="j-avgwin">—</div></div>
@@ -2531,6 +2700,25 @@ function rupee(v){return '₹'+parseFloat(v||0).toLocaleString('en-IN',{minimumF
 function pct(v,dec=2){let n=parseFloat(v||0);return (n>=0?'+':'')+n.toFixed(dec)+'%';}
 function pnlStr(v){let n=parseFloat(v||0);return (n>=0?'+':'-')+rupee(Math.abs(n));}
 function pnlClass(v){return parseFloat(v)>=0?'green':'red';}
+function _toDate(iso){if(!iso)return null;const d=new Date(iso);return isNaN(d)?null:d;}
+function fmtDateTime(iso,short){
+  const d=_toDate(iso); if(!d)return '—';
+  const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const day=days[d.getDay()];
+  const dd=String(d.getDate()).padStart(2,'0');
+  const mm=String(d.getMonth()+1).padStart(2,'0');
+  const yy=d.getFullYear();
+  const h=String(d.getHours()).padStart(2,'0');
+  const m=String(d.getMinutes()).padStart(2,'0');
+  return short?`${day} ${dd}-${mm}-${yy} ${h}:${m}`:`${day} ${dd}-${mm}-${yy}, ${h}:${m}`;
+}
+function fmtTime(iso){
+  const d=_toDate(iso); if(!d)return '—';
+  const h=String(d.getHours()).padStart(2,'0');
+  const m=String(d.getMinutes()).padStart(2,'0');
+  return `${h}:${m}`;
+}
+function fmtDayShort(name){const m={'Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed','Thursday':'Thu','Friday':'Fri','Saturday':'Sat','Sunday':'Sun'};return m[name]||String(name||'').slice(0,3)||'—';}
 function scoreColor(s){if(s>=80)return '#22c55e';if(s>=60)return '#eab308';return '#ef4444';}
 function riskLabel(rr){if(rr>=2)return '<span class="green">Low</span>';if(rr>=1)return '<span class="yellow">Medium</span>';return '<span class="red">High</span>';}
 function toggleRejected(){
@@ -2712,6 +2900,23 @@ function renderMorningReport(d){
     </tr>`).join(''):'<tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">AI analysis running…</td></tr>';
   }
 
+  // 7b. AI Watchlist (stocks monitored but not passing live filters)
+  const watchEl=document.getElementById('mr-watchlist');
+  if(watchEl){
+    const wl=rpt.ai_watchlist||[];
+    watchEl.innerHTML=wl.length?wl.map(w=>`<tr style="border-bottom:1px solid #1f2937">
+      <td style="padding:8px;font-weight:700;color:#f9fafb">${w.symbol}</td>
+      <td style="text-align:center;padding:8px 4px"><span style="background:${w.score>=60?'#16a34a33':'#dc262633'};color:${w.score>=60?'#22c55e':'#ef4444'};padding:2px 7px;border-radius:4px;font-weight:700">${w.score}</span></td>
+      <td style="text-align:center;padding:8px 4px;color:${scoreColor(w.confidence)}">${w.confidence}%</td>
+      <td style="padding:8px 4px;color:#6b7280;font-size:11px">${w.sector||'—'}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px">${rupee(w.entry)}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px;color:#22c55e">${rupee(w.target)}</td>
+      <td style="text-align:center;padding:8px 4px;font-weight:600;color:${w.rr>=2?'#22c55e':w.rr>=1.5?'#eab308':'#9ca3af'}">${w.rr}x</td>
+      <td style="text-align:center;padding:8px 4px;color:${w.exp_return>=5?'#22c55e':w.exp_return>=0?'#eab308':'#ef4444'};font-weight:600">${w.exp_return>0?'+':''}${w.exp_return}%</td>
+      <td style="padding:8px 4px;color:#9ca3af;font-size:11px;max-width:180px" title="${w.reason||''}">${w.filter_note||'—'}</td>
+    </tr>`).join(''):'<tr><td colspan="9" style="color:#4b5563;padding:20px;text-align:center">No stocks currently being monitored</td></tr>';
+  }
+
   // 8. Avoid
   const avoidEl=document.getElementById('mr-avoid');
   if(avoidEl){
@@ -2742,7 +2947,7 @@ function renderPositionsTab(d){
   const tableEl = document.getElementById('pos-table');
   if (!positions.length) {
     cardsEl.innerHTML = '<div class="card" style="color:#4b5563;text-align:center;padding:40px;grid-column:1/-1">No open positions</div>';
-    tableEl.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+    tableEl.innerHTML = '<tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
     return;
   }
 
@@ -2755,12 +2960,13 @@ function renderPositionsTab(d){
     const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
     const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
     const firstEntry = parseFloat(p.first_entry_price || avg);
-    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const trailSL = parseFloat(p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || 0));
     const target = parseFloat(p.target || 0);
-    const days = parseInt(p.days_held || 0);
+    const days = parseInt(p.days_held != null ? p.days_held : 0);
     const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100) : null;
     const distToTgt = target > 0 ? ((target - ltp) / ltp * 100) : null;
     const reentryN = parseInt(p.reentry_count || 0);
+    const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
     const isReentry = p.is_reentry;
     const reentryLabel = isReentry
       ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700">🔄 Re-entry #${reentryN}</span>`
@@ -2788,6 +2994,7 @@ function renderPositionsTab(d){
         <div><div style="color:#6b7280">Trail SL</div><div style="font-weight:600;color:#ef4444">${trailSL > 0 ? rupee(trailSL) : '—'}</div></div>
         <div><div style="color:#6b7280">▼ to SL</div><div style="font-weight:600">${slPct}</div></div>
         <div><div style="color:#6b7280">▲ to Target</div><div style="font-weight:600">${tgtPct}</div></div>
+        <div><div style="color:#6b7280">AI Score</div><div style="font-weight:600;color:#e2e8f0">${aiScore}</div></div>
       </div>
       ${p.prev_exit_reason ? `<div style="margin-top:8px;font-size:11px;color:#a78bfa">Prev exit: ${p.prev_exit_reason}</div>` : ''}
     </div>`;
@@ -2801,12 +3008,13 @@ function renderPositionsTab(d){
     const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
     const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
     const firstEntry = parseFloat(p.first_entry_price || avg);
-    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const trailSL = parseFloat(p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || 0));
     const target = parseFloat(p.target || 0);
-    const days = parseInt(p.days_held || 0);
+    const days = parseInt(p.days_held != null ? p.days_held : 0);
     const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100).toFixed(1) + '%' : '—';
     const distToTgt = target > 0 ? ((target - ltp) / ltp * 100).toFixed(1) + '%' : '—';
     const reentryN = parseInt(p.reentry_count || 0);
+    const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
     const reentryCell = p.is_reentry
       ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px">🔄 #${reentryN}</span>`
       : (reentryN > 0 ? `<span style="color:#a78bfa;font-size:11px">${reentryN}×</span>` : '<span style="color:#374151">—</span>');
@@ -2823,6 +3031,7 @@ function renderPositionsTab(d){
       <td style="color:#ef4444">${distToSL}</td>
       <td style="color:#22c55e">${target > 0 ? rupee(target) : '—'}</td>
       <td style="color:#22c55e">${distToTgt}</td>
+      <td style="text-align:center">${aiScore}</td>
       <td>${reentryCell}</td>
     </tr>`;
   }).join('');
@@ -2844,15 +3053,16 @@ function renderHistory(filter){
   const el=document.getElementById('h-history-table');
   if(!el) return;
   if(!filtered.length){
-    el.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
+    el.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
     return;
   }
   el.innerHTML=filtered.map(o=>{
     const isBuy=(o.type||'').toUpperCase()==='BUY';
-    const price=parseFloat(o.price||0);
+    const buyP=parseFloat(o.buy_price||0);
+    const sellP=o.sell_price===null||o.sell_price===undefined?null:parseFloat(o.sell_price);
     const qty=parseInt(o.quantity||0);
     const val=parseFloat(o.total_value||0);
-    const ts=String(o.datetime||'').slice(0,16).replace('T',' ');
+    const ts=fmtDateTime(o.datetime);
     const pnlVal=o.pnl===null||o.pnl===undefined?null:parseFloat(o.pnl);
     const pnlText=pnlVal===null?'—':pnlStr(pnlVal);
     const pnlClassName=pnlVal===null?'':pnlClass(pnlVal);
@@ -2862,7 +3072,8 @@ function renderHistory(filter){
       <td style="font-weight:700;color:#f9fafb">${o.symbol||'—'}</td>
       <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}">${isBuy?'BUY':'SELL'}</span></td>
       <td style="text-align:center">${qty}</td>
-      <td>${rupee(price)}</td>
+      <td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>
+      <td style="font-family:monospace">${sellP===null?'<span style="color:#4b5563">—</span>':rupee(sellP)}</td>
       <td style="font-weight:600">${rupee(val)}</td>
       <td class="${pnlClassName}">${pnlText}</td>
       <td>${src}</td>
@@ -2873,48 +3084,49 @@ function renderHistory(filter){
 function renderTradeCards(cards){
   const el=document.getElementById('h-trade-cards');
   if(!el) return;
-  if(!cards || !cards.length){ el.innerHTML='<div style="color:#4b5563;padding:20px;text-align:center">No trades yet</div>'; return; }
+  if(!cards || !cards.length){ el.innerHTML='<div style="color:#4b5563;padding:24px;text-align:center;font-size:14px">No open positions</div>'; return; }
   el.innerHTML=cards.map(c=>{
-    const isProfit=(c.net_pnl||0)>0;
-    const isOpen=c.status==='Open';
-    const buyDate=c.entry_date?String(c.entry_date).slice(0,16).replace('T',' '):'—';
-    const sellDate=c.exit_date?String(c.exit_date).slice(0,16).replace('T',' '):'—';
-    const pnlColor=isOpen?'#9ca3af':(isProfit?'#22c55e':'#ef4444');
-    const statusColor=isOpen?'#3b82f6':(c.status==='Completed'?'#22c55e':'#a78bfa');
-    const rr=c.risk_reward_ratio!=null?Number(c.risk_reward_ratio).toFixed(2):'—';
+    const entryDate=c.entry_date?fmtDateTime(c.entry_date):'—';
+    const invested='₹'+(Number(c.invested)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+    const entryPrice='₹'+(Number(c.entry_price)||0).toFixed(2);
+    const qty=Number(c.quantity)||0;
     const conf=c.confidence!=null?(Number(c.confidence)*100).toFixed(0)+'%':'—';
     const score=c.trade_score!=null?c.trade_score:'—';
-    const netText=isOpen?'—':(isProfit?'+':'')+'₹'+(Number(c.net_pnl||0)).toFixed(2);
-    return `<div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;color:#e5e7eb">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div style="font-size:18px;font-weight:800;color:#f9fafb">${c.symbol||'—'}</div>
-        <span style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;background:${statusColor}22;color:${statusColor}">${c.status||'Open'}</span>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;font-size:13px">
-        <div><div style="color:#9ca3af;font-size:11px">BUY</div><div style="color:#22c55e;font-weight:700">₹${(Number(c.entry_price)||0).toFixed(2)}</div><div style="color:#64748b;font-size:11px">${buyDate}</div></div>
-        <div><div style="color:#9ca3af;font-size:11px">SELL</div><div style="color:${isOpen?'#64748b':'#ef4444'};font-weight:700">${isOpen?'Open':'₹'+(Number(c.exit_price)||0).toFixed(2)}</div><div style="color:#64748b;font-size:11px">${isOpen?'—':sellDate}</div></div>
-      </div>
-      <div style="display:flex;gap:16px;font-size:12px;margin-bottom:12px">
-        <div><span style="color:#9ca3af">Holding</span> <strong>${c.holding_time||'—'}</strong></div>
-        <div><span style="color:#9ca3af">Reason</span> <strong>${c.exit_reason||'—'}</strong></div>
-      </div>
-      <div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="color:#9ca3af;font-size:12px">Net Profit</span>
-          <span style="font-weight:800;color:${pnlColor}">${netText}</span>
+    const rr=c.risk_reward_ratio!=null?Number(c.risk_reward_ratio).toFixed(2):'—';
+    const source=c.source||'Bot';
+    return `<div style="background:#1e293b;border:1px solid #334155;border-radius:14px;padding:18px;color:#e5e7eb">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div>
+          <div style="font-size:20px;font-weight:800;color:#f9fafb;letter-spacing:-0.02em">${c.symbol||'—'}</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:2px">Entry: ${entryDate}</div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:11px;color:#9ca3af">
-          <div>Gross: <strong style="color:#e5e7eb">${c.gross_pnl!=null?'₹'+(Number(c.gross_pnl)).toFixed(2):'—'}</strong></div>
-          <div>Charges: <strong style="color:#e5e7eb">₹${(Number(c.charges)||0).toFixed(2)}</strong></div>
-          <div>Return: <strong style="color:#e5e7eb">${c.return_pct!=null?Number(c.return_pct).toFixed(2)+'%':'—'}</strong></div>
+        <span style="font-size:11px;font-weight:700;padding:5px 12px;border-radius:999px;background:#3b82f622;color:#60a5fa;text-transform:uppercase">Open</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:16px">
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Entry Price</div>
+          <div style="font-size:18px;font-weight:700;color:#22c55e">${entryPrice}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Quantity</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${qty}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Invested</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${invested}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Holding Time</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${c.holding_time||'—'}</div>
         </div>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:11px">
-        <span style="background:#1f2937;padding:4px 8px;border-radius:6px;color:#94a3b8">Score <strong style="color:#e5e7eb">${score}</strong></span>
-        <span style="background:#1f2937;padding:4px 8px;border-radius:6px;color:#94a3b8">Conf <strong style="color:#e5e7eb">${conf}</strong></span>
-        <span style="background:#1f2937;padding:4px 8px;border-radius:6px;color:#94a3b8">Sector <strong style="color:#e5e7eb">${c.sector||'—'}</strong></span>
-        <span style="background:#1f2937;padding:4px 8px;border-radius:6px;color:#94a3b8">R:R <strong style="color:#e5e7eb">${rr}</strong></span>
-        <span style="background:#1f2937;padding:4px 8px;border-radius:6px;color:#94a3b8">Regime <strong style="color:#e5e7eb">${c.market_regime||'—'}</strong></span>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Score <strong style="color:#e5e7eb">${score}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Conf <strong style="color:#e5e7eb">${conf}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Sector <strong style="color:#e5e7eb">${c.sector||'—'}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">R:R <strong style="color:#e5e7eb">${rr}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Regime <strong style="color:#e5e7eb">${c.market_regime||'—'}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Source <strong style="color:#e5e7eb">${source}</strong></span>
       </div>
     </div>`;
   }).join('');
@@ -2925,7 +3137,7 @@ function renderRetryQueue(items){
   if(!el) return;
   if(!items || !items.length){ el.innerHTML='<tr><td colspan="4" style="text-align:center;color:#4b5563;padding:20px">No queued retries</td></tr>'; return; }
   el.innerHTML=items.map(p=>{
-    const next=p.next_retry?String(p.next_retry).slice(0,16).replace('T',' '):'Waiting';
+    const next=p.next_retry?fmtDateTime(p.next_retry):'Waiting';
     return `<tr style="border-bottom:1px solid #334155">
       <td style="padding:10px 0;font-weight:700">${p.symbol||'—'}</td>
       <td style="padding:10px 0;text-align:center">${next}</td>
@@ -2990,7 +3202,7 @@ async function load(){
     document.getElementById('hdr-next-scan').textContent=nextStr;
     const stEl=document.getElementById('hdr-status');
     stEl.innerHTML=d.kite_ok?'<span class="green">🟢 Running</span>':'<span class="red">🔴 Offline</span>';
-    document.getElementById('hdr-token').textContent=(d.token_expiry||'—').replace('T',' ').slice(0,16);
+    document.getElementById('hdr-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
 
     // ── TAB: DASHBOARD ────────────────────────────────────────────────────────
     const ph=d.portfolio_health||{};
@@ -3069,11 +3281,11 @@ async function load(){
         const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
         const dayPnl=(ltp-closePrice)*qty;
         
-        // Get SL/Target from position data
-        const trailSL = p.stop_loss ? rupee(p.stop_loss) : '—';
+        // Get SL/Target/Score from position data (same source as Positions tab)
+        const trailSL = (p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || null)) > 0 ? rupee(p.trailing_stop != null ? p.trailing_stop : p.stop_loss) : '—';
         const target = p.target ? rupee(p.target) : '—';
-        const aiScore = p.trade_score ? p.trade_score.toFixed(0) : '—';
-        const daysHeld = p.days_held || 1;
+        const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
+        const daysHeld = p.days_held != null ? p.days_held : '—';
         
         // Accumulate totals
         totalInvested += invested;
@@ -3140,13 +3352,12 @@ async function load(){
       document.getElementById('d-summary-total-pnl').textContent = '₹—';
     }
 
-    // AI Opportunities — BUY signals only
-    const allSignals=d.recommendations&&d.recommendations.length?d.recommendations:d.signals||[];
-    const opp=allSignals.filter(s=>!s.action||s.action==='BUY');
+    // AI Opportunities — tradeable BUY recommendations only
+    const opp=(d.recommendations||[]).filter(s=>s.action==='BUY');
     const oppEl=document.getElementById('d-opportunities');
     if(opp.length){
       oppEl.innerHTML=opp.slice(0,7).map(s=>{
-        const score=Math.round((s.confidence||0)*100);
+        const score=Math.round(s.overall_score||0);
         const rr2=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
         const trend=s.trend||(score>=70?'Bullish':score>=50?'Neutral':'Bearish');
         const trendStyle=trend==='Bullish'?'color:#22c55e':trend==='Bearish'?'color:#ef4444':'color:#eab308';
@@ -3160,7 +3371,7 @@ async function load(){
         </tr>`;
       }).join('');
     } else {
-      oppEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">Scanning... signals will appear after next cycle</td></tr>';
+      oppEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No tradeable opportunities right now</td></tr>';
     }
 
     // Market overview
@@ -3200,7 +3411,7 @@ async function load(){
     if(allOrders.length){
       ordEl.innerHTML=allOrders.map(o=>{
         const isBuy=o.transaction_type==='BUY';
-        const t=(o.order_timestamp||'').toString().slice(-8,-3)||'—';
+        const t=fmtTime(o.order_timestamp)||'—';
         const amt=parseFloat(o.average_price||o.price||0)*parseInt(o.quantity||0);
         const pnl=parseFloat(o.pnl||0);
         const pnlPart=!isBuy?`<span class="${pnlClass(pnl)}" style="font-size:11px">${pnlStr(pnl)}</span>`:'';
@@ -3247,8 +3458,8 @@ async function load(){
     document.getElementById('p-account-balance').textContent=rupee(d.account_balance||0);
     document.getElementById('p-cash').textContent=rupee(d.cash||0);
     const pmEl=document.getElementById('p-margin');
-    pmEl.textContent=rupee(d.margin_blocked||0);
-    pmEl.className='stat-value '+(parseFloat(d.margin_blocked||0)>0?'red':'green');
+    const marginUsed=Math.abs(parseFloat(d.margin_blocked||0));
+    pmEl.textContent=rupee(marginUsed);
     document.getElementById('p-holdings-val').textContent=rupee(d.holdings_value||0);
 
     // Holdings table with enhanced data
@@ -3279,12 +3490,13 @@ async function load(){
         const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
         const dayPnl=(ltp-closePrice)*qty;
         
-        // Get position data for SL/Target/AI Score
-        const position = (d.positions || []).find(p => p.symbol === h.tradingsymbol);
-        const trailSL = position && position.stop_loss ? rupee(position.stop_loss) : '—';
-        const target = position && position.target ? rupee(position.target) : '—';
-        const aiScore = position && position.trade_score ? position.trade_score.toFixed(0) : '—';
-        const daysHeld = position && position.days_held ? position.days_held : '—';
+        // Get position data for SL/Target/AI Score (same source as Positions tab)
+        const position = (d.positions || []).find(p => p.tradingsymbol === h.tradingsymbol);
+        const rawSL = position ? (position.trailing_stop != null ? position.trailing_stop : position.stop_loss) : 0;
+        const trailSL = rawSL > 0 ? rupee(rawSL) : '—';
+        const target = position && position.target > 0 ? rupee(position.target) : '—';
+        const aiScore = position && position.trade_score != null ? Number(position.trade_score).toFixed(0) : '—';
+        const daysHeld = position && position.days_held != null ? position.days_held : '—';
         
         // Progress bar for price relative to SL and Target
         let progressBar = '';
@@ -3366,11 +3578,11 @@ async function load(){
       document.getElementById('p-summary-total-pnl').textContent = '₹—';
     }
 
-    // Trade History table
+    // Recent Activity table
     const thEl=document.getElementById('p-trade-history');
     const allOrd=(d.all_orders||[]);
     if(allOrd.length){
-      thEl.innerHTML=allOrd.slice(0,50).map(o=>{
+      thEl.innerHTML=allOrd.slice(0,5).map(o=>{
         const isBuy=o.transaction_type==='BUY';
         const isSell=o.transaction_type==='SELL';
         const qty=parseInt(o.quantity||0);
@@ -3378,7 +3590,7 @@ async function load(){
         const sellP=parseFloat(o.sell_price||o.average_price||0);
         const pnl=parseFloat(o.pnl||0);
         const pnlPct=(isSell&&buyP>0)?((sellP-buyP)/buyP*100):0;
-        const ts=String(o.order_timestamp||'').slice(0,16).replace('T',' ');
+        const ts=fmtDateTime(o.order_timestamp);
         // Buy Price column: show for both BUY and SELL rows
         const buyCell=isSell
           ?`<td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>`
@@ -3403,7 +3615,7 @@ async function load(){
         </tr>`;
       }).join('');
     } else {
-      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history yet</td></tr>';
+      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr>';
     }
 
     // ── TAB: POSITIONS ───────────────────────────────────────────
@@ -3648,7 +3860,10 @@ async function load(){
     const wrEl=document.getElementById('a-win-rate');
     const wr=parseFloat(d.win_rate||0)*100;
     wrEl.textContent=wr.toFixed(0)+'%';wrEl.className='stat-value '+(wr>=60?'green':wr>=40?'yellow':'red');
-    document.getElementById('a-profit-factor').textContent=(strat.profit_factor||0).toFixed(2);
+    // Profit factor: ∞ when no losses exist
+    const apfVal=parseFloat(strat.profit_factor||0);
+    const aNoLosses=(strat.avg_loss||0)===0&&(strat.avg_win||0)>0;
+    document.getElementById('a-profit-factor').textContent=aNoLosses?'∞':apfVal.toFixed(2);
     document.getElementById('a-avg-win').textContent=rupee(strat.avg_win||0);
     document.getElementById('a-avg-loss').textContent=rupee(strat.avg_loss||0);
     document.getElementById('a-expectancy').textContent=rupee(strat.expectancy||0);
@@ -3676,7 +3891,7 @@ async function load(){
     const weekDays=[{d:'Mon',v:wc[0]},{d:'Tue',v:wc[1]},{d:'Wed',v:wc[2]},{d:'Thu',v:wc[3]},{d:'Fri',v:wc[4]}];
     calEl.innerHTML=weekDays.map(({d:day,v})=>`
       <div style="text-align:center;flex:1">
-        <div style="font-size:11px;color:#4b5563;margin-bottom:4px">${day}</div>
+        <div style="font-size:11px;color:#4b5563;margin-bottom:4px;white-space:nowrap">${day}</div>
         <div style="padding:8px 4px;border-radius:8px;font-size:13px;font-weight:700;background:${v>=0?'#16a34a22':'#dc262622'};color:${v>=0?'#22c55e':'#ef4444'}">${v>=0?'+':''}${v.toFixed(0)}</div>
       </div>`).join('');
 
@@ -3685,7 +3900,7 @@ async function load(){
     if(d.orders&&d.orders.length){
       ahEl.innerHTML=d.orders.map(o=>{
         const isBuy=o.transaction_type==='BUY';
-        const t=(o.order_timestamp||'').toString().slice(-8,-3)||'—';
+        const t=fmtTime(o.order_timestamp)||'—';
         const amt=parseFloat(o.average_price||o.price||0)*parseInt(o.quantity||0);
         const opnl=parseFloat(o.pnl||0);
         return `<tr>
@@ -3706,8 +3921,8 @@ async function load(){
     // ── TAB: BOT STATUS ───────────────────────────────────────────────────────
     document.getElementById('bs-kite').innerHTML=d.kite_ok?'<span class="green">✅ Connected</span>':'<span class="red">❌ Offline</span>';
     document.getElementById('bs-mode').textContent=(d.trading_mode||'swing').toUpperCase();
-    document.getElementById('bs-token').textContent=(d.token_expiry||'—').slice(0,16).replace('T',' ');
-    document.getElementById('bs-token2').textContent=(d.token_expiry||'—').slice(0,16).replace('T',' ');
+    document.getElementById('bs-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
+    document.getElementById('bs-token2').textContent=fmtDateTime(d.token_expiry,true)||'—';
     document.getElementById('bs-paper').innerHTML=d.paper_trading?'<span class="yellow">⚠️ Paper Mode</span>':'<span class="green">✅ Live Trading</span>';
     const bsrEl=document.getElementById('bs-regime');
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
@@ -3878,7 +4093,7 @@ async function loadJournal(){
     const dowCtx=document.getElementById('j-chart-dow');
     if(dowCtx&&dowL.length){
       const cfg={type:'bar',data:{
-        labels:dowL.map(d=>d.slice(0,3)),
+        labels:dowL.map(d=>fmtDayShort(d)),
         datasets:[{label:'Net P&L',data:dowPnl,backgroundColor:dowPnl.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]
       },options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}};
       if(jChartDow){jChartDow.data=cfg.data;jChartDow.update();}else{jChartDow=new Chart(dowCtx,cfg);}
@@ -4154,7 +4369,7 @@ function updateIpStatus(d){
         : diffMin === 1 ? '1 minute ago'
         : diffMin < 60 ? `${diffMin} minutes ago`
         : `${Math.round(diffMin/60)}h ago`;
-      elVerified.textContent = `Verified ${relStr} (${lastApi.slice(11,19)})`;
+      elVerified.textContent = `Verified ${relStr} (${fmtTime(lastApi)})`;
     }catch(_){ elVerified.textContent = `Verified: ${lastApi}`; }
   }
 
@@ -4489,8 +4704,8 @@ function _btRenderResults(data){
       const exitTag = {stop_loss:'🛑 SL', target:'🎯 Target', max_hold:'⏰ MaxHold', rsi_overbought:'📈 RSI>80', signal_reversal:'🔄 Reversal'}[t.exit_reason] || t.exit_reason;
       return `<tr style="border-top:1px solid #1e293b">
         <td style="padding:5px 8px;font-weight:600;color:#f1f5f9">${t.symbol}</td>
-        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.entry_date}</td>
-        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.exit_date}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${fmtDateTime(t.entry_date,true)}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${fmtDateTime(t.exit_date,true)}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.entry_price.toLocaleString('en-IN')}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.exit_price.toLocaleString('en-IN')}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace;color:${col};font-weight:600">${t.pnl>=0?'+':''}₹${Math.abs(t.pnl).toFixed(0)}</td>
@@ -4694,7 +4909,8 @@ def api_data():
             "banknifty_change": 0,
             "vix": 0,
             "market_regime": "UNKNOWN"
-        }
+        },
+        "market_data_metrics": {}
     }
 
     # Load broker mode status (written by broker_integration.py at startup)
@@ -5051,8 +5267,9 @@ def api_data():
         # Paired professional trade cards and BUY/SELL event history (no duplicate SELLs)
         try:
             now_naive = now_ist.replace(tzinfo=None)
-            data['trade_cards'] = _build_trade_cards(journal_entries, data.get('positions', []), now_naive)
-            data['trade_events'] = _build_trade_events(data['trade_cards'])
+            all_cards = _build_trade_cards(journal_entries, data.get('positions', []), now_naive)
+            data['trade_cards'] = [c for c in all_cards if c.get('status') == 'Open']
+            data['trade_events'] = _build_trade_events([c for c in all_cards if c.get('status') == 'Completed'])
         except Exception as _tc_err:
             logger.error(f"Trade history card build failed: {_tc_err}")
             data['trade_cards'] = []
@@ -5080,7 +5297,7 @@ def api_data():
         sells = [o for o in completed if o.get('transaction_type') == 'SELL']
         data['total_trades'] = len(completed)
         win_sells = [o for o in sells if (o.get('pnl') or 0) > 0]
-        data['win_rate'] = round(len(win_sells) / len(sells) * 100, 1) if sells else 0
+        data['win_rate'] = round(len(win_sells) / len(sells), 4) if sells else 0
         # daily_pnl = unrealized (from positions) + realized (from today's closed trades)
         realized_pnl = sum(o.get('pnl', 0) for o in sells)
         unrealized_pnl = data.get('daily_pnl', 0)  # set earlier from positions
@@ -5422,6 +5639,12 @@ def api_data():
     data['kite_whitelist_url']  = 'https://developers.kite.trade/profile'
     data['kite_login_url']      = _kite_login_url()
 
+    try:
+        from market_data import MarketDataFetcher
+        data['market_data_metrics'] = MarketDataFetcher.load_cycle_metrics()
+    except Exception:
+        pass
+
     return jsonify(data)
 
 
@@ -5678,7 +5901,7 @@ def api_ask():
             ctx = (f"Regime: {regime}\n"
                    f"Open: {chr(10).join(fmt_trade(t) for t in open_pos) or 'none'}\n"
                    f"Closed (last 5): {chr(10).join(fmt_trade(t) for t in closed[-5:]) or 'none'}\n"
-                   f"Stats: win_rate={analytics.get('win_rate',0)}% pnl=₹{analytics.get('total_net_pnl',0)} trades={analytics.get('total_trades',0)}")
+                   f"Stats: win_rate={analytics.get('win_rate',0)*100:.1f}% pnl=₹{analytics.get('total_net_pnl',0)} trades={analytics.get('total_trades',0)}")
 
             resp = client.chat.completions.create(
                 model='gpt-4o-mini',
@@ -5707,7 +5930,7 @@ def api_ask():
                 'answer': f"I couldn't find a specific answer for that question in my local data. {hint}",
                 'bullets': [
                     f"Open positions: {len(open_pos)} ({', '.join(p['symbol'] for p in open_pos) or 'none'})",
-                    f"Closed trades: {analytics.get('total_trades',0)} | Win rate: {analytics.get('win_rate',0):.1f}%",
+                    f"Closed trades: {analytics.get('total_trades',0)} | Win rate: {analytics.get('win_rate',0)*100:.1f}%",
                     f"Net P&L: ₹{analytics.get('total_net_pnl',0):.2f} | Regime: {regime}",
                     hint,
                 ]
@@ -5768,6 +5991,12 @@ def api_journal():
         analytics['closed_trades_count'] = len(closed_trades)
         analytics['open_trade_log']     = sorted(open_trades,  key=lambda x: x.get('timestamp',''), reverse=True)[:20]
         analytics['closed_trade_log']   = sorted(closed_trades, key=lambda x: x.get('exit_date',''), reverse=True)[:20]
+        # Trade Log (Last 20) must show both BUY and SELL, newest first
+        analytics['recent_trades']      = sorted(
+            all_entries,
+            key=lambda x: x.get('timestamp', x.get('exit_date', '')),
+            reverse=True
+        )[:20]
         analytics['all_entries_count']  = len(all_entries)
         return jsonify(analytics)
     except Exception as e:

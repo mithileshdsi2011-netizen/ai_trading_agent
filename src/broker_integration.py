@@ -556,7 +556,10 @@ class BrokerIntegration:
         else:
             try:
                 holdings = self.kite.holdings()
-                total_value = sum(h['quantity'] * h['last_price'] for h in holdings)
+                total_value = sum(
+                    (h.get('quantity', 0) + h.get('t1_quantity', 0)) * h.get('last_price', 0)
+                    for h in holdings
+                )
                 # Read available cash from Kite margins
                 try:
                     margins = self.kite.margins()
@@ -565,6 +568,27 @@ class BrokerIntegration:
                     available_cash = avail.get("live_balance") or avail.get("cash") or eq.get("net", 0)
                 except Exception:
                     available_cash = 0
+
+                # Swing/CNC positions bought today are NOT in kite.holdings() until
+                # T+1 settlement. Include any open "net" positions that are not
+                # already counted in the holdings list to prevent a false drawdown.
+                try:
+                    positions = self.kite.positions()
+                    held_symbols = {
+                        (h.get('tradingsymbol'), h.get('exchange'))
+                        for h in holdings
+                    }
+                    for p in positions.get('net', []):
+                        qty = p.get('quantity', 0)
+                        if qty <= 0:
+                            continue
+                        key = (p.get('tradingsymbol'), p.get('exchange'))
+                        if key in held_symbols:
+                            continue
+                        total_value += qty * p.get('last_price', 0)
+                except Exception:
+                    pass
+
                 return {
                     'cash': available_cash,
                     'positions': holdings,
