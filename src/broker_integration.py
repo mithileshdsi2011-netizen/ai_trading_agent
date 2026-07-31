@@ -7,12 +7,115 @@ import logging
 import os
 import json
 from datetime import datetime
+from enum import Enum
 
 from config import config
 from token_manager import TokenManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Module-level cache of NSE tick sizes (lazy-loaded from Kite instruments)
+_TICK_SIZE_CACHE: Dict[str, float] = {}
+
+
+class BrokerErrorCategory(Enum):
+    """Broker-facing error categories used to decide retry/notification behaviour."""
+    SUCCESS = "success"
+    CDSL_AUTH = "cdsl_auth"
+    INSUFFICIENT_QUANTITY = "insufficient_quantity"
+    EXCHANGE_CLOSED = "exchange_closed"
+    RMS_REJECTION = "rms_rejection"
+    NETWORK_FAILURE = "network_failure"
+    RATE_LIMIT = "rate_limit"
+    INVALID_TOKEN = "invalid_token"
+    ORDER_FROZEN = "order_frozen"
+    IP_WHITELIST = "ip_whitelist"
+    OTHER = "other"
+
+
+# Per-error-category policy: retry, notify, continue trading, retry schedule, recovery path
+BROKER_ERROR_POLICY = {
+    BrokerErrorCategory.CDSL_AUTH: {
+        'retry': True,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'every_cycle',
+        'recovery_path': 'Complete CDSL/TPIN authorisation in Kite → Portfolio → Holdings → Authorise. Bot will retry automatically.',
+    },
+    BrokerErrorCategory.NETWORK_FAILURE: {
+        'retry': True,
+        'notify': False,
+        'continue_trading': True,
+        'retry_policy': 'exponential_backoff',
+        'recovery_path': 'Wait for network recovery; bot will back off and retry.',
+    },
+    BrokerErrorCategory.RATE_LIMIT: {
+        'retry': True,
+        'notify': False,
+        'continue_trading': True,
+        'retry_policy': 'exponential_backoff',
+        'recovery_path': 'Wait for Kite rate-limit window; bot will back off and retry.',
+    },
+    BrokerErrorCategory.EXCHANGE_CLOSED: {
+        'retry': True,
+        'notify': False,
+        'continue_trading': True,
+        'retry_policy': 'next_session',
+        'recovery_path': 'Markets closed; bot will retry at the next market open.',
+    },
+    BrokerErrorCategory.INVALID_TOKEN: {
+        'retry': False,
+        'notify': True,
+        'continue_trading': False,
+        'retry_policy': 'manual',
+        'recovery_path': 'Refresh Kite access token / login before the bot can place orders.',
+    },
+    BrokerErrorCategory.IP_WHITELIST: {
+        'retry': False,
+        'notify': True,
+        'continue_trading': False,
+        'retry_policy': 'manual',
+        'recovery_path': 'Add current public IP to Kite Developer Console whitelist.',
+    },
+    BrokerErrorCategory.INSUFFICIENT_QUANTITY: {
+        'retry': False,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'manual',
+        'recovery_path': 'Verify holdings/positions; bot will retry once available quantity is corrected.',
+    },
+    BrokerErrorCategory.RMS_REJECTION: {
+        'retry': True,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'exponential_backoff',
+        'recovery_path': 'Review RMS/margin reason in Kite; bot will retry transient rejections after a short backoff.',
+    },
+    BrokerErrorCategory.ORDER_FROZEN: {
+        'retry': True,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'exponential_backoff',
+        'recovery_path': 'Order frozen by exchange; bot will retry after a short backoff.',
+    },
+    BrokerErrorCategory.OTHER: {
+        'retry': True,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'every_cycle',
+        'recovery_path': 'Unknown broker error; bot will retry next cycle.',
+    },
+}
+
+
+def get_error_policy(category_value: str) -> Dict:
+    """Return the policy for a given broker error category value (string)."""
+    try:
+        cat = BrokerErrorCategory(category_value)
+    except ValueError:
+        cat = BrokerErrorCategory.OTHER
+    return BROKER_ERROR_POLICY.get(cat, BROKER_ERROR_POLICY[BrokerErrorCategory.OTHER])
 
 
 class BrokerIntegration:
@@ -21,39 +124,89 @@ class BrokerIntegration:
     def __init__(self):
         self.kite = None
         self.paper_trading = config.PAPER_TRADING
+        self.live_ready = False
         self.token_manager = None
         self.paper_portfolio = {
             'cash': config.TRADING_AMOUNT,
             'positions': {},
             'orders': []
         }
-        
-        if not self.paper_trading:
-            self.token_manager = TokenManager()
-            self._init_kite_connect()
+        self.startup_timestamp = datetime.now().isoformat()
+
+        mode = 'PAPER' if self.paper_trading else 'LIVE'
+        error = None
+        try:
+            if not self.paper_trading:
+                self.token_manager = TokenManager()
+                self._init_kite_connect()
+                self._verify_static_ip()
+                self.live_ready = True
+                mode = 'LIVE'
+                logger.info(f"Broker initialized in LIVE mode at {self.startup_timestamp}")
+            else:
+                logger.info(f"Broker initialized in PAPER mode at {self.startup_timestamp}")
+            self._write_broker_status(mode, self.live_ready, None)
+        except Exception as e:
+            error = str(e)
+            self._write_broker_status('FAILED', False, error)
+            logger.error(f"Broker live initialization failed: {error}")
+            raise
     
     def _init_kite_connect(self):
-        """Initialize Kite Connect connection with token management"""
-        try:
-            from kiteconnect import KiteConnect
-            
-            # Try to initialize with existing token
+        """Initialize Kite Connect connection with token management (one-shot, no fallback)."""
+        from kiteconnect import KiteConnect
+        self.kite = self.token_manager.initialize_kite()
+        logger.info("Kite Connect initialized successfully with existing token")
+
+    def _verify_static_ip(self):
+        """Verify the current public IP matches the configured static/whitelisted IP."""
+        import urllib.request
+        import json as _json
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'static_ip_config.json'
+        )
+        if not os.path.exists(cfg_path):
+            logger.warning("Static IP config not found; skipping static IP verification")
+            return
+        with open(cfg_path) as f:
+            cfg = _json.load(f)
+        whitelisted = cfg.get('whitelisted_ip') or cfg.get('static_ip')
+        if not whitelisted:
+            logger.warning("No whitelisted_ip/static_ip in static_ip_config.json; skipping verification")
+            return
+        current_ip = None
+        for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                self.kite = self.token_manager.initialize_kite()
-                logger.info("Kite Connect initialized successfully with existing token")
-            except ValueError as e:
-                # Token expired, need request token
-                logger.warning(f"Token expired: {e}")
-                logger.info("Please run token refresh: python get_kite_token.py")
-                logger.warning("Falling back to paper trading mode")
-                self.paper_trading = True
-        
-        except ImportError:
-            logger.warning("kiteconnect not installed, using paper trading")
-            self.paper_trading = True
+                current_ip = urllib.request.urlopen(url, timeout=5).read().decode().strip()
+                break
+            except Exception:
+                continue
+        if not current_ip:
+            raise RuntimeError("Could not determine current public IP for static IP verification")
+        if current_ip != whitelisted:
+            raise RuntimeError(
+                f"Current public IP {current_ip} does not match whitelisted IP {whitelisted}. "
+                "Update data/static_ip_config.json or Kite Developer Console before starting."
+            )
+        logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
+
+    def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
+        """Persist broker mode and startup status for the dashboard."""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            status_path = os.path.join(root, 'data', 'broker_status.json')
+            os.makedirs(os.path.dirname(status_path), exist_ok=True)
+            with open(status_path, 'w') as f:
+                json.dump({
+                    'mode': mode,
+                    'live_ready': live_ready,
+                    'startup_timestamp': getattr(self, 'startup_timestamp', datetime.now().isoformat()),
+                    'error': error,
+                    'updated_at': datetime.now().isoformat()
+                }, f)
         except Exception as e:
-            logger.error(f"Error initializing Kite Connect: {e}")
-            self.paper_trading = True
+            logger.warning(f"Could not write broker_status.json: {e}")
     
     def place_order(self, signal: Dict) -> Dict:
         """
@@ -112,7 +265,9 @@ class BrokerIntegration:
                 return {
                     'success': False,
                     'error': 'No position to sell',
-                    'order_id': None
+                    'order_id': None,
+                    'error_category': BrokerErrorCategory.INSUFFICIENT_QUANTITY.value,
+                    'retry': False,
                 }
             position = self.paper_portfolio['positions'][symbol]
             available = position['quantity']
@@ -123,7 +278,9 @@ class BrokerIntegration:
                 return {
                     'success': False,
                     'error': f'Insufficient quantity: requested {quantity}, available {available}',
-                    'order_id': None
+                    'order_id': None,
+                    'error_category': BrokerErrorCategory.INSUFFICIENT_QUANTITY.value,
+                    'retry': False,
                 }
             self.paper_portfolio['cash'] += price * quantity
             position['quantity'] -= quantity
@@ -150,9 +307,48 @@ class BrokerIntegration:
             'success': True,
             'order_id': order_id,
             'status': 'COMPLETED',
-            'paper_trading': True
+            'paper_trading': True,
+            'error_category': BrokerErrorCategory.SUCCESS.value,
+            'retry': False,
         }
     
+    @staticmethod
+    def _classify_error(error_message: str) -> BrokerErrorCategory:
+        """Classify a Kite error message into a structured error category."""
+        if not error_message:
+            return BrokerErrorCategory.OTHER
+        err = error_message.lower()
+        if any(k in err for k in ('cdsl', 'tpin', 'authoris', 'authorize', 'depository')):
+            return BrokerErrorCategory.CDSL_AUTH
+        if any(k in err for k in ('insufficient quantity', 'insufficient qty', 'quantity not enough')):
+            return BrokerErrorCategory.INSUFFICIENT_QUANTITY
+        if any(k in err for k in ('exchange closed', 'market closed', 'not a trading day', 'holiday')):
+            return BrokerErrorCategory.EXCHANGE_CLOSED
+        if any(k in err for k in ('rms', 'risk management', 'margin', 'exposure', 'limit exceeded')):
+            return BrokerErrorCategory.RMS_REJECTION
+        if any(k in err for k in ('network', 'timeout', 'connection', 'unreachable', 'timed out')):
+            return BrokerErrorCategory.NETWORK_FAILURE
+        if any(k in err for k in ('rate limit', 'too many requests', 'throttled')):
+            return BrokerErrorCategory.RATE_LIMIT
+        if any(k in err for k in ('invalid token', 'token expired', 'unauthorized', 'authentication')):
+            return BrokerErrorCategory.INVALID_TOKEN
+        if any(k in err for k in ('frozen', 'freeze', 'blocked', 'disclosed')):
+            return BrokerErrorCategory.ORDER_FROZEN
+        if 'ip' in err and 'not allowed' in err:
+            return BrokerErrorCategory.IP_WHITELIST
+        return BrokerErrorCategory.OTHER
+
+    def _get_tick_size(self, symbol: str) -> float:
+        """Return NSE tick size for a symbol, defaulting to 0.05."""
+        if not _TICK_SIZE_CACHE and self.kite:
+            try:
+                instruments = self.kite.instruments("NSE")
+                for inst in instruments:
+                    _TICK_SIZE_CACHE[inst['tradingsymbol']] = inst.get('tick_size', 0.05)
+            except Exception as e:
+                logger.warning(f"Could not load NSE tick sizes: {e}")
+        return _TICK_SIZE_CACHE.get(symbol, 0.05)
+
     def _place_real_order(self, signal: Dict) -> Dict:
         """
         Place a real order via Kite Connect
@@ -179,13 +375,18 @@ class BrokerIntegration:
             product = self.kite.PRODUCT_CNC if config.TRADING_MODE == "swing" else self.kite.PRODUCT_MIS
             validity = self.kite.VALIDITY_DAY
             
+            # Use the correct tick size for this symbol
+            tick_size = self._get_tick_size(kite_symbol)
+            if tick_size <= 0:
+                tick_size = 0.05
+            
             # Kite blocks market orders without market protection via API.
             # Use limit orders with a small buffer to act like market orders.
-            # Round to nearest tick size (0.05 for most NSE stocks).
             if action == 'BUY':
-                limit_price = round(price * 1.01 / 0.05) * 0.05  # 1% above current price
+                raw_price = price * 1.01  # 1% above current price
             else:
-                limit_price = round(price * 0.99 / 0.05) * 0.05  # 1% below current price
+                raw_price = price * 0.99  # 1% below current price
+            limit_price = round(raw_price / tick_size) * tick_size
             limit_price = round(limit_price, 2)
             
             order_id = self.kite.place_order(
@@ -206,7 +407,9 @@ class BrokerIntegration:
                 'success': True,
                 'order_id': order_id,
                 'status': 'PENDING',
-                'paper_trading': False
+                'paper_trading': False,
+                'error_category': BrokerErrorCategory.SUCCESS.value,
+                'retry': False,
             }
         
         except Exception as e:
@@ -225,23 +428,17 @@ class BrokerIntegration:
                 )
                 # Save current IP so startup script can check
                 self._save_ip(current_ip)
-            # Detect CDSL TPIN authorisation required
-            cdsl_auth = any(k in err.lower() for k in ('cdsl', 'tpin', 'authoris', 'authorize', 'depository'))
-            if cdsl_auth:
-                logger.error(
-                    f"\n{'='*60}\n"
-                    f"  🔐 CDSL TPIN AUTHORISATION REQUIRED\n"
-                    f"  Zerodha requires you to authorise your demat holdings\n"
-                    f"  before the bot can sell them.\n"
-                    f"  ACTION: Open Kite → Portfolio → Holdings → Authorise\n"
-                    f"  URL   : https://kite.zerodha.com/holdings\n"
-                    f"{'='*60}"
-                )
+            category = self._classify_error(err)
+            policy = get_error_policy(category.value)
             return {
                 'success': False,
                 'error': err,
                 'order_id': None,
-                'cdsl_auth_required': cdsl_auth,
+                'error_category': category.value,
+                'retry': policy['retry'],
+                'continue_trading': policy['continue_trading'],
+                'retry_policy': policy['retry_policy'],
+                'recovery_path': policy['recovery_path'],
             }
     
     def _get_public_ip(self) -> str:
@@ -359,7 +556,10 @@ class BrokerIntegration:
         else:
             try:
                 holdings = self.kite.holdings()
-                total_value = sum(h['quantity'] * h['last_price'] for h in holdings)
+                total_value = sum(
+                    (h.get('quantity', 0) + h.get('t1_quantity', 0)) * h.get('last_price', 0)
+                    for h in holdings
+                )
                 # Read available cash from Kite margins
                 try:
                     margins = self.kite.margins()
@@ -368,6 +568,27 @@ class BrokerIntegration:
                     available_cash = avail.get("live_balance") or avail.get("cash") or eq.get("net", 0)
                 except Exception:
                     available_cash = 0
+
+                # Swing/CNC positions bought today are NOT in kite.holdings() until
+                # T+1 settlement. Include any open "net" positions that are not
+                # already counted in the holdings list to prevent a false drawdown.
+                try:
+                    positions = self.kite.positions()
+                    held_symbols = {
+                        (h.get('tradingsymbol'), h.get('exchange'))
+                        for h in holdings
+                    }
+                    for p in positions.get('net', []):
+                        qty = p.get('quantity', 0)
+                        if qty <= 0:
+                            continue
+                        key = (p.get('tradingsymbol'), p.get('exchange'))
+                        if key in held_symbols:
+                            continue
+                        total_value += qty * p.get('last_price', 0)
+                except Exception:
+                    pass
+
                 return {
                     'cash': available_cash,
                     'positions': holdings,

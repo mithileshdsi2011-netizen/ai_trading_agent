@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.risk_manager import RiskManager, Position, PositionStatus
-from src.config import config
+from config import config
 
 
 class TestRiskManager:

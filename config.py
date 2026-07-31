@@ -81,6 +81,7 @@ class Config:
     # ── Capital management ────────────────────────────────────────────────────
     MAX_CAPITAL_USAGE:      float = float(_require("MAX_CAPITAL_USAGE",      "0.87"))  # 87%
     REENTRY_COOLDOWN_HOURS: float = float(_require("REENTRY_COOLDOWN_HOURS", "4.0"))
+    MIN_HOLD_HOURS:         float = float(_require("MIN_HOLD_HOURS",         "0.0"))
 
     # ── Trailing stop loss ────────────────────────────────────────────────────
     TRAILING_STOP_ENABLED:        bool  = _require("TRAILING_STOP_ENABLED",        "True").lower() == "true"
@@ -89,6 +90,7 @@ class Config:
 
     # ── Partial profit & conditional loss-exit thresholds ─────────────────────
     PARTIAL_PROFIT_THRESHOLD:       float = float(_require("PARTIAL_PROFIT_THRESHOLD",       "0.05"))  # 5%
+    PARTIAL_PROFIT_ATR_MULTIPLIER:  float = float(_require("PARTIAL_PROFIT_ATR_MULTIPLIER",  "1.5"))  # ATR multiple for adaptive partial target
     PARTIAL_PROFIT_FRACTION:        float = float(_require("PARTIAL_PROFIT_FRACTION",        "0.5"))   # 50%
     SMALL_LOSS_PCT:                 float = float(_require("SMALL_LOSS_PCT",                 "0.02"))  # 2%
     RECOVERY_PROBABILITY_HOLD:      float = float(_require("RECOVERY_PROBABILITY_HOLD",      "0.75"))  # 75%
@@ -97,9 +99,31 @@ class Config:
     SUPPORT_DISTANCE_THRESHOLD:     float = float(_require("SUPPORT_DISTANCE_THRESHOLD",     "0.05"))  # within 5% of support
     AI_DECLINE_CONFIDENCE_THRESHOLD: float = float(_require("AI_DECLINE_CONFIDENCE_THRESHOLD", "0.90"))  # 90%
 
+    # ── Smart exit thresholds ─────────────────────────────────────────────────
+    SMARTEXIT_MIN_PROFIT_PCT:            float = float(_require("SMARTEXIT_MIN_PROFIT_PCT",            "0.015"))  # 1.5% minimum unrealised profit
+    SMARTEXIT_VOLUME_CONFIRMATION_RATIO: float = float(_require("SMARTEXIT_VOLUME_CONFIRMATION_RATIO", "0.80"))   # volume >= 80% of 20d avg for bearish candle / MACD
+
     # ── Risk limits ───────────────────────────────────────────────────────────
     DAILY_MAX_LOSS_PCT:     float = float(_require("DAILY_MAX_LOSS_PCT",     "0.05"))  # 5%
+    MAX_PORTFOLIO_RISK:     float = float(_require("MAX_PORTFOLIO_RISK",     "2000.0")) # total open (unrealised) risk in ₹
+    MAX_SECTOR_POSITIONS:   int   = int(_require("MAX_SECTOR_POSITIONS",     "2"))     # max same-sector positions
     MAX_CONSECUTIVE_LOSSES: int   = int  (_require("MAX_CONSECUTIVE_LOSSES", "3"))     # halt after 3 straight losses
+
+    # ── Confidence regime thresholds ──────────────────────────────────────────
+    MIN_CONFIDENCE_BULL:     float = float(_require("MIN_CONFIDENCE_BULL",     "0.55"))  # 55% in bull
+    MIN_CONFIDENCE_BEAR:     float = float(_require("MIN_CONFIDENCE_BEAR",     "0.70"))  # 70% in bear
+    MIN_CONFIDENCE_SIDEWAYS: float = float(_require("MIN_CONFIDENCE_SIDEWAYS", "0.55"))  # 55% in sideways
+
+    # ── Regime-based buy guards ───────────────────────────────────────────────
+    SIDEWAYS_BUY_SCORE_MIN:          int   = int  (_require("SIDEWAYS_BUY_SCORE_MIN",          "58"))     # min TradeScorer total for sideways (do not add extra gate)
+    SIDEWAYS_BUY_OVERALL_SCORE_MIN:  float = float(_require("SIDEWAYS_BUY_OVERALL_SCORE_MIN",  "0.30"))   # min AI overall score for sideways
+    SIDEWAYS_SIZE_FACTOR:            float = float(_require("SIDEWAYS_SIZE_FACTOR",            "0.75"))   # reduce size in sideways
+    VOLATILE_BLOCK_BUYS:    bool  = _require("VOLATILE_BLOCK_BUYS",    "True").lower() == "true"  # no new buys in volatile
+
+    # ── Confidence-based capital allocation tiers ─────────────────────────────
+    CONFIDENCE_ALLOCATION_95: float = float(_require("CONFIDENCE_ALLOCATION_95", "20000.0"))  # 95%+ confidence budget
+    CONFIDENCE_ALLOCATION_85: float = float(_require("CONFIDENCE_ALLOCATION_85", "15000.0"))  # 85%+ confidence budget
+    CONFIDENCE_ALLOCATION_70: float = float(_require("CONFIDENCE_ALLOCATION_70", "10000.0"))  # 70%+ confidence budget
 
     # ── Market regime ─────────────────────────────────────────────────────────
     MARKET_REGIME_ENABLED: bool = _require("MARKET_REGIME_ENABLED", "True").lower() == "true"

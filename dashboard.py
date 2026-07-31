@@ -103,6 +103,270 @@ def _kite_login_url() -> str:
     return f"https://kite.trade/connect/login?api_key={api_key}&v=3"
 
 
+def _safe_dt(value):
+    """Parse a journal date/timestamp into a naive datetime."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        s = str(value)
+        if 'T' in s:
+            return datetime.fromisoformat(s.replace('Z', '+00:00')).replace(tzinfo=None)
+        return datetime.strptime(s[:10], '%Y-%m-%d')
+    except Exception:
+        return None
+
+
+def _duration_text(start_dt, end_dt):
+    """Return a human-readable holding duration (e.g. '1d 2h 15m')."""
+    if not start_dt or not end_dt:
+        return ''
+    delta = end_dt - start_dt
+    if delta.total_seconds() < 0:
+        return ''
+    days = delta.days
+    hours, rem = divmod(delta.seconds, 3600)
+    minutes = rem // 60
+    parts = []
+    if days:
+        parts.append(f'{days}d')
+    if hours:
+        parts.append(f'{hours}h')
+    if minutes:
+        parts.append(f'{minutes}m')
+    return ' '.join(parts) if parts else '0m'
+
+
+def _build_trade_cards(journal_entries, positions, now_naive):
+    """Pair BUY journal entries with their exits into professional trade cards.
+    Also include any current open broker positions not already in the journal."""
+    cards = []
+    for e in journal_entries:
+        if e.get('action') != 'BUY':
+            continue
+        entry_dt = _safe_dt(e.get('entry_date') or e.get('timestamp'))
+        exit_dt = _safe_dt(e.get('exit_date'))
+        if e.get('status') == 'OPEN':
+            status_label = 'Open'
+            exit_dt_for_duration = now_naive
+        elif e.get('status') == 'CLOSED':
+            status_label = 'Completed'
+            if exit_dt and entry_dt:
+                # exit_date is stored as date-only; inherit the entry time for a sensible duration/display
+                exit_dt_for_duration = datetime.combine(exit_dt.date(), entry_dt.time())
+            else:
+                exit_dt_for_duration = exit_dt or now_naive
+        else:
+            status_label = str(e.get('status', 'Open'))
+            exit_dt_for_duration = exit_dt or now_naive
+
+        qty = int(e.get('quantity', 0) or 0)
+        entry_price = float(e.get('entry_price', 0) or 0)
+        exit_price = float(e.get('exit_price', 0)) if e.get('exit_price') is not None else None
+        gross = e.get('gross_pnl')
+        charges = e.get('charges', 0) or 0
+        net = e.get('net_pnl')
+        invested = round(entry_price * qty, 2) if qty and entry_price else 0.0
+
+        return_pct = 0.0
+        if invested and net is not None and invested > 0:
+            return_pct = (float(net) / invested) * 100
+
+        cards.append({
+            'id': e.get('id'),
+            'symbol': e.get('symbol', ''),
+            'entry_date': entry_dt.isoformat() if entry_dt else e.get('timestamp'),
+            'exit_date': exit_dt_for_duration.isoformat() if exit_dt_for_duration else None,
+            'entry_price': round(entry_price, 2),
+            'exit_price': round(exit_price, 2) if exit_price is not None else None,
+            'quantity': qty,
+            'invested': invested,
+            'gross_pnl': round(float(gross), 2) if gross is not None else None,
+            'charges': round(float(charges), 2),
+            'net_pnl': round(float(net), 2) if net is not None else None,
+            'exit_reason': e.get('exit_reason') or '',
+            'trade_score': e.get('trade_score'),
+            'confidence': e.get('confidence'),
+            'sector': e.get('sector') or 'Unknown',
+            'risk_reward_ratio': e.get('risk_reward_ratio'),
+            'market_regime': e.get('market_regime'),
+            'holding_time': _duration_text(entry_dt, exit_dt_for_duration) if entry_dt else '',
+            'status': status_label,
+            'return_pct': round(return_pct, 2),
+            'buy_reason': e.get('buy_reason') or '',
+        })
+
+    # Pair SELL journal entries with BUY cards and add orphan SELL-only trades
+    try:
+        buy_lookup = {}
+        for c in cards:
+            if c.get('status') == 'Open':
+                continue
+            ed = _safe_dt(c.get('entry_date'))
+            if ed:
+                buy_lookup[(c['symbol'], ed.date().isoformat())] = c
+
+        # Most recent exits first so the latest SELL is paired with the BUY
+        sell_entries = sorted(
+            [x for x in journal_entries if x.get('action') == 'SELL' and x.get('status') == 'CLOSED'],
+            key=lambda x: str(x.get('exit_date', '')),
+            reverse=True,
+        )
+        for e in sell_entries:
+            sym = e.get('symbol', '')
+            entry_dt = _safe_dt(e.get('entry_date') or e.get('timestamp'))
+            if not entry_dt:
+                continue
+            ed_key = (sym, entry_dt.date().isoformat())
+            if ed_key in buy_lookup:
+                c = buy_lookup[ed_key]
+                if c.get('_sell_merged'):
+                    continue
+                exit_price = float(e.get('exit_price', 0)) if e.get('exit_price') is not None else None
+                if exit_price is None:
+                    continue
+                c['_sell_merged'] = True
+                entry_price = float(e.get('entry_price', 0) or 0)
+                if entry_price > 0:
+                    c['entry_price'] = round(entry_price, 2)
+                    c['invested'] = round(entry_price * c.get('quantity', 0), 2)
+                c['exit_price'] = round(exit_price, 2)
+                c['exit_date'] = e.get('exit_date')
+                c['gross_pnl'] = round(float(e.get('gross_pnl', 0) or 0), 2) if e.get('gross_pnl') is not None else c.get('gross_pnl')
+                c['charges'] = round(float(e.get('charges', 0) or 0), 2)
+                c['net_pnl'] = round(float(e.get('net_pnl', 0) or 0), 2) if e.get('net_pnl') is not None else c.get('net_pnl')
+                c['exit_reason'] = e.get('exit_reason') or c.get('exit_reason', '')
+                if c.get('invested') and c.get('net_pnl') is not None:
+                    c['return_pct'] = round((c['net_pnl'] / c['invested']) * 100, 2)
+                if c.get('entry_date') or c.get('exit_date'):
+                    c['holding_time'] = _duration_text(_safe_dt(c.get('entry_date')), _safe_dt(c.get('exit_date')))
+            else:
+                # Orphan SELL without a BUY record (e.g., a manually-held position sold)
+                qty = int(e.get('quantity', 0) or 0)
+                entry_price = float(e.get('entry_price', 0) or 0)
+                exit_price = float(e.get('exit_price', 0)) if e.get('exit_price') is not None else None
+                gross = e.get('gross_pnl')
+                charges = e.get('charges', 0) or 0
+                net = e.get('net_pnl')
+                invested = round(entry_price * qty, 2) if qty and entry_price else 0.0
+                return_pct = 0.0
+                if invested and net is not None and invested > 0:
+                    return_pct = (float(net) / invested) * 100
+                new_card = {
+                    'id': e.get('id'),
+                    'symbol': e.get('symbol', ''),
+                    'entry_date': entry_dt.isoformat(),
+                    'exit_date': e.get('exit_date'),
+                    'entry_price': round(entry_price, 2),
+                    'exit_price': round(exit_price, 2) if exit_price is not None else None,
+                    'quantity': qty,
+                    'invested': invested,
+                    'gross_pnl': round(float(gross), 2) if gross is not None else None,
+                    'charges': round(float(charges), 2),
+                    'net_pnl': round(float(net), 2) if net is not None else None,
+                    'exit_reason': e.get('exit_reason') or '',
+                    'trade_score': e.get('trade_score'),
+                    'confidence': e.get('confidence'),
+                    'sector': e.get('sector') or 'Unknown',
+                    'risk_reward_ratio': e.get('risk_reward_ratio'),
+                    'market_regime': e.get('market_regime'),
+                    'holding_time': _duration_text(entry_dt, _safe_dt(e.get('exit_date'))) if entry_dt else '',
+                    'status': 'Completed',
+                    'return_pct': round(return_pct, 2),
+                    'buy_reason': e.get('buy_reason') or '',
+                    'source': 'Kite',
+                }
+                cards.append(new_card)
+                buy_lookup[ed_key] = new_card
+    except Exception as _sell_err:
+        logger.warning(f"Could not pair SELL journal entries into trade cards: {_sell_err}")
+
+    # Add live open positions from Kite/holdings that are not already represented by an open journal card
+    try:
+        open_symbols = {c['symbol'] for c in cards if c.get('status') == 'Open'}
+        for p in (positions or []):
+            sym = p.get('tradingsymbol') or p.get('symbol')
+            qty = int(p.get('quantity', 0) or 0)
+            if p.get('status') == 'CLOSED':
+                continue
+            if not sym or qty <= 0 or sym in open_symbols:
+                continue
+            entry_dt = _safe_dt(p.get('entry_date') or p.get('entry_time') or p.get('buy_datetime'))
+            buy_price = float(p.get('average_price', 0) or 0) or float(p.get('first_entry_price', 0) or 0)
+            cards.append({
+                'id': None,
+                'symbol': sym,
+                'entry_date': entry_dt.isoformat() if entry_dt else now_naive.isoformat(),
+                'exit_date': None,
+                'entry_price': round(buy_price, 2),
+                'exit_price': None,
+                'quantity': qty,
+                'invested': round(buy_price * qty, 2),
+                'gross_pnl': None,
+                'charges': 0,
+                'net_pnl': None,
+                'exit_reason': '',
+                'trade_score': p.get('trade_score'),
+                'confidence': p.get('confidence'),
+                'sector': p.get('sector') or 'Unknown',
+                'risk_reward_ratio': p.get('risk_reward_ratio'),
+                'market_regime': p.get('market_regime'),
+                'holding_time': _duration_text(entry_dt, now_naive) if entry_dt else '',
+                'status': 'Open',
+                'return_pct': 0.0,
+                'buy_reason': '',
+                'source': 'Holding' if p.get('_source') == 'holding' else 'Kite',
+            })
+    except Exception as _pos_err:
+        logger.warning(f"Could not merge open positions into trade cards: {_pos_err}")
+
+    return sorted(cards, key=lambda x: x['entry_date'] or '', reverse=True)
+
+
+def _build_trade_events(trade_cards):
+    """Flatten trade cards into BUY/SELL event rows for the history table."""
+    events = []
+    for c in trade_cards:
+        events.append({
+            'datetime': c.get('entry_date'),
+            'symbol': c['symbol'],
+            'type': 'BUY',
+            'quantity': c.get('quantity', 0),
+            'price': c.get('entry_price'),
+            'buy_price': c.get('entry_price'),
+            'sell_price': None,
+            'total_value': c.get('invested', 0),
+            'pnl': None,
+            'source': c.get('source') or 'Bot',
+            'trade_id': c.get('id'),
+        })
+        if c.get('exit_price') is not None and c.get('exit_date'):
+            entry_dt_ev = _safe_dt(c.get('entry_date'))
+            exit_dt_ev = _safe_dt(c.get('exit_date'))
+            if entry_dt_ev and exit_dt_ev:
+                # Exit was stored as date-only; combine with entry time for a realistic SELL timestamp
+                sell_dt = datetime.combine(exit_dt_ev.date(), entry_dt_ev.time())
+                sell_dt_iso = sell_dt.isoformat()
+            else:
+                sell_dt_iso = c.get('exit_date')
+            total_sell = round(c['exit_price'] * c['quantity'], 2) if c.get('exit_price') and c.get('quantity') else 0.0
+            events.append({
+                'datetime': sell_dt_iso,
+                'symbol': c['symbol'],
+                'type': 'SELL',
+                'quantity': c.get('quantity', 0),
+                'price': c.get('exit_price'),
+                'buy_price': c.get('entry_price'),
+                'sell_price': c.get('exit_price'),
+                'total_value': total_sell,
+                'pnl': c.get('net_pnl'),
+                'source': 'Bot',
+                'trade_id': c.get('id'),
+            })
+    return sorted(events, key=lambda x: x['datetime'] or '', reverse=True)
+
+
 def _heartbeat_loop():
     """Background thread: update system metrics every 60 s."""
     import pytz as _pytz
@@ -652,40 +916,77 @@ def _generate_morning_report():
 
             raw_sigs = sg.generate_signals_for_watchlist(priority_syms)
 
-            # Sector-diversified top picks (max 3 per sector)
+            # Apply live trading filters consistent with background scan
             sec_count: dict = {}
             top_picks = []
+            watchlist = []
+            avoid = []
             for sig in raw_sigs:
-                if sig.get("action") not in ("BUY", "HOLD"):
-                    continue
                 sym  = sig.get("symbol", "")
                 sec  = _SMAP.get(sym, "Other")
-                if sec_count.get(sec, 0) >= 3:
-                    continue
+                act  = sig.get("action", "")
                 price = float(sig.get("current_price") or 0)
                 tgt   = float(sig.get("target") or 0)
                 sl    = float(sig.get("stop_loss") or 0)
                 exp_ret = round((tgt - price) / price * 100, 1) if price and tgt else 0
-                top_picks.append({
-                    "rank":        len(top_picks) + 1,
-                    "symbol":      sym,
-                    "score":       round(sig.get("overall_score", 0), 1),
-                    "confidence":  round((sig.get("confidence", 0)) * 100),
-                    "sector":      sec,
-                    "action":      sig.get("action"),
-                    "entry":       price,
-                    "target":      tgt,
-                    "stop_loss":   sl,
-                    "rr":          round(sig.get("risk_reward_ratio", 0), 2),
-                    "exp_return":  exp_ret,
-                    "trend":       sig.get("trend", ""),
-                    "reason":      (sig.get("reasoning", "") or "").split(".")[0][:80],
-                })
+
+                # Normalize score to 0-100 (same as dashboard background scan)
+                raw_score = float(sig.get('overall_score') or sig.get('trade_score') or 0)
+                score = round(raw_score * 100, 1) if raw_score <= 1.0 else round(raw_score, 1)
+                conf = float(sig.get('confidence', 0))
+                rr = float(sig.get('risk_reward_ratio', 0))
+                regime = sig.get('market_regime', '')
+
+                def _pick(reason=''):
+                    item = {
+                        "rank":        len(top_picks) + 1,
+                        "symbol":      sym,
+                        "score":       score,
+                        "confidence":  round(conf * 100),
+                        "sector":      sec,
+                        "action":      act,
+                        "entry":       price,
+                        "target":      tgt,
+                        "stop_loss":   sl,
+                        "rr":          round(rr, 2),
+                        "exp_return":  exp_ret,
+                        "trend":       sig.get("trend", ""),
+                        "reason":      (sig.get("reasoning", "") or "").split(".")[0][:80],
+                        "filter_note": reason,
+                    }
+                    return item
+
+                if act != 'BUY':
+                    watchlist.append(_pick(act or 'Not a BUY signal'))
+                    continue
+                if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
+                    watchlist.append(_pick('Volatile market regime'))
+                    continue
+                if exp_ret <= 0:
+                    avoid.append(_pick(f'Negative expected return ({exp_ret}%)'))
+                    continue
+                if score < _SCORE_SKIP_THRESHOLD:
+                    watchlist.append(_pick(f'Score {score:.0f} below {_SCORE_SKIP_THRESHOLD}'))
+                    continue
+                if conf < config.MIN_CONFIDENCE:
+                    watchlist.append(_pick(f'Confidence {conf:.0%} below {config.MIN_CONFIDENCE:.0%}'))
+                    continue
+                if rr < config.MIN_RISK_REWARD:
+                    watchlist.append(_pick(f'R:R {rr:.2f} below {config.MIN_RISK_REWARD}'))
+                    continue
+
+                # Tradeable pick — keep sector cap
+                if sec_count.get(sec, 0) >= 3:
+                    continue
+                top_picks.append(_pick())
                 sec_count[sec] = sec_count.get(sec, 0) + 1
+
                 if len(top_picks) >= 20:
                     break
 
             report["ai_top_picks"]      = top_picks
+            report["ai_watchlist"]     = watchlist[:20]
+            report["ai_avoid"]         = avoid[:20]
             report["morning_scan_syms"] = [p["symbol"] for p in top_picks]
         except Exception as e:
             logger.warning(f"Morning report: AI top picks error: {e}")
@@ -722,7 +1023,18 @@ def _generate_morning_report():
                         })
                 except Exception:
                     pass
-            report["stocks_to_avoid"] = avoid_list[:6]
+
+            # Add AI-flagged negative-expected-return / non-BUY signals
+            for p in report.get("ai_avoid", []):
+                avoid_list.append({
+                    "symbol":     p.get("symbol", ""),
+                    "price":      p.get("entry", 0),
+                    "change_pct": p.get("exp_return", 0),
+                    "reason":     p.get("filter_note", "AI filter"),
+                    "sector":     p.get("sector", "Other"),
+                })
+
+            report["stocks_to_avoid"] = avoid_list[:8]
         except Exception as e:
             logger.warning(f"Morning report: avoid list error: {e}")
 
@@ -867,6 +1179,7 @@ HTML = """<!DOCTYPE html>
 <title>AI Swing Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="/static/chart.umd.min.js?v=2"></script>
+<script src="/static/ai_signals.js?v=2"></script>
 <script>
 // Report JS errors to server for debugging
 window.onerror=function(msg, url, line, col, err){
@@ -1011,6 +1324,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
   <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
   <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
+  <button class="tab-btn" onclick="switchTab('explain',this)">🔍 AI Explain</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
@@ -1116,11 +1430,11 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Section 7: AI Top Picks -->
+  <!-- Section 7: AI Top Picks (tradeable) -->
   <div class="card mb-4" style="border:1px solid #22c55e44">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div style="font-size:14px;font-weight:800;color:#22c55e">🎯 AI Top Picks for Today</div>
-      <div style="font-size:11px;color:#4b5563">Sector-diversified · max 3 per sector</div>
+      <div style="font-size:14px;font-weight:800;color:#22c55e">🎯 AI Top Picks — Tradeable Today</div>
+      <div style="font-size:11px;color:#4b5563">Pass live filters · 0–100 AI score · max 3 per sector</div>
     </div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
@@ -1138,6 +1452,30 @@ tr:last-child td{border:none}
         <th style="font-size:11px;text-align:left">Reason</th>
       </tr></thead>
       <tbody id="mr-picks"><tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">—</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Section 7b: AI Watchlist (being monitored) -->
+  <div class="card mb-4" style="border:1px solid #f59e0b33">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-size:14px;font-weight:800;color:#f59e0b">👁️ Stocks Being Monitored (Watchlist)</div>
+      <div style="font-size:11px;color:#4b5563">Near entry but not yet tradeable</div>
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="font-size:11px;text-align:left">Symbol</th>
+        <th style="font-size:11px;text-align:center">Score</th>
+        <th style="font-size:11px;text-align:center">Conf.</th>
+        <th style="font-size:11px;text-align:left">Sector</th>
+        <th style="font-size:11px;text-align:right">Entry</th>
+        <th style="font-size:11px;text-align:right">Target</th>
+        <th style="font-size:11px;text-align:center">R:R</th>
+        <th style="font-size:11px;text-align:center">Exp.Ret</th>
+        <th style="font-size:11px;text-align:left">Why not tradeable</th>
+      </tr></thead>
+      <tbody id="mr-watchlist"><tr><td colspan="9" style="color:#4b5563;padding:20px;text-align:center">—</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1348,7 +1686,7 @@ tr:last-child td{border:none}
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
     <div class="card"><div class="stat-label">Portfolio Value</div><div class="stat-value" id="p-account-balance">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">Cash + Holdings</div></div>
     <div class="card"><div class="stat-label">Available Cash</div><div class="stat-value green" id="p-cash">₹—</div></div>
-    <div class="card"><div class="stat-label">Margin Blocked</div><div class="stat-value red" id="p-margin">₹—</div></div>
+    <div class="card"><div class="stat-label">Margin Used</div><div class="stat-value" id="p-margin">₹—</div></div>
     <div class="card"><div class="stat-label">Holdings Value</div><div class="stat-value" id="p-holdings-val">₹—</div><div style="font-size:11px;color:#4b5563;margin-top:4px">At market price</div></div>
   </div>
 
@@ -1436,16 +1774,19 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Trade History Table -->
+  <!-- Recent Activity -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📋 Trade History (All Time)</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">🕒 Recent Activity (Last 5 Trades)</div>
+      <a href="#" onclick="switchTab('history', this)" style="font-size:11px;color:#60a5fa">View full history →</a>
+    </div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
         <th style="text-align:left">Date</th><th style="text-align:left">Symbol</th>
         <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>P&amp;L</th><th>P&amp;L %</th>
       </tr></thead>
-      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history</td></tr></tbody>
+      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1501,9 +1842,10 @@ tr:last-child td{border:none}
         <th>▼ to SL</th>
         <th>Target</th>
         <th>▲ to Tgt</th>
+        <th>AI Score</th>
         <th>Re-entry</th>
       </tr></thead>
-      <tbody id="pos-table"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tbody id="pos-table"><tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1535,6 +1877,31 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Open Positions -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Open Positions</div>
+    <div style="font-size:11px;color:#6b7280;margin-bottom:12px">Live open trades from broker + journal. Completed trades are shown in the history table below.</div>
+    <div id="h-trade-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">
+      <div style="color:#4b5563;padding:20px;text-align:center">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Automatic Retry Queue -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Automatic Retry Queue</div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left">Symbol</th>
+        <th>Next Retry</th>
+        <th>Retry Count</th>
+        <th>Last Error</th>
+      </tr></thead>
+      <tbody id="h-retry-queue"><tr><td colspan="4" style="text-align:center;color:#4b5563;padding:20px">No queued retries</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
   <!-- All Time Buy/Sell History -->
   <div class="card mb-4">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -1550,9 +1917,9 @@ tr:last-child td{border:none}
       <thead><tr>
         <th style="text-align:left">Date &amp; Time</th>
         <th style="text-align:left">Stock</th>
-        <th>Type</th><th>Qty</th><th>Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
+        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
       </tr></thead>
-      <tbody id="h-history-table"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
+      <tbody id="h-history-table"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -1563,85 +1930,116 @@ tr:last-child td{border:none}
 <!-- ===== TAB: AI SIGNALS ===== -->
 <div id="tab-signals" class="tab-content">
 
-  <!-- Stats bar -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Universe Scanned</div><div class="stat-value blue" id="s-scanned">—</div></div>
-    <div class="card"><div class="stat-label">Actionable Buys</div><div class="stat-value green" id="s-buy-cnt">—</div></div>
-    <div class="card"><div class="stat-label">Rejected</div><div class="stat-value red" id="s-rejected-cnt">—</div></div>
-    <div class="card"><div class="stat-label">Market Regime</div><div class="stat-value yellow" id="s-regime">—</div></div>
-  </div>
+<style>
+#ais-summary-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:18px}
+.ais-card{background:linear-gradient(135deg,#111827 0%,#0f1724 100%);border-radius:14px;padding:16px;border:1px solid #1f2937;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.ais-card-title{color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.ais-card-value{font-size:24px;font-weight:800;line-height:1}
+.ais-section-title{color:#f9fafb;font-size:14px;font-weight:700;margin-bottom:12px}
+.ais-pipeline-row{display:flex;gap:10px;align-items:flex-end;justify-content:space-between}
+.ais-pipeline-step{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1}
+.ais-funnel-bar{width:100%;border-radius:6px 6px 0 0;min-height:8px}
+.ais-funnel-count{font-size:18px;font-weight:800}
+.ais-funnel-label{font-size:10px;color:#9ca3af;text-align:center}
+.ais-funnel-arrow{color:#4b5563;font-size:20px}
+.ais-closest-card{border-radius:10px;padding:12px;margin-bottom:10px}
+.ais-table-wrap{max-height:420px;overflow:auto;border-radius:8px;border:1px solid #1f2937}
+#ais-candidate-thead{position:sticky;top:0;background:#0f1724;z-index:1}
+#ais-candidate-thead th{padding:10px 8px;text-align:left;border-bottom:1px solid #1f2937;font-size:10px;color:#9ca3af}
+.ais-candidate-row{cursor:pointer}
+.ais-candidate-row:hover td{background:#1f2937}
+.ais-sort-btn{cursor:pointer;font-size:11px;margin-left:4px}
+.ais-score-pill{border-radius:6px;padding:3px 8px;font-size:12px;font-weight:700;border:1px solid}
+.ais-decision-pill{border-radius:99px;padding:3px 8px;font-size:11px;font-weight:700}
+.ais-stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.ais-stat-chip{background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center}
+.ais-stat-chip b{font-size:18px}
+.ais-toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.ais-toolbar input,.ais-toolbar select{background:#0f1724;border:1px solid #374151;color:#e2e8f0;border-radius:8px;padding:8px 12px;font-size:12px;outline:none}
+.ais-toolbar input:focus,.ais-toolbar select:focus{border-color:#60a5fa}
+.ais-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;padding:20px}
+.ais-modal-content{background:#111827;border:1px solid #1f2937;border-radius:16px;max-width:640px;width:100%;max-height:85vh;overflow-y:auto;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+.ais-detail-metric{background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:10px 12px}
+.ais-detail-label{font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.ais-detail-section{margin-top:12px;background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:12px}
+.bg-green-gradient{background:linear-gradient(135deg,#111827,#0f1724);border-color:#22c55e44}
+.bg-red-gradient{background:linear-gradient(135deg,#111827,#1f1010);border-color:#ef444444}
+.bg-yellow-gradient{background:linear-gradient(135deg,#111827,#1a160a);border-color:#eab30844}
+.bg-blue-gradient{background:linear-gradient(135deg,#111827,#0f1724);border-color:#3b82f644}
+</style>
 
-  <!-- Scan status banner -->
-  <div id="s-scan-banner" style="display:none;background:#1d4ed822;border:1px solid #3b82f644;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#93c5fd">
-    ⏳ Background scan running — results will update automatically in a few minutes…
-  </div>
+  <!-- Why No Trade Today? -->
+  <div id="ais-why-no-trade" class="card mb-4" style="display:none"></div>
 
-  <!-- ── TODAY'S CANDIDATES ─────────────────────────────────────── -->
+  <!-- Top summary cards -->
+  <div id="ais-summary-cards"></div>
+
+  <!-- Pipeline -->
   <div class="card mb-4">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div style="font-size:14px;font-weight:700;color:#f9fafb">🎯 Today's Candidates</div>
-      <div style="font-size:11px;color:#4b5563" id="s-candidate-count">—</div>
+    <div class="ais-section-title">Trading Pipeline Funnel</div>
+    <div id="ais-pipeline" class="ais-pipeline-row">Scanning…</div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+    <!-- Rejection analysis -->
+    <div class="card">
+      <div class="ais-section-title">Rejection Analysis</div>
+      <div id="ais-rejection-bars">—</div>
     </div>
-    <div style="font-size:11px;color:#4b5563;margin-bottom:14px">
-      Stocks that passed all filters: Score ≥ 70 · R:R ≥ 1.5 · Confidence ≥ threshold · Not already held
-    </div>
-    <div id="s-candidates-empty" style="display:none;text-align:center;padding:32px;color:#4b5563;font-size:13px">
-      No actionable candidates right now — scan running or market sideways
-    </div>
-    <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse" id="s-candidates-table-wrap">
-      <thead><tr>
-        <th style="text-align:center;width:36px;color:#4b5563;font-size:11px">#</th>
-        <th style="text-align:left">Symbol</th>
-        <th style="text-align:center">Score</th>
-        <th style="text-align:center">Conf.</th>
-        <th style="text-align:center">R:R</th>
-        <th style="text-align:left">Trend</th>
-        <th style="text-align:left">Sector</th>
-        <th style="text-align:right">Entry</th>
-        <th style="text-align:right">Target</th>
-        <th style="text-align:right">SL</th>
-        <th style="text-align:left">Why</th>
-      </tr></thead>
-      <tbody id="s-candidates-body">
-        <tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">Scanning market…</td></tr>
-      </tbody>
-    </table>
+
+    <!-- Closest BUY opportunities -->
+    <div class="card">
+      <div class="ais-section-title">Closest BUY Opportunities</div>
+      <div id="ais-closest">—</div>
     </div>
   </div>
 
-  <!-- ── ALL SCANNED SIGNALS ────────────────────────────────────── -->
+  <!-- Enhanced Candidate Table -->
   <div class="card mb-4">
-    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleRejected()">
-      <div style="font-size:14px;font-weight:700;color:#9ca3af">📋 All Scanned Signals <span id="s-rejected-badge" style="font-size:11px;font-weight:400;color:#4b5563"></span></div>
-      <div id="s-rejected-chevron" style="color:#4b5563;font-size:16px;transition:transform .2s">▲</div>
+    <div class="ais-section-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span>Enhanced Candidate Table</span>
+      <div class="ais-toolbar">
+        <input id="ais-search" type="text" placeholder="Search symbol…">
+        <select id="ais-filter-sector"><option value="">All Sectors</option></select>
+        <select id="ais-filter-decision"><option value="">All Decisions</option>
+          <option value="BUY">BUY</option>
+          <option value="SELL">SELL</option>
+          <option value="WATCH">Watch / Hold</option>
+          <option value="SKIP">Skip</option>
+        </select>
+      </div>
     </div>
-    <div id="s-rejected-body" style="margin-top:12px;display:block">
-      <div style="font-size:11px;color:#4b5563;margin-bottom:10px">All stocks scanned this cycle — shows score, confidence, and why the bot did or did not act.</div>
+    <div class="ais-table-wrap">
       <table style="width:100%;border-collapse:collapse">
-        <thead><tr>
-          <th style="text-align:left">Symbol</th>
-          <th style="text-align:left">Sector</th>
-          <th style="text-align:center">Score</th>
-          <th style="text-align:center">Conf.</th>
-          <th style="text-align:left">Bot Decision</th>
-        </tr></thead>
-        <tbody id="s-rejected-table">
-          <tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">—</td></tr>
-        </tbody>
+        <thead id="ais-candidate-thead"></thead>
+        <tbody id="ais-candidate-body"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- ── AI CONFIDENCE METERS (top candidates) ──────────────────── -->
-  <div class="card">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🧠 AI Confidence — Top Picks</div>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div id="s-conf-meters"></div>
-      <div style="grid-column:span 2">
-        <div style="font-size:12px;color:#4b5563;margin-bottom:8px">Top Opportunity Details</div>
-        <div id="s-top-detail" style="font-size:13px;color:#9ca3af">—</div>
+  <!-- Today's Statistics -->
+  <div class="card mb-4">
+    <div class="ais-section-title">Today's Statistics</div>
+    <div id="ais-today-stats" class="ais-stats-grid">—</div>
+  </div>
+
+  <!-- Missed Opportunities (optional, after market close) -->
+  <div class="card mb-4" id="ais-missed" style="display:none">
+    <div class="ais-section-title">Missed Opportunities</div>
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr><th>Symbol</th><th>Skip Reason</th><th>Highest Gain After Skip</th><th>Result</th></tr></thead>
+      <tbody id="ais-missed-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Detail modal -->
+  <div id="ais-detail-modal" class="ais-modal" onclick="if(event.target===this) closeSignalDetail()">
+    <div class="ais-modal-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="ais-section-title" style="margin:0">Signal Details</div>
+        <button onclick="closeSignalDetail()" style="background:transparent;border:none;color:#9ca3af;font-size:18px;cursor:pointer">✕</button>
       </div>
+      <div id="ais-detail-content"></div>
     </div>
   </div>
 
@@ -1660,7 +2058,7 @@ tr:last-child td{border:none}
   </div>
 
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Profit Factor</div><div class="stat-value green" id="a-profit-factor">—</div></div>
+    <div class="card"><div class="stat-label" title="Profit Factor = Gross Profit / Gross Loss. It can be &#x221e; (infinity) when there are no losing trades; high values mean wins are much larger than losses.">Profit Factor <span style="cursor:help;color:#94a3b8">&#9432;</span></div><div class="stat-value green" id="a-profit-factor">—</div></div>
     <div class="card"><div class="stat-label">Average Win</div><div class="stat-value green" id="a-avg-win">—</div></div>
     <div class="card"><div class="stat-label">Average Loss</div><div class="stat-value red" id="a-avg-loss">—</div></div>
     <div class="card"><div class="stat-label">Expectancy</div><div class="stat-value" id="a-expectancy">—</div></div>
@@ -1710,7 +2108,7 @@ tr:last-child td{border:none}
     <div class="card"><div class="stat-label">Total Trades</div><div class="stat-value blue" id="j-total">—</div></div>
     <div class="card"><div class="stat-label">Win Rate</div><div class="stat-value" id="j-winrate">—</div></div>
     <div class="card"><div class="stat-label">Net P&amp;L (All Time)</div><div class="stat-value" id="j-netpnl">—</div></div>
-    <div class="card"><div class="stat-label">Profit Factor</div><div class="stat-value green" id="j-pf">—</div></div>
+    <div class="card"><div class="stat-label" title="Profit Factor = Gross Profit / Gross Loss. It can be &#x221e; (infinity) when there are no losing trades; high values mean wins are much larger than losses.">Profit Factor <span style="cursor:help;color:#94a3b8">&#9432;</span></div><div class="stat-value green" id="j-pf">—</div></div>
   </div>
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
     <div class="card"><div class="stat-label">Avg Win</div><div class="stat-value green" id="j-avgwin">—</div></div>
@@ -1832,6 +2230,39 @@ tr:last-child td{border:none}
   </div>
 
 </div><!-- /tab-skipped -->
+
+
+<!-- ===== TAB: AI EXPLAINABILITY ===== -->
+<div id="tab-explain" class="tab-content">
+  <div class="card mb-4">
+    <h3 style="color:#f9fafb;font-size:16px;margin-bottom:12px">🔍 AI Explainability — Why the bot acted</h3>
+    <p style="color:#9ca3af;font-size:13px;margin:0">Latest BUY, SELL, HOLD and SKIP decisions with the reason recorded by the engine.</p>
+  </div>
+
+  <div class="card">
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#1f2937">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Time</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Action</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Reason</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Conf.</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">P&L</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Price</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Qty</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Sector</th>
+          </tr>
+        </thead>
+        <tbody id="explain-table">
+          <tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /tab-explain -->
 
 
 <!-- ===== TAB: ASK AI ===== -->
@@ -2301,6 +2732,25 @@ function rupee(v){return '₹'+parseFloat(v||0).toLocaleString('en-IN',{minimumF
 function pct(v,dec=2){let n=parseFloat(v||0);return (n>=0?'+':'')+n.toFixed(dec)+'%';}
 function pnlStr(v){let n=parseFloat(v||0);return (n>=0?'+':'-')+rupee(Math.abs(n));}
 function pnlClass(v){return parseFloat(v)>=0?'green':'red';}
+function _toDate(iso){if(!iso)return null;const d=new Date(iso);return isNaN(d)?null:d;}
+function fmtDateTime(iso,short){
+  const d=_toDate(iso); if(!d)return '—';
+  const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const day=days[d.getDay()];
+  const dd=String(d.getDate()).padStart(2,'0');
+  const mm=String(d.getMonth()+1).padStart(2,'0');
+  const yy=d.getFullYear();
+  const h=String(d.getHours()).padStart(2,'0');
+  const m=String(d.getMinutes()).padStart(2,'0');
+  return short?`${day} ${dd}-${mm}-${yy} ${h}:${m}`:`${day} ${dd}-${mm}-${yy}, ${h}:${m}`;
+}
+function fmtTime(iso){
+  const d=_toDate(iso); if(!d)return '—';
+  const h=String(d.getHours()).padStart(2,'0');
+  const m=String(d.getMinutes()).padStart(2,'0');
+  return `${h}:${m}`;
+}
+function fmtDayShort(name){const m={'Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed','Thursday':'Thu','Friday':'Fri','Saturday':'Sat','Sunday':'Sun'};return m[name]||String(name||'').slice(0,3)||'—';}
 function scoreColor(s){if(s>=80)return '#22c55e';if(s>=60)return '#eab308';return '#ef4444';}
 function riskLabel(rr){if(rr>=2)return '<span class="green">Low</span>';if(rr>=1)return '<span class="yellow">Medium</span>';return '<span class="red">High</span>';}
 function toggleRejected(){
@@ -2320,6 +2770,7 @@ function switchTab(id,btn){
   if(id==='ipstatus') refreshIpStatus();
   if(id==='morning') loadMorningReport();
   if(id==='skipped') loadSkippedOpportunities();
+  if(id==='explain') loadExplainability();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -2481,6 +2932,23 @@ function renderMorningReport(d){
     </tr>`).join(''):'<tr><td colspan="11" style="color:#4b5563;padding:20px;text-align:center">AI analysis running…</td></tr>';
   }
 
+  // 7b. AI Watchlist (stocks monitored but not passing live filters)
+  const watchEl=document.getElementById('mr-watchlist');
+  if(watchEl){
+    const wl=rpt.ai_watchlist||[];
+    watchEl.innerHTML=wl.length?wl.map(w=>`<tr style="border-bottom:1px solid #1f2937">
+      <td style="padding:8px;font-weight:700;color:#f9fafb">${w.symbol}</td>
+      <td style="text-align:center;padding:8px 4px"><span style="background:${w.score>=60?'#16a34a33':'#dc262633'};color:${w.score>=60?'#22c55e':'#ef4444'};padding:2px 7px;border-radius:4px;font-weight:700">${w.score}</span></td>
+      <td style="text-align:center;padding:8px 4px;color:${scoreColor(w.confidence)}">${w.confidence}%</td>
+      <td style="padding:8px 4px;color:#6b7280;font-size:11px">${w.sector||'—'}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px">${rupee(w.entry)}</td>
+      <td style="text-align:right;padding:8px 4px;font-family:monospace;font-size:12px;color:#22c55e">${rupee(w.target)}</td>
+      <td style="text-align:center;padding:8px 4px;font-weight:600;color:${w.rr>=2?'#22c55e':w.rr>=1.5?'#eab308':'#9ca3af'}">${w.rr}x</td>
+      <td style="text-align:center;padding:8px 4px;color:${w.exp_return>=5?'#22c55e':w.exp_return>=0?'#eab308':'#ef4444'};font-weight:600">${w.exp_return>0?'+':''}${w.exp_return}%</td>
+      <td style="padding:8px 4px;color:#9ca3af;font-size:11px;max-width:180px" title="${w.reason||''}">${w.filter_note||'—'}</td>
+    </tr>`).join(''):'<tr><td colspan="9" style="color:#4b5563;padding:20px;text-align:center">No stocks currently being monitored</td></tr>';
+  }
+
   // 8. Avoid
   const avoidEl=document.getElementById('mr-avoid');
   if(avoidEl){
@@ -2511,7 +2979,7 @@ function renderPositionsTab(d){
   const tableEl = document.getElementById('pos-table');
   if (!positions.length) {
     cardsEl.innerHTML = '<div class="card" style="color:#4b5563;text-align:center;padding:40px;grid-column:1/-1">No open positions</div>';
-    tableEl.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+    tableEl.innerHTML = '<tr><td colspan="14" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
     return;
   }
 
@@ -2524,12 +2992,13 @@ function renderPositionsTab(d){
     const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
     const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
     const firstEntry = parseFloat(p.first_entry_price || avg);
-    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const trailSL = parseFloat(p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || 0));
     const target = parseFloat(p.target || 0);
-    const days = parseInt(p.days_held || 0);
+    const days = parseInt(p.days_held != null ? p.days_held : 0);
     const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100) : null;
     const distToTgt = target > 0 ? ((target - ltp) / ltp * 100) : null;
     const reentryN = parseInt(p.reentry_count || 0);
+    const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
     const isReentry = p.is_reentry;
     const reentryLabel = isReentry
       ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700">🔄 Re-entry #${reentryN}</span>`
@@ -2557,6 +3026,7 @@ function renderPositionsTab(d){
         <div><div style="color:#6b7280">Trail SL</div><div style="font-weight:600;color:#ef4444">${trailSL > 0 ? rupee(trailSL) : '—'}</div></div>
         <div><div style="color:#6b7280">▼ to SL</div><div style="font-weight:600">${slPct}</div></div>
         <div><div style="color:#6b7280">▲ to Target</div><div style="font-weight:600">${tgtPct}</div></div>
+        <div><div style="color:#6b7280">AI Score</div><div style="font-weight:600;color:#e2e8f0">${aiScore}</div></div>
       </div>
       ${p.prev_exit_reason ? `<div style="margin-top:8px;font-size:11px;color:#a78bfa">Prev exit: ${p.prev_exit_reason}</div>` : ''}
     </div>`;
@@ -2570,12 +3040,13 @@ function renderPositionsTab(d){
     const pnl = parseFloat(p.pnl || (ltp - avg) * qty);
     const pnlPct = avg > 0 ? ((ltp - avg) / avg * 100) : 0;
     const firstEntry = parseFloat(p.first_entry_price || avg);
-    const trailSL = parseFloat(p.trailing_stop || p.stop_loss || 0);
+    const trailSL = parseFloat(p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || 0));
     const target = parseFloat(p.target || 0);
-    const days = parseInt(p.days_held || 0);
+    const days = parseInt(p.days_held != null ? p.days_held : 0);
     const distToSL = trailSL > 0 ? ((ltp - trailSL) / ltp * 100).toFixed(1) + '%' : '—';
     const distToTgt = target > 0 ? ((target - ltp) / ltp * 100).toFixed(1) + '%' : '—';
     const reentryN = parseInt(p.reentry_count || 0);
+    const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
     const reentryCell = p.is_reentry
       ? `<span style="background:#7c3aed;color:#fff;font-size:10px;padding:2px 6px;border-radius:8px">🔄 #${reentryN}</span>`
       : (reentryN > 0 ? `<span style="color:#a78bfa;font-size:11px">${reentryN}×</span>` : '<span style="color:#374151">—</span>');
@@ -2592,6 +3063,7 @@ function renderPositionsTab(d){
       <td style="color:#ef4444">${distToSL}</td>
       <td style="color:#22c55e">${target > 0 ? rupee(target) : '—'}</td>
       <td style="color:#22c55e">${distToTgt}</td>
+      <td style="text-align:center">${aiScore}</td>
       <td>${reentryCell}</td>
     </tr>`;
   }).join('');
@@ -2600,40 +3072,109 @@ function renderPositionsTab(d){
 function filterHistory(type){
   window._historyFilter=type;
   ['ALL','BUY','SELL'].forEach(t=>{
-    const el=document.getElementById('hf-'+t.toLowerCase()==='hf-all'?'hf-all':('hf-'+t.toLowerCase()));
-    if(el) el.style.background=t===type?'#1d4ed8':'#1f2937';
-    if(el) el.style.color=t===type?'#fff':'#9ca3af';
+    const id='hf-'+t.toLowerCase();
+    const el=document.getElementById(id);
+    if(el){ el.style.background=t===type?'#1d4ed8':'#1f2937'; el.style.color=t===type?'#fff':'#9ca3af'; }
   });
   renderHistory(type);
 }
 
 function renderHistory(filter){
   const rows=window._historyData||[];
-  const filtered=filter==='ALL'?rows:rows.filter(o=>(o.transaction_type||'').toUpperCase()===filter);
+  const filtered=filter==='ALL'?rows:rows.filter(o=>(o.type||'').toUpperCase()===filter);
   const el=document.getElementById('h-history-table');
   if(!el) return;
   if(!filtered.length){
-    el.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
+    el.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
     return;
   }
   el.innerHTML=filtered.map(o=>{
-    const isBuy=(o.transaction_type||'').toUpperCase()==='BUY';
-    const price=parseFloat(o.average_price||o.price||0);
+    const isBuy=(o.type||'').toUpperCase()==='BUY';
+    const buyP=parseFloat(o.buy_price||0);
+    const sellP=o.sell_price===null||o.sell_price===undefined?null:parseFloat(o.sell_price);
     const qty=parseInt(o.quantity||0);
-    const val=price*qty;
-    const pnl=parseFloat(o.pnl||0);
-    const ts=String(o.order_timestamp||'').slice(0,16).replace('T',' ');
-    const src=o._source==='journal'?'<span style="font-size:10px;color:#a78bfa;background:#1f2937;padding:2px 6px;border-radius:4px">Bot</span>':'<span style="font-size:10px;color:#60a5fa;background:#1f2937;padding:2px 6px;border-radius:4px">Kite</span>';
-    const pnlCell=isBuy?'<td style="color:#4b5563">—</td>':`<td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>`;
+    const val=parseFloat(o.total_value||0);
+    const ts=fmtDateTime(o.datetime);
+    const pnlVal=o.pnl===null||o.pnl===undefined?null:parseFloat(o.pnl);
+    const pnlText=pnlVal===null?'—':pnlStr(pnlVal);
+    const pnlClassName=pnlVal===null?'':pnlClass(pnlVal);
+    const src='<span style="font-size:10px;color:#a78bfa;background:#1f2937;padding:2px 6px;border-radius:4px">'+String(o.source||'Bot')+'</span>';
     return `<tr>
       <td style="font-size:12px;color:#9ca3af;white-space:nowrap">${ts}</td>
-      <td style="font-weight:700;color:#f9fafb">${o.tradingsymbol||'—'}</td>
-      <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}">${o.transaction_type||'—'}</span></td>
+      <td style="font-weight:700;color:#f9fafb">${o.symbol||'—'}</td>
+      <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}">${isBuy?'BUY':'SELL'}</span></td>
       <td style="text-align:center">${qty}</td>
-      <td>${rupee(price)}</td>
+      <td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>
+      <td style="font-family:monospace">${sellP===null?'<span style="color:#4b5563">—</span>':rupee(sellP)}</td>
       <td style="font-weight:600">${rupee(val)}</td>
-      ${pnlCell}
+      <td class="${pnlClassName}">${pnlText}</td>
       <td>${src}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTradeCards(cards){
+  const el=document.getElementById('h-trade-cards');
+  if(!el) return;
+  if(!cards || !cards.length){ el.innerHTML='<div style="color:#4b5563;padding:24px;text-align:center;font-size:14px">No open positions</div>'; return; }
+  el.innerHTML=cards.map(c=>{
+    const entryDate=c.entry_date?fmtDateTime(c.entry_date):'—';
+    const invested='₹'+(Number(c.invested)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+    const entryPrice='₹'+(Number(c.entry_price)||0).toFixed(2);
+    const qty=Number(c.quantity)||0;
+    const conf=c.confidence!=null?(Number(c.confidence)*100).toFixed(0)+'%':'—';
+    const score=c.trade_score!=null?c.trade_score:'—';
+    const rr=c.risk_reward_ratio!=null?Number(c.risk_reward_ratio).toFixed(2):'—';
+    const source=c.source||'Bot';
+    return `<div style="background:#1e293b;border:1px solid #334155;border-radius:14px;padding:18px;color:#e5e7eb">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div>
+          <div style="font-size:20px;font-weight:800;color:#f9fafb;letter-spacing:-0.02em">${c.symbol||'—'}</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:2px">Entry: ${entryDate}</div>
+        </div>
+        <span style="font-size:11px;font-weight:700;padding:5px 12px;border-radius:999px;background:#3b82f622;color:#60a5fa;text-transform:uppercase">Open</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:16px">
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Entry Price</div>
+          <div style="font-size:18px;font-weight:700;color:#22c55e">${entryPrice}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Quantity</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${qty}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Invested</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${invested}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9ca3af;text-transform:uppercase">Holding Time</div>
+          <div style="font-size:18px;font-weight:700;color:#f9fafb">${c.holding_time||'—'}</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Score <strong style="color:#e5e7eb">${score}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Conf <strong style="color:#e5e7eb">${conf}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Sector <strong style="color:#e5e7eb">${c.sector||'—'}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">R:R <strong style="color:#e5e7eb">${rr}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Regime <strong style="color:#e5e7eb">${c.market_regime||'—'}</strong></span>
+        <span style="background:#1f2937;padding:5px 10px;border-radius:6px;font-size:11px;color:#94a3b8">Source <strong style="color:#e5e7eb">${source}</strong></span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderRetryQueue(items){
+  const el=document.getElementById('h-retry-queue');
+  if(!el) return;
+  if(!items || !items.length){ el.innerHTML='<tr><td colspan="4" style="text-align:center;color:#4b5563;padding:20px">No queued retries</td></tr>'; return; }
+  el.innerHTML=items.map(p=>{
+    const next=p.next_retry?fmtDateTime(p.next_retry):'Waiting';
+    return `<tr style="border-bottom:1px solid #334155">
+      <td style="padding:10px 0;font-weight:700">${p.symbol||'—'}</td>
+      <td style="padding:10px 0;text-align:center">${next}</td>
+      <td style="padding:10px 0;text-align:center">${p.retry_count||0}</td>
+      <td style="padding:10px 0">${p.last_error||'—'}</td>
     </tr>`;
   }).join('');
 }
@@ -2684,12 +3225,16 @@ async function load(){
     const mktEl=document.getElementById('hdr-market');
     if(d.market_open){mktEl.innerHTML='<span class="green">🟢 OPEN</span>';}
     else{mktEl.innerHTML='<span class="red">🔴 CLOSED</span>';}
-    document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' LIVE';
+    const bMode = (d.broker_mode || (d.paper_trading ? 'PAPER' : 'UNKNOWN')).toUpperCase();
+    const bStart = d.broker_startup_timestamp && d.broker_startup_timestamp !== '—'
+        ? ' · ' + new Date(d.broker_startup_timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+        : '';
+    document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
     document.getElementById('hdr-last-scan').textContent=nowStr;
     document.getElementById('hdr-next-scan').textContent=nextStr;
     const stEl=document.getElementById('hdr-status');
     stEl.innerHTML=d.kite_ok?'<span class="green">🟢 Running</span>':'<span class="red">🔴 Offline</span>';
-    document.getElementById('hdr-token').textContent=(d.token_expiry||'—').replace('T',' ').slice(0,16);
+    document.getElementById('hdr-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
 
     // ── TAB: DASHBOARD ────────────────────────────────────────────────────────
     const ph=d.portfolio_health||{};
@@ -2768,11 +3313,11 @@ async function load(){
         const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
         const dayPnl=(ltp-closePrice)*qty;
         
-        // Get SL/Target from position data
-        const trailSL = p.stop_loss ? rupee(p.stop_loss) : '—';
+        // Get SL/Target/Score from position data (same source as Positions tab)
+        const trailSL = (p.trailing_stop != null ? p.trailing_stop : (p.stop_loss || null)) > 0 ? rupee(p.trailing_stop != null ? p.trailing_stop : p.stop_loss) : '—';
         const target = p.target ? rupee(p.target) : '—';
-        const aiScore = p.trade_score ? p.trade_score.toFixed(0) : '—';
-        const daysHeld = p.days_held || 1;
+        const aiScore = p.trade_score != null ? Number(p.trade_score).toFixed(0) : '—';
+        const daysHeld = p.days_held != null ? p.days_held : '—';
         
         // Accumulate totals
         totalInvested += invested;
@@ -2839,13 +3384,12 @@ async function load(){
       document.getElementById('d-summary-total-pnl').textContent = '₹—';
     }
 
-    // AI Opportunities — BUY signals only
-    const allSignals=d.recommendations&&d.recommendations.length?d.recommendations:d.signals||[];
-    const opp=allSignals.filter(s=>!s.action||s.action==='BUY');
+    // AI Opportunities — tradeable BUY recommendations only
+    const opp=(d.recommendations||[]).filter(s=>s.action==='BUY');
     const oppEl=document.getElementById('d-opportunities');
     if(opp.length){
       oppEl.innerHTML=opp.slice(0,7).map(s=>{
-        const score=Math.round((s.confidence||0)*100);
+        const score=Math.round(s.overall_score||0);
         const rr2=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
         const trend=s.trend||(score>=70?'Bullish':score>=50?'Neutral':'Bearish');
         const trendStyle=trend==='Bullish'?'color:#22c55e':trend==='Bearish'?'color:#ef4444':'color:#eab308';
@@ -2859,7 +3403,7 @@ async function load(){
         </tr>`;
       }).join('');
     } else {
-      oppEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">Scanning... signals will appear after next cycle</td></tr>';
+      oppEl.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No tradeable opportunities right now</td></tr>';
     }
 
     // Market overview
@@ -2899,7 +3443,7 @@ async function load(){
     if(allOrders.length){
       ordEl.innerHTML=allOrders.map(o=>{
         const isBuy=o.transaction_type==='BUY';
-        const t=(o.order_timestamp||'').toString().slice(-8,-3)||'—';
+        const t=fmtTime(o.order_timestamp)||'—';
         const amt=parseFloat(o.average_price||o.price||0)*parseInt(o.quantity||0);
         const pnl=parseFloat(o.pnl||0);
         const pnlPart=!isBuy?`<span class="${pnlClass(pnl)}" style="font-size:11px">${pnlStr(pnl)}</span>`:'';
@@ -2946,8 +3490,8 @@ async function load(){
     document.getElementById('p-account-balance').textContent=rupee(d.account_balance||0);
     document.getElementById('p-cash').textContent=rupee(d.cash||0);
     const pmEl=document.getElementById('p-margin');
-    pmEl.textContent=rupee(d.margin_blocked||0);
-    pmEl.className='stat-value '+(parseFloat(d.margin_blocked||0)>0?'red':'green');
+    const marginUsed=Math.abs(parseFloat(d.margin_blocked||0));
+    pmEl.textContent=rupee(marginUsed);
     document.getElementById('p-holdings-val').textContent=rupee(d.holdings_value||0);
 
     // Holdings table with enhanced data
@@ -2978,12 +3522,13 @@ async function load(){
         const dayPct=closePrice>0?((ltp-closePrice)/closePrice*100).toFixed(2):'0.00';
         const dayPnl=(ltp-closePrice)*qty;
         
-        // Get position data for SL/Target/AI Score
-        const position = (d.positions || []).find(p => p.symbol === h.tradingsymbol);
-        const trailSL = position && position.stop_loss ? rupee(position.stop_loss) : '—';
-        const target = position && position.target ? rupee(position.target) : '—';
-        const aiScore = position && position.trade_score ? position.trade_score.toFixed(0) : '—';
-        const daysHeld = position && position.days_held ? position.days_held : '—';
+        // Get position data for SL/Target/AI Score (same source as Positions tab)
+        const position = (d.positions || []).find(p => p.tradingsymbol === h.tradingsymbol);
+        const rawSL = position ? (position.trailing_stop != null ? position.trailing_stop : position.stop_loss) : 0;
+        const trailSL = rawSL > 0 ? rupee(rawSL) : '—';
+        const target = position && position.target > 0 ? rupee(position.target) : '—';
+        const aiScore = position && position.trade_score != null ? Number(position.trade_score).toFixed(0) : '—';
+        const daysHeld = position && position.days_held != null ? position.days_held : '—';
         
         // Progress bar for price relative to SL and Target
         let progressBar = '';
@@ -3065,11 +3610,11 @@ async function load(){
       document.getElementById('p-summary-total-pnl').textContent = '₹—';
     }
 
-    // Trade History table
+    // Recent Activity table
     const thEl=document.getElementById('p-trade-history');
     const allOrd=(d.all_orders||[]);
     if(allOrd.length){
-      thEl.innerHTML=allOrd.slice(0,50).map(o=>{
+      thEl.innerHTML=allOrd.slice(0,5).map(o=>{
         const isBuy=o.transaction_type==='BUY';
         const isSell=o.transaction_type==='SELL';
         const qty=parseInt(o.quantity||0);
@@ -3077,7 +3622,7 @@ async function load(){
         const sellP=parseFloat(o.sell_price||o.average_price||0);
         const pnl=parseFloat(o.pnl||0);
         const pnlPct=(isSell&&buyP>0)?((sellP-buyP)/buyP*100):0;
-        const ts=String(o.order_timestamp||'').slice(0,16).replace('T',' ');
+        const ts=fmtDateTime(o.order_timestamp);
         // Buy Price column: show for both BUY and SELL rows
         const buyCell=isSell
           ?`<td style="color:#60a5fa;font-family:monospace">${rupee(buyP)}</td>`
@@ -3102,7 +3647,7 @@ async function load(){
         </tr>`;
       }).join('');
     } else {
-      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No trade history yet</td></tr>';
+      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr>';
     }
 
     // ── TAB: POSITIONS ───────────────────────────────────────────
@@ -3146,8 +3691,10 @@ async function load(){
       sbEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
     }
 
-    // History filter + render
-    window._historyData=d.all_orders||[];
+    // Trade cards + event history + retry queue
+    renderTradeCards(d.trade_cards || []);
+    renderRetryQueue(d.pending_sells || []);
+    window._historyData=d.trade_events||[];
     renderHistory(window._historyFilter||'ALL');
 
     // Allocation Chart
@@ -3180,152 +3727,7 @@ async function load(){
     } // end Chart guard
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
-    const allSigs=d.signals||[];
-    const minConf=d.cfg_min_confidence||0.60;
-
-    // Split into candidates (actionable) and rejected
-    const candidates=[];
-    const rejected=[];
-    allSigs.forEach(s=>{
-      const bd=s.bot_decision||'';
-      if(bd==='Will buy*') candidates.push(s);
-      else rejected.push(s);
-    });
-
-    // Stats
-    document.getElementById('s-scanned').textContent=(d.stocks_scanned||allSigs.length||0);
-    document.getElementById('s-buy-cnt').textContent=candidates.length;
-    document.getElementById('s-rejected-cnt').textContent=rejected.length;
-    const sRegEl=document.getElementById('s-regime');
-    sRegEl.textContent=d.market_regime||'—';
-    sRegEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
-
-    // Scan banner
-    const bannerEl=document.getElementById('s-scan-banner');
-    if(bannerEl) bannerEl.style.display=d.scan_running?'block':'none';
-
-    // ── TODAY'S CANDIDATES TABLE ──
-    const candBody=document.getElementById('s-candidates-body');
-    const candCount=document.getElementById('s-candidate-count');
-    const candEmpty=document.getElementById('s-candidates-empty');
-    const candWrap=document.getElementById('s-candidates-table-wrap');
-
-    if(candidates.length){
-      candEmpty&&(candEmpty.style.display='none');
-      candWrap&&(candWrap.style.display='');
-      candCount&&(candCount.textContent=candidates.length+' actionable stock'+(candidates.length!==1?'s':''));
-      candBody.innerHTML=candidates.map((s,i)=>{
-        const score=Math.round(s.overall_score||0);
-        const conf=Math.round((s.confidence||0)*100);
-        const rr=parseFloat(s.risk_reward_ratio||0);
-        const sector=s.market_regime?'':(s.sector||'—');
-        // Extract sector from bot reasoning / signal
-        const sectorLabel=s.sector||'—';
-        const trend=s.trend||'—';
-        // Short reason from reasoning field
-        const reasoning=(s.reasoning||'').split('.')[0].replace(/based on/i,'').trim().substring(0,60)||'AI signal';
-        return `<tr style="border-bottom:1px solid #1f2937">
-          <td style="text-align:center;color:#4b5563;font-size:12px;padding:10px 4px">${i+1}</td>
-          <td style="padding:10px 8px">
-            <div style="font-weight:700;color:#f9fafb;font-size:14px">${s.symbol}</div>
-          </td>
-          <td style="text-align:center;padding:10px 6px">
-            <span style="background:${score>=80?'#16a34a33':score>=70?'#ca8a0433':'#4b556333'};color:${score>=80?'#22c55e':score>=70?'#eab308':'#9ca3af'};padding:2px 8px;border-radius:4px;font-weight:700;font-size:13px">${score}</span>
-          </td>
-          <td style="text-align:center;padding:10px 6px">
-            <div class="progress-bar" style="width:64px;display:inline-block;vertical-align:middle">
-              <div class="progress-fill" style="width:${conf}%;background:${scoreColor(conf)}"></div>
-            </div>
-            <span style="font-size:11px;color:${scoreColor(conf)};margin-left:4px">${conf}%</span>
-          </td>
-          <td style="text-align:center;padding:10px 6px;font-weight:600;color:${rr>=2?'#22c55e':rr>=1.5?'#eab308':'#9ca3af'}">${rr>0?rr.toFixed(1)+'x':'—'}</td>
-          <td style="padding:10px 6px;color:${trend==='UPTREND'||trend==='Bullish'?'#22c55e':trend==='DOWNTREND'||trend==='Bearish'?'#ef4444':'#eab308'};font-size:12px">${trend}</td>
-          <td style="padding:10px 6px;color:#6b7280;font-size:11px">${sectorLabel}</td>
-          <td style="text-align:right;padding:10px 6px;font-family:monospace">${rupee(s.price)}</td>
-          <td style="text-align:right;padding:10px 6px;color:#22c55e;font-family:monospace">${rupee(s.target)}</td>
-          <td style="text-align:right;padding:10px 6px;color:#ef4444;font-family:monospace">${rupee(s.stop_loss)}</td>
-          <td style="padding:10px 6px;color:#9ca3af;font-size:11px;max-width:180px">${reasoning}…</td>
-        </tr>`;
-      }).join('');
-    } else if(!d.scan_running){
-      candBody.innerHTML='';
-      candEmpty&&(candEmpty.style.display='');
-      candWrap&&(candWrap.style.display='none');
-      candCount&&(candCount.textContent='0 candidates');
-    } else {
-      candBody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">⏳ Scanning…</td></tr>';
-      candCount&&(candCount.textContent='Scanning…');
-    }
-
-    // ── ALL SCANNED SIGNALS TABLE (candidates + rejected combined) ──
-    const rejBody=document.getElementById('s-rejected-table');
-    const rejBadge=document.getElementById('s-rejected-badge');
-    // Show ALL signals sorted: candidates (Will buy*) first, then rest by score
-    const allSorted=[...candidates,...rejected].sort((a,b)=>{
-      if(a.bot_decision==='Will buy*' && b.bot_decision!=='Will buy*') return -1;
-      if(b.bot_decision==='Will buy*' && a.bot_decision!=='Will buy*') return 1;
-      return (b.overall_score||0)-(a.overall_score||0);
-    });
-    if(rejBadge) rejBadge.textContent='('+allSorted.length+' stocks)';
-    document.getElementById('s-rejected-cnt').textContent=rejected.length;
-    if(allSorted.length){
-      rejBody.innerHTML=allSorted.map(s=>{
-        const score=Math.round(s.overall_score||0);
-        const conf=Math.round((s.confidence||0)*100);
-        const bd=s.bot_decision||'—';
-        let rejTag='';
-        if(bd==='Will buy*') rejTag='<span style="background:#16a34a33;color:#4ade80;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700">✅ Will Buy</span>';
-        else if(bd.includes('Already held')||bd.includes('Already Held')) rejTag='<span style="background:#1d4ed822;color:#60a5fa;padding:2px 7px;border-radius:3px;font-size:10px">📦 Already Held</span>';
-        else if(bd.includes('Max positions')) rejTag='<span style="background:#7c3aed22;color:#a78bfa;padding:2px 7px;border-radius:3px;font-size:10px">🔒 Slots Full</span>';
-        else if(bd.includes('Score')) rejTag='<span style="background:#4b556333;color:#9ca3af;padding:2px 7px;border-radius:3px;font-size:10px">📉 Low Score</span>';
-        else if(bd.includes('R:R')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">⚖️ Poor R:R</span>';
-        else if(bd.includes('Confidence')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">🎯 Low Conf.</span>';
-        else if(bd.includes('SELL')) rejTag='<span style="background:#dc262622;color:#ef4444;padding:2px 7px;border-radius:3px;font-size:10px">📉 SELL Signal</span>';
-        else rejTag=`<span style="color:#4b5563;font-size:11px">${bd}</span>`;
-        const symColor=bd==='Will buy*'?'#f9fafb':bd.includes('Already Held')||bd.includes('Already held')?'#60a5fa':'#9ca3af';
-        return `<tr style="border-bottom:1px solid #1f293766">
-          <td style="padding:7px 8px;font-weight:700;color:${symColor}">${s.symbol}</td>
-          <td style="padding:7px 6px;color:#4b5563;font-size:11px">${s.sector||'—'}</td>
-          <td style="text-align:center;padding:7px 6px;color:${score>=80?'#22c55e':score>=70?'#eab308':'#4b5563'};font-size:12px;font-weight:600">${score||'—'}</td>
-          <td style="text-align:center;padding:7px 6px;color:#4b5563;font-size:11px">${conf?conf+'%':'—'}</td>
-          <td style="padding:7px 6px">${rejTag}</td>
-        </tr>`;
-      }).join('');
-    } else {
-      rejBody.innerHTML='<tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">Scan running — results appear here in ~30s</td></tr>';
-    }
-
-    // Confidence meters (top candidates only)
-    const cmEl=document.getElementById('s-conf-meters');
-    const topPicks=candidates.slice(0,5);
-    cmEl.innerHTML=topPicks.map(s=>{
-      const sc=Math.round((s.confidence||0)*100);
-      return `<div style="margin-bottom:10px">
-        <div class="flex justify-between" style="margin-bottom:3px">
-          <span style="font-size:12px;font-weight:600;color:#f9fafb">${s.symbol}</span>
-          <span style="font-size:12px;color:${scoreColor(sc)}">${sc}%</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${sc}%;background:${scoreColor(sc)}"></div></div>
-      </div>`;
-    }).join('')||'<div style="color:#4b5563;font-size:13px">No actionable picks yet</div>';
-
-    // Top detail panel
-    const topD=document.getElementById('s-top-detail');
-    if(candidates.length&&topD){
-      const t=candidates[0];
-      const score=Math.round(t.overall_score||0);
-      const conf=Math.round((t.confidence||0)*100);
-      topD.innerHTML=`<div style="font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:8px">${t.symbol} <span style="font-size:12px;font-weight:400;color:#4b5563">${t.sector||''}</span></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
-          <div><span style="color:#4b5563;font-size:11px">Score</span><br><b style="color:${score>=80?'#22c55e':'#eab308'}">${score}/100</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Confidence</span><br><b style="color:#93c5fd">${conf}%</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Entry</span><br><b>${rupee(t.price)}</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Target / SL</span><br><b class="green">${rupee(t.target)}</b> / <b class="red">${rupee(t.stop_loss)}</b></div>
-        </div>
-        <div style="font-size:11px;color:#6b7280;line-height:1.5">${(t.reasoning||'').substring(0,200)}…</div>`;
-    } else if(topD){
-      topD.innerHTML='<span style="color:#4b5563">No actionable signals yet</span>';
-    }
+    if (typeof renderAiSignals === 'function') renderAiSignals(d);
 
     // ── TAB: ANALYTICS ────────────────────────────────────────────────────────
     const strat=d.strategy_stats||{};
@@ -3345,7 +3747,10 @@ async function load(){
     const wrEl=document.getElementById('a-win-rate');
     const wr=parseFloat(d.win_rate||0)*100;
     wrEl.textContent=wr.toFixed(0)+'%';wrEl.className='stat-value '+(wr>=60?'green':wr>=40?'yellow':'red');
-    document.getElementById('a-profit-factor').textContent=(strat.profit_factor||0).toFixed(2);
+    // Profit factor: ∞ when no losses exist
+    const apfVal=parseFloat(strat.profit_factor||0);
+    const aNoLosses=(strat.avg_loss||0)===0&&(strat.avg_win||0)>0;
+    document.getElementById('a-profit-factor').textContent=aNoLosses?'∞':apfVal.toFixed(2);
     document.getElementById('a-avg-win').textContent=rupee(strat.avg_win||0);
     document.getElementById('a-avg-loss').textContent=rupee(strat.avg_loss||0);
     document.getElementById('a-expectancy').textContent=rupee(strat.expectancy||0);
@@ -3373,7 +3778,7 @@ async function load(){
     const weekDays=[{d:'Mon',v:wc[0]},{d:'Tue',v:wc[1]},{d:'Wed',v:wc[2]},{d:'Thu',v:wc[3]},{d:'Fri',v:wc[4]}];
     calEl.innerHTML=weekDays.map(({d:day,v})=>`
       <div style="text-align:center;flex:1">
-        <div style="font-size:11px;color:#4b5563;margin-bottom:4px">${day}</div>
+        <div style="font-size:11px;color:#4b5563;margin-bottom:4px;white-space:nowrap">${day}</div>
         <div style="padding:8px 4px;border-radius:8px;font-size:13px;font-weight:700;background:${v>=0?'#16a34a22':'#dc262622'};color:${v>=0?'#22c55e':'#ef4444'}">${v>=0?'+':''}${v.toFixed(0)}</div>
       </div>`).join('');
 
@@ -3382,7 +3787,7 @@ async function load(){
     if(d.orders&&d.orders.length){
       ahEl.innerHTML=d.orders.map(o=>{
         const isBuy=o.transaction_type==='BUY';
-        const t=(o.order_timestamp||'').toString().slice(-8,-3)||'—';
+        const t=fmtTime(o.order_timestamp)||'—';
         const amt=parseFloat(o.average_price||o.price||0)*parseInt(o.quantity||0);
         const opnl=parseFloat(o.pnl||0);
         return `<tr>
@@ -3403,8 +3808,8 @@ async function load(){
     // ── TAB: BOT STATUS ───────────────────────────────────────────────────────
     document.getElementById('bs-kite').innerHTML=d.kite_ok?'<span class="green">✅ Connected</span>':'<span class="red">❌ Offline</span>';
     document.getElementById('bs-mode').textContent=(d.trading_mode||'swing').toUpperCase();
-    document.getElementById('bs-token').textContent=(d.token_expiry||'—').slice(0,16).replace('T',' ');
-    document.getElementById('bs-token2').textContent=(d.token_expiry||'—').slice(0,16).replace('T',' ');
+    document.getElementById('bs-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
+    document.getElementById('bs-token2').textContent=fmtDateTime(d.token_expiry,true)||'—';
     document.getElementById('bs-paper').innerHTML=d.paper_trading?'<span class="yellow">⚠️ Paper Mode</span>':'<span class="green">✅ Live Trading</span>';
     const bsrEl=document.getElementById('bs-regime');
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
@@ -3412,7 +3817,7 @@ async function load(){
     document.getElementById('bs-last-scan').textContent=nowStr;
     document.getElementById('bs-next-scan').textContent=nextStr;
     document.getElementById('bs-scanned').textContent=d.stocks_scanned||'—';
-    document.getElementById('bs-ai-signals').textContent=allSigs.length;
+    document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
     document.getElementById('bs-orders-exec').textContent=d.total_trades||0;
     document.getElementById('bs-cfg-amount').textContent=rupee(d.cfg_trading_amount||d.budget||5000);
     document.getElementById('bs-cfg-maxpos').textContent=(d.cfg_max_positions||5);
@@ -3575,7 +3980,7 @@ async function loadJournal(){
     const dowCtx=document.getElementById('j-chart-dow');
     if(dowCtx&&dowL.length){
       const cfg={type:'bar',data:{
-        labels:dowL.map(d=>d.slice(0,3)),
+        labels:dowL.map(d=>fmtDayShort(d)),
         datasets:[{label:'Net P&L',data:dowPnl,backgroundColor:dowPnl.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]
       },options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}};
       if(jChartDow){jChartDow.data=cfg.data;jChartDow.update();}else{jChartDow=new Chart(dowCtx,cfg);}
@@ -3739,6 +4144,44 @@ function showDetailedDecision(symbol){
   `;
 }
 
+// ─── AI Explainability ───────────────────────────────────────────────────────
+async function loadExplainability(){
+  try{
+    const r=await fetch('/api/explain');
+    const d=await r.json();
+    const actions=d.actions||[];
+    const tbody=document.getElementById('explain-table');
+    if(actions.length===0){
+      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
+      return;
+    }
+    const rupee=(n)=>{n=parseFloat(n)||0; return '₹'+n.toFixed(2);};
+    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return ts||'—';}};
+    tbody.innerHTML=actions.map(a=>{
+      const isBuy=a.action==='BUY';
+      const isSell=(typeof a.action==='string') && a.action.startsWith('SELL');
+      const actionColor=isBuy?'#16a34a':isSell?'#dc2626':'#9ca3af';
+      const pnl=parseFloat(a.pnl||0);
+      const pnlColor=pnl>0?'#16a34a':pnl<0?'#dc2626':'#9ca3af';
+      return `<tr style="border-bottom:1px solid #1f2937">
+        <td style="padding:8px;color:#9ca3af;font-family:monospace;font-size:11px">${fmtTime(a.timestamp)}</td>
+        <td style="padding:8px;font-weight:700;color:#f9fafb">${a.symbol||'—'}</td>
+        <td style="padding:8px;color:${actionColor};font-weight:600">${a.action||'—'}</td>
+        <td style="padding:8px;color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</td>
+        <td style="padding:8px;color:#60a5fa">${a.score!=null?a.score.toFixed(1):'—'}</td>
+        <td style="padding:8px;color:#f59e0b">${a.confidence!=null?(a.confidence*100).toFixed(0)+'%':'—'}</td>
+        <td style="padding:8px;color:${pnlColor}">${pnl!==0?rupee(pnl):'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.price?rupee(a.price):'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.quantity||'—'}</td>
+        <td style="padding:8px;color:#9ca3af">${a.sector||'Unknown'}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    console.error('Explainability load error:',e);
+    document.getElementById('explain-table').innerHTML='<tr><td colspan="10" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
+  }
+}
+
 // ─── IP Status ────────────────────────────────────────────────────────────────
 function updateIpStatus(d){
   const cur       = d.current_ip   || 'unknown';
@@ -3813,7 +4256,7 @@ function updateIpStatus(d){
         : diffMin === 1 ? '1 minute ago'
         : diffMin < 60 ? `${diffMin} minutes ago`
         : `${Math.round(diffMin/60)}h ago`;
-      elVerified.textContent = `Verified ${relStr} (${lastApi.slice(11,19)})`;
+      elVerified.textContent = `Verified ${relStr} (${fmtTime(lastApi)})`;
     }catch(_){ elVerified.textContent = `Verified: ${lastApi}`; }
   }
 
@@ -4148,8 +4591,8 @@ function _btRenderResults(data){
       const exitTag = {stop_loss:'🛑 SL', target:'🎯 Target', max_hold:'⏰ MaxHold', rsi_overbought:'📈 RSI>80', signal_reversal:'🔄 Reversal'}[t.exit_reason] || t.exit_reason;
       return `<tr style="border-top:1px solid #1e293b">
         <td style="padding:5px 8px;font-weight:600;color:#f1f5f9">${t.symbol}</td>
-        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.entry_date}</td>
-        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${t.exit_date}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${fmtDateTime(t.entry_date,true)}</td>
+        <td style="padding:5px 8px;color:#94a3b8;font-size:11px">${fmtDateTime(t.exit_date,true)}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.entry_price.toLocaleString('en-IN')}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace">₹${t.exit_price.toLocaleString('en-IN')}</td>
         <td style="padding:5px 8px;text-align:right;font-family:monospace;color:${col};font-weight:600">${t.pnl>=0?'+':''}₹${Math.abs(t.pnl).toFixed(0)}</td>
@@ -4353,8 +4796,30 @@ def api_data():
             "banknifty_change": 0,
             "vix": 0,
             "market_regime": "UNKNOWN"
-        }
+        },
+        "market_data_metrics": {}
     }
+
+    # Load broker mode status (written by broker_integration.py at startup)
+    try:
+        _bs_path = os.path.join(os.path.dirname(__file__), 'data', 'broker_status.json')
+        if os.path.exists(_bs_path):
+            with open(_bs_path) as _bf:
+                _bs = json.load(_bf)
+            data['broker_mode'] = _bs.get('mode', 'UNKNOWN')
+            data['broker_live_ready'] = _bs.get('live_ready', False)
+            data['broker_startup_timestamp'] = _bs.get('startup_timestamp', '—')
+            data['broker_error'] = _bs.get('error', None)
+        else:
+            data['broker_mode'] = 'PAPER' if config.PAPER_TRADING else 'LIVE'
+            data['broker_live_ready'] = not config.PAPER_TRADING and (kite is not None)
+            data['broker_startup_timestamp'] = '—'
+            data['broker_error'] = 'Broker status not yet recorded — restart trading orchestrator'
+    except Exception:
+        data['broker_mode'] = 'UNKNOWN'
+        data['broker_live_ready'] = False
+        data['broker_startup_timestamp'] = '—'
+        data['broker_error'] = None
 
     if not kite:
         return jsonify(data)
@@ -4685,6 +5150,33 @@ def api_data():
         except Exception:
             pass
         data['all_orders'] = sorted(all_completed, key=lambda x: str(x.get('order_timestamp', '')), reverse=True)
+
+        # Paired professional trade cards and BUY/SELL event history (no duplicate SELLs)
+        try:
+            now_naive = now_ist.replace(tzinfo=None)
+            all_cards = _build_trade_cards(journal_entries, data.get('positions', []), now_naive)
+            data['trade_cards'] = [c for c in all_cards if c.get('status') == 'Open']
+            data['trade_events'] = _build_trade_events([c for c in all_cards if c.get('status') == 'Completed'])
+        except Exception as _tc_err:
+            logger.error(f"Trade history card build failed: {_tc_err}")
+            data['trade_cards'] = []
+            data['trade_events'] = []
+
+        # Pending SELL actions surfaced by the order executor
+        try:
+            _ps_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'pending_sells.json')
+            if os.path.exists(_ps_path):
+                with open(_ps_path) as _psf:
+                    _ps_items = json.load(_psf)
+                    if isinstance(_ps_items, list):
+                        data['pending_sells'] = _ps_items
+                    else:
+                        data['pending_sells'] = sorted(list(_ps_items.values()), key=lambda x: x.get('last_attempt', ''), reverse=True)
+            else:
+                data['pending_sells'] = []
+        except Exception as _ps_err:
+            data['pending_sells'] = []
+
         # Today's orders
         data['orders'] = [o for o in orders if str(o.get('order_timestamp', '')).startswith(today_str)]
         completed = [o for o in data['orders'] if o.get('status') == 'COMPLETE']
@@ -4692,7 +5184,7 @@ def api_data():
         sells = [o for o in completed if o.get('transaction_type') == 'SELL']
         data['total_trades'] = len(completed)
         win_sells = [o for o in sells if (o.get('pnl') or 0) > 0]
-        data['win_rate'] = round(len(win_sells) / len(sells) * 100, 1) if sells else 0
+        data['win_rate'] = round(len(win_sells) / len(sells), 4) if sells else 0
         # daily_pnl = unrealized (from positions) + realized (from today's closed trades)
         realized_pnl = sum(o.get('pnl', 0) for o in sells)
         unrealized_pnl = data.get('daily_pnl', 0)  # set earlier from positions
@@ -5034,6 +5526,12 @@ def api_data():
     data['kite_whitelist_url']  = 'https://developers.kite.trade/profile'
     data['kite_login_url']      = _kite_login_url()
 
+    try:
+        from market_data import MarketDataFetcher
+        data['market_data_metrics'] = MarketDataFetcher.load_cycle_metrics()
+    except Exception:
+        pass
+
     return jsonify(data)
 
 
@@ -5290,7 +5788,7 @@ def api_ask():
             ctx = (f"Regime: {regime}\n"
                    f"Open: {chr(10).join(fmt_trade(t) for t in open_pos) or 'none'}\n"
                    f"Closed (last 5): {chr(10).join(fmt_trade(t) for t in closed[-5:]) or 'none'}\n"
-                   f"Stats: win_rate={analytics.get('win_rate',0)}% pnl=₹{analytics.get('total_net_pnl',0)} trades={analytics.get('total_trades',0)}")
+                   f"Stats: win_rate={analytics.get('win_rate',0)*100:.1f}% pnl=₹{analytics.get('total_net_pnl',0)} trades={analytics.get('total_trades',0)}")
 
             resp = client.chat.completions.create(
                 model='gpt-4o-mini',
@@ -5319,7 +5817,7 @@ def api_ask():
                 'answer': f"I couldn't find a specific answer for that question in my local data. {hint}",
                 'bullets': [
                     f"Open positions: {len(open_pos)} ({', '.join(p['symbol'] for p in open_pos) or 'none'})",
-                    f"Closed trades: {analytics.get('total_trades',0)} | Win rate: {analytics.get('win_rate',0):.1f}%",
+                    f"Closed trades: {analytics.get('total_trades',0)} | Win rate: {analytics.get('win_rate',0)*100:.1f}%",
                     f"Net P&L: ₹{analytics.get('total_net_pnl',0):.2f} | Regime: {regime}",
                     hint,
                 ]
@@ -5380,6 +5878,12 @@ def api_journal():
         analytics['closed_trades_count'] = len(closed_trades)
         analytics['open_trade_log']     = sorted(open_trades,  key=lambda x: x.get('timestamp',''), reverse=True)[:20]
         analytics['closed_trade_log']   = sorted(closed_trades, key=lambda x: x.get('exit_date',''), reverse=True)[:20]
+        # Trade Log (Last 20) must show both BUY and SELL, newest first
+        analytics['recent_trades']      = sorted(
+            all_entries,
+            key=lambda x: x.get('timestamp', x.get('exit_date', '')),
+            reverse=True
+        )[:20]
         analytics['all_entries_count']  = len(all_entries)
         return jsonify(analytics)
     except Exception as e:
@@ -5394,6 +5898,13 @@ def api_skipped_opportunities():
         from decision_logger import DecisionLogger
         
         logger = DecisionLogger()
+        # Always rebuild from the live trading log so the dashboard reflects the latest cycle
+        logger.decisions_today = logger._parse_log_decisions()
+        # Remove repeated (symbol, final_decision) records, keeping the most recent one
+        seen_decisions = {}
+        for d in reversed(logger.decisions_today):
+            seen_decisions[(d.symbol, d.final_decision)] = d
+        logger.decisions_today = list(seen_decisions.values())
         skipped = logger.get_skipped_opportunities()
         summary = logger.get_decision_summary()
         
@@ -5434,6 +5945,83 @@ def api_skipped_opportunities():
     except Exception as e:
         logger.error(f"Skipped opportunities API error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/explain')
+def api_explain():
+    """AI explainability panel: why each BUY, SELL, HOLD and SKIP happened."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from decision_logger import DecisionLogger
+
+        actions = []
+
+        # Executed trades from the journal
+        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
+        if os.path.exists(journal_path):
+            with open(journal_path, 'r') as f:
+                journal = json.load(f)
+            for t in journal:
+                if t.get('status') == 'CLOSED':
+                    actions.append({
+                        'timestamp': t.get('timestamp'),
+                        'symbol': t.get('symbol'),
+                        'action': f"SELL ({t.get('exit_reason', 'closed')})",
+                        'reason': t.get('exit_reason', 'Closed'),
+                        'confidence': t.get('confidence'),
+                        'score': t.get('trade_score'),
+                        'pnl': t.get('net_pnl'),
+                        'price': t.get('exit_price'),
+                        'quantity': t.get('quantity'),
+                        'sector': t.get('sector', 'Unknown')
+                    })
+                if t.get('action') == 'BUY':
+                    actions.append({
+                        'timestamp': t.get('timestamp'),
+                        'symbol': t.get('symbol'),
+                        'action': 'BUY',
+                        'reason': t.get('buy_reason', 'AI signal'),
+                        'confidence': t.get('confidence'),
+                        'score': t.get('trade_score'),
+                        'pnl': t.get('net_pnl'),
+                        'price': t.get('entry_price'),
+                        'quantity': t.get('quantity'),
+                        'sector': t.get('sector', 'Unknown')
+                    })
+
+        # Evaluated-but-skipped opportunities from the live trading log
+        dl = DecisionLogger()
+        dl.decisions_today = dl._parse_log_decisions()
+        for d in dl.decisions_today:
+            actions.append({
+                'timestamp': d.timestamp,
+                'symbol': d.symbol,
+                'action': d.final_decision,
+                'reason': d.rejection_reason or (
+                    f"BUY recorded in trading log | Score {d.overall_score:.0f}/100 | Conf {d.confidence:.0%}"
+                    if d.final_decision == 'BUY'
+                    else f"Signal evaluated ({d.final_decision}, score {d.overall_score:.0f}, conf {d.confidence:.0%}, rr {d.risk_reward_ratio:.2f})"
+                ),
+                'confidence': d.confidence,
+                'score': d.overall_score,
+                'pnl': 0.0,
+                'price': d.entry_price,
+                'quantity': d.position_size_calculated,
+                'sector': d.sector or 'Unknown'
+            })
+
+        # Deduplicate: keep the first authoritative record per (symbol, action) when iterating backwards;
+        # trade-journal entries (added first) are preserved over log-derived duplicates.
+        seen_actions = {}
+        for a in reversed(actions):
+            seen_actions[(a['symbol'], a['action'])] = a
+        actions = list(seen_actions.values())
+
+        actions.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+        return jsonify({'actions': actions[:100], 'count': len(actions), 'timestamp': datetime.now().isoformat()})
+    except Exception as e:
+        logger.error(f"Explain API error: {e}")
+        return jsonify({'error': str(e), 'actions': []}), 500
 
 
 @app.route('/api/morning-report')

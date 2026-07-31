@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 
 from market_data import MarketDataFetcher
 from risk_manager import Position, PositionStatus
+from config import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,8 +49,14 @@ class SmartExitAI:
         if position.status not in {PositionStatus.OPEN, PositionStatus.PARTIAL}:
             return None
 
-        # Minimum Profit Rule: SmartExit is not a stop-loss, so never sell at or below entry
-        if current_price <= position.entry_price:
+        # Minimum Profit Rule: SmartExit is not a stop-loss; avoid tiny/noisy gains
+        min_profit_pct = config.SMARTEXIT_MIN_PROFIT_PCT
+        unrealized_pct = (current_price - position.entry_price) / position.entry_price
+        if unrealized_pct < min_profit_pct:
+            logger.debug(
+                f"SmartExit suppressed for {position.symbol}: unrealized {unrealized_pct*100:.2f}% "
+                f"below {min_profit_pct*100:.2f}% minimum"
+            )
             return None
 
         symbol = position.symbol
@@ -88,6 +95,13 @@ class SmartExitAI:
         latest = df.iloc[-1]
         prev   = df.iloc[-2] if len(df) >= 2 else latest
 
+        # ── Volume context (used by all price-based triggers) ──────────────────
+        vol_sma = latest.get('Vol_SMA20', 0)
+        vol_ratio = 0.0
+        if pd.notna(vol_sma) and vol_sma > 0:
+            vol_ratio = float(latest['Volume']) / float(vol_sma)
+        vol_confirmed = vol_ratio >= config.SMARTEXIT_VOLUME_CONFIRMATION_RATIO
+
         # ── Trigger 1: RSI Overbought ──────────────────────────────────────────
         rsi = latest.get('RSI', 50)
         if pd.notna(rsi) and rsi > 80:
@@ -98,15 +112,13 @@ class SmartExitAI:
         macd_prev = prev.get('MACD_Hist')
         if (macd_curr is not None and macd_prev is not None
                 and pd.notna(macd_curr) and pd.notna(macd_prev)
-                and float(macd_prev) >= 0 and float(macd_curr) < 0):
+                and float(macd_prev) >= 0 and float(macd_curr) < 0
+                and vol_confirmed):
             triggers_hit.append("Bearish MACD crossover")
 
         # ── Trigger 3: Volume collapse ─────────────────────────────────────────
-        vol_sma = latest.get('Vol_SMA20', 0)
-        if pd.notna(vol_sma) and vol_sma > 0:
-            vol_ratio = float(latest['Volume']) / float(vol_sma)
-            if vol_ratio < 0.4:
-                triggers_hit.append(f"Volume collapse ({vol_ratio:.2f}x avg)")
+        if vol_ratio < 0.4:
+            triggers_hit.append(f"Volume collapse ({vol_ratio:.2f}x avg)")
 
         # ── Trigger 4: Market turns BEAR ──────────────────────────────────────
         if str(regime).upper() == 'BEAR':
@@ -123,14 +135,16 @@ class SmartExitAI:
                                float(latest['Low']),  float(latest['Close']))
 
             # Bearish engulfing: prev candle green, current red and body engulfs prev
-            if c1 > o1 and c2 < o2 and o2 >= c1 and c2 <= o1:
+            if (c1 > o1 and c2 < o2 and o2 >= c1 and c2 <= o1
+                    and vol_confirmed):
                 triggers_hit.append("Bearish engulfing candle")
 
             # Shooting star: small body at bottom, long upper wick
             body  = abs(c2 - o2)
             upper = h2 - max(c2, o2)
             lower = min(c2, o2) - l2
-            if body > 0 and upper > 2 * body and lower < body * 0.5:
+            if (body > 0 and upper > 2 * body and lower < body * 0.5
+                    and vol_confirmed):
                 triggers_hit.append("Shooting star candle")
 
         if not triggers_hit:
