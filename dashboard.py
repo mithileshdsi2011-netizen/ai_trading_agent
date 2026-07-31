@@ -1179,6 +1179,7 @@ HTML = """<!DOCTYPE html>
 <title>AI Swing Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="/static/chart.umd.min.js?v=2"></script>
+<script src="/static/ai_signals.js?v=2"></script>
 <script>
 // Report JS errors to server for debugging
 window.onerror=function(msg, url, line, col, err){
@@ -1929,85 +1930,116 @@ tr:last-child td{border:none}
 <!-- ===== TAB: AI SIGNALS ===== -->
 <div id="tab-signals" class="tab-content">
 
-  <!-- Stats bar -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-    <div class="card"><div class="stat-label">Universe Scanned</div><div class="stat-value blue" id="s-scanned">—</div></div>
-    <div class="card"><div class="stat-label">Actionable Buys</div><div class="stat-value green" id="s-buy-cnt">—</div></div>
-    <div class="card"><div class="stat-label">Rejected</div><div class="stat-value red" id="s-rejected-cnt">—</div></div>
-    <div class="card"><div class="stat-label">Market Regime</div><div class="stat-value yellow" id="s-regime">—</div></div>
-  </div>
+<style>
+#ais-summary-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:18px}
+.ais-card{background:linear-gradient(135deg,#111827 0%,#0f1724 100%);border-radius:14px;padding:16px;border:1px solid #1f2937;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.ais-card-title{color:#9ca3af;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.ais-card-value{font-size:24px;font-weight:800;line-height:1}
+.ais-section-title{color:#f9fafb;font-size:14px;font-weight:700;margin-bottom:12px}
+.ais-pipeline-row{display:flex;gap:10px;align-items:flex-end;justify-content:space-between}
+.ais-pipeline-step{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1}
+.ais-funnel-bar{width:100%;border-radius:6px 6px 0 0;min-height:8px}
+.ais-funnel-count{font-size:18px;font-weight:800}
+.ais-funnel-label{font-size:10px;color:#9ca3af;text-align:center}
+.ais-funnel-arrow{color:#4b5563;font-size:20px}
+.ais-closest-card{border-radius:10px;padding:12px;margin-bottom:10px}
+.ais-table-wrap{max-height:420px;overflow:auto;border-radius:8px;border:1px solid #1f2937}
+#ais-candidate-thead{position:sticky;top:0;background:#0f1724;z-index:1}
+#ais-candidate-thead th{padding:10px 8px;text-align:left;border-bottom:1px solid #1f2937;font-size:10px;color:#9ca3af}
+.ais-candidate-row{cursor:pointer}
+.ais-candidate-row:hover td{background:#1f2937}
+.ais-sort-btn{cursor:pointer;font-size:11px;margin-left:4px}
+.ais-score-pill{border-radius:6px;padding:3px 8px;font-size:12px;font-weight:700;border:1px solid}
+.ais-decision-pill{border-radius:99px;padding:3px 8px;font-size:11px;font-weight:700}
+.ais-stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.ais-stat-chip{background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center}
+.ais-stat-chip b{font-size:18px}
+.ais-toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.ais-toolbar input,.ais-toolbar select{background:#0f1724;border:1px solid #374151;color:#e2e8f0;border-radius:8px;padding:8px 12px;font-size:12px;outline:none}
+.ais-toolbar input:focus,.ais-toolbar select:focus{border-color:#60a5fa}
+.ais-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;padding:20px}
+.ais-modal-content{background:#111827;border:1px solid #1f2937;border-radius:16px;max-width:640px;width:100%;max-height:85vh;overflow-y:auto;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+.ais-detail-metric{background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:10px 12px}
+.ais-detail-label{font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.ais-detail-section{margin-top:12px;background:#0f1724;border:1px solid #1f2937;border-radius:10px;padding:12px}
+.bg-green-gradient{background:linear-gradient(135deg,#111827,#0f1724);border-color:#22c55e44}
+.bg-red-gradient{background:linear-gradient(135deg,#111827,#1f1010);border-color:#ef444444}
+.bg-yellow-gradient{background:linear-gradient(135deg,#111827,#1a160a);border-color:#eab30844}
+.bg-blue-gradient{background:linear-gradient(135deg,#111827,#0f1724);border-color:#3b82f644}
+</style>
 
-  <!-- Scan status banner -->
-  <div id="s-scan-banner" style="display:none;background:#1d4ed822;border:1px solid #3b82f644;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#93c5fd">
-    ⏳ Background scan running — results will update automatically in a few minutes…
-  </div>
+  <!-- Why No Trade Today? -->
+  <div id="ais-why-no-trade" class="card mb-4" style="display:none"></div>
 
-  <!-- ── TODAY'S CANDIDATES ─────────────────────────────────────── -->
+  <!-- Top summary cards -->
+  <div id="ais-summary-cards"></div>
+
+  <!-- Pipeline -->
   <div class="card mb-4">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-      <div style="font-size:14px;font-weight:700;color:#f9fafb">🎯 Today's Candidates</div>
-      <div style="font-size:11px;color:#4b5563" id="s-candidate-count">—</div>
+    <div class="ais-section-title">Trading Pipeline Funnel</div>
+    <div id="ais-pipeline" class="ais-pipeline-row">Scanning…</div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+    <!-- Rejection analysis -->
+    <div class="card">
+      <div class="ais-section-title">Rejection Analysis</div>
+      <div id="ais-rejection-bars">—</div>
     </div>
-    <div style="font-size:11px;color:#4b5563;margin-bottom:14px">
-      Stocks that passed all filters: Score ≥ 70 · R:R ≥ 1.5 · Confidence ≥ threshold · Not already held
-    </div>
-    <div id="s-candidates-empty" style="display:none;text-align:center;padding:32px;color:#4b5563;font-size:13px">
-      No actionable candidates right now — scan running or market sideways
-    </div>
-    <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse" id="s-candidates-table-wrap">
-      <thead><tr>
-        <th style="text-align:center;width:36px;color:#4b5563;font-size:11px">#</th>
-        <th style="text-align:left">Symbol</th>
-        <th style="text-align:center">Score</th>
-        <th style="text-align:center">Conf.</th>
-        <th style="text-align:center">R:R</th>
-        <th style="text-align:left">Trend</th>
-        <th style="text-align:left">Sector</th>
-        <th style="text-align:right">Entry</th>
-        <th style="text-align:right">Target</th>
-        <th style="text-align:right">SL</th>
-        <th style="text-align:left">Why</th>
-      </tr></thead>
-      <tbody id="s-candidates-body">
-        <tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">Scanning market…</td></tr>
-      </tbody>
-    </table>
+
+    <!-- Closest BUY opportunities -->
+    <div class="card">
+      <div class="ais-section-title">Closest BUY Opportunities</div>
+      <div id="ais-closest">—</div>
     </div>
   </div>
 
-  <!-- ── ALL SCANNED SIGNALS ────────────────────────────────────── -->
+  <!-- Enhanced Candidate Table -->
   <div class="card mb-4">
-    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleRejected()">
-      <div style="font-size:14px;font-weight:700;color:#9ca3af">📋 All Scanned Signals <span id="s-rejected-badge" style="font-size:11px;font-weight:400;color:#4b5563"></span></div>
-      <div id="s-rejected-chevron" style="color:#4b5563;font-size:16px;transition:transform .2s">▲</div>
+    <div class="ais-section-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span>Enhanced Candidate Table</span>
+      <div class="ais-toolbar">
+        <input id="ais-search" type="text" placeholder="Search symbol…">
+        <select id="ais-filter-sector"><option value="">All Sectors</option></select>
+        <select id="ais-filter-decision"><option value="">All Decisions</option>
+          <option value="BUY">BUY</option>
+          <option value="SELL">SELL</option>
+          <option value="WATCH">Watch / Hold</option>
+          <option value="SKIP">Skip</option>
+        </select>
+      </div>
     </div>
-    <div id="s-rejected-body" style="margin-top:12px;display:block">
-      <div style="font-size:11px;color:#4b5563;margin-bottom:10px">All stocks scanned this cycle — shows score, confidence, and why the bot did or did not act.</div>
+    <div class="ais-table-wrap">
       <table style="width:100%;border-collapse:collapse">
-        <thead><tr>
-          <th style="text-align:left">Symbol</th>
-          <th style="text-align:left">Sector</th>
-          <th style="text-align:center">Score</th>
-          <th style="text-align:center">Conf.</th>
-          <th style="text-align:left">Bot Decision</th>
-        </tr></thead>
-        <tbody id="s-rejected-table">
-          <tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">—</td></tr>
-        </tbody>
+        <thead id="ais-candidate-thead"></thead>
+        <tbody id="ais-candidate-body"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- ── AI CONFIDENCE METERS (top candidates) ──────────────────── -->
-  <div class="card">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🧠 AI Confidence — Top Picks</div>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div id="s-conf-meters"></div>
-      <div style="grid-column:span 2">
-        <div style="font-size:12px;color:#4b5563;margin-bottom:8px">Top Opportunity Details</div>
-        <div id="s-top-detail" style="font-size:13px;color:#9ca3af">—</div>
+  <!-- Today's Statistics -->
+  <div class="card mb-4">
+    <div class="ais-section-title">Today's Statistics</div>
+    <div id="ais-today-stats" class="ais-stats-grid">—</div>
+  </div>
+
+  <!-- Missed Opportunities (optional, after market close) -->
+  <div class="card mb-4" id="ais-missed" style="display:none">
+    <div class="ais-section-title">Missed Opportunities</div>
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr><th>Symbol</th><th>Skip Reason</th><th>Highest Gain After Skip</th><th>Result</th></tr></thead>
+      <tbody id="ais-missed-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Detail modal -->
+  <div id="ais-detail-modal" class="ais-modal" onclick="if(event.target===this) closeSignalDetail()">
+    <div class="ais-modal-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="ais-section-title" style="margin:0">Signal Details</div>
+        <button onclick="closeSignalDetail()" style="background:transparent;border:none;color:#9ca3af;font-size:18px;cursor:pointer">✕</button>
       </div>
+      <div id="ais-detail-content"></div>
     </div>
   </div>
 
@@ -3695,152 +3727,7 @@ async function load(){
     } // end Chart guard
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
-    const allSigs=d.signals||[];
-    const minConf=d.cfg_min_confidence||0.60;
-
-    // Split into candidates (actionable) and rejected
-    const candidates=[];
-    const rejected=[];
-    allSigs.forEach(s=>{
-      const bd=s.bot_decision||'';
-      if(bd==='Will buy*') candidates.push(s);
-      else rejected.push(s);
-    });
-
-    // Stats
-    document.getElementById('s-scanned').textContent=(d.stocks_scanned||allSigs.length||0);
-    document.getElementById('s-buy-cnt').textContent=candidates.length;
-    document.getElementById('s-rejected-cnt').textContent=rejected.length;
-    const sRegEl=document.getElementById('s-regime');
-    sRegEl.textContent=d.market_regime||'—';
-    sRegEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
-
-    // Scan banner
-    const bannerEl=document.getElementById('s-scan-banner');
-    if(bannerEl) bannerEl.style.display=d.scan_running?'block':'none';
-
-    // ── TODAY'S CANDIDATES TABLE ──
-    const candBody=document.getElementById('s-candidates-body');
-    const candCount=document.getElementById('s-candidate-count');
-    const candEmpty=document.getElementById('s-candidates-empty');
-    const candWrap=document.getElementById('s-candidates-table-wrap');
-
-    if(candidates.length){
-      candEmpty&&(candEmpty.style.display='none');
-      candWrap&&(candWrap.style.display='');
-      candCount&&(candCount.textContent=candidates.length+' actionable stock'+(candidates.length!==1?'s':''));
-      candBody.innerHTML=candidates.map((s,i)=>{
-        const score=Math.round(s.overall_score||0);
-        const conf=Math.round((s.confidence||0)*100);
-        const rr=parseFloat(s.risk_reward_ratio||0);
-        const sector=s.market_regime?'':(s.sector||'—');
-        // Extract sector from bot reasoning / signal
-        const sectorLabel=s.sector||'—';
-        const trend=s.trend||'—';
-        // Short reason from reasoning field
-        const reasoning=(s.reasoning||'').split('.')[0].replace(/based on/i,'').trim().substring(0,60)||'AI signal';
-        return `<tr style="border-bottom:1px solid #1f2937">
-          <td style="text-align:center;color:#4b5563;font-size:12px;padding:10px 4px">${i+1}</td>
-          <td style="padding:10px 8px">
-            <div style="font-weight:700;color:#f9fafb;font-size:14px">${s.symbol}</div>
-          </td>
-          <td style="text-align:center;padding:10px 6px">
-            <span style="background:${score>=80?'#16a34a33':score>=70?'#ca8a0433':'#4b556333'};color:${score>=80?'#22c55e':score>=70?'#eab308':'#9ca3af'};padding:2px 8px;border-radius:4px;font-weight:700;font-size:13px">${score}</span>
-          </td>
-          <td style="text-align:center;padding:10px 6px">
-            <div class="progress-bar" style="width:64px;display:inline-block;vertical-align:middle">
-              <div class="progress-fill" style="width:${conf}%;background:${scoreColor(conf)}"></div>
-            </div>
-            <span style="font-size:11px;color:${scoreColor(conf)};margin-left:4px">${conf}%</span>
-          </td>
-          <td style="text-align:center;padding:10px 6px;font-weight:600;color:${rr>=2?'#22c55e':rr>=1.5?'#eab308':'#9ca3af'}">${rr>0?rr.toFixed(1)+'x':'—'}</td>
-          <td style="padding:10px 6px;color:${trend==='UPTREND'||trend==='Bullish'?'#22c55e':trend==='DOWNTREND'||trend==='Bearish'?'#ef4444':'#eab308'};font-size:12px">${trend}</td>
-          <td style="padding:10px 6px;color:#6b7280;font-size:11px">${sectorLabel}</td>
-          <td style="text-align:right;padding:10px 6px;font-family:monospace">${rupee(s.price)}</td>
-          <td style="text-align:right;padding:10px 6px;color:#22c55e;font-family:monospace">${rupee(s.target)}</td>
-          <td style="text-align:right;padding:10px 6px;color:#ef4444;font-family:monospace">${rupee(s.stop_loss)}</td>
-          <td style="padding:10px 6px;color:#9ca3af;font-size:11px;max-width:180px">${reasoning}…</td>
-        </tr>`;
-      }).join('');
-    } else if(!d.scan_running){
-      candBody.innerHTML='';
-      candEmpty&&(candEmpty.style.display='');
-      candWrap&&(candWrap.style.display='none');
-      candCount&&(candCount.textContent='0 candidates');
-    } else {
-      candBody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:28px">⏳ Scanning…</td></tr>';
-      candCount&&(candCount.textContent='Scanning…');
-    }
-
-    // ── ALL SCANNED SIGNALS TABLE (candidates + rejected combined) ──
-    const rejBody=document.getElementById('s-rejected-table');
-    const rejBadge=document.getElementById('s-rejected-badge');
-    // Show ALL signals sorted: candidates (Will buy*) first, then rest by score
-    const allSorted=[...candidates,...rejected].sort((a,b)=>{
-      if(a.bot_decision==='Will buy*' && b.bot_decision!=='Will buy*') return -1;
-      if(b.bot_decision==='Will buy*' && a.bot_decision!=='Will buy*') return 1;
-      return (b.overall_score||0)-(a.overall_score||0);
-    });
-    if(rejBadge) rejBadge.textContent='('+allSorted.length+' stocks)';
-    document.getElementById('s-rejected-cnt').textContent=rejected.length;
-    if(allSorted.length){
-      rejBody.innerHTML=allSorted.map(s=>{
-        const score=Math.round(s.overall_score||0);
-        const conf=Math.round((s.confidence||0)*100);
-        const bd=s.bot_decision||'—';
-        let rejTag='';
-        if(bd==='Will buy*') rejTag='<span style="background:#16a34a33;color:#4ade80;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700">✅ Will Buy</span>';
-        else if(bd.includes('Already held')||bd.includes('Already Held')) rejTag='<span style="background:#1d4ed822;color:#60a5fa;padding:2px 7px;border-radius:3px;font-size:10px">📦 Already Held</span>';
-        else if(bd.includes('Max positions')) rejTag='<span style="background:#7c3aed22;color:#a78bfa;padding:2px 7px;border-radius:3px;font-size:10px">🔒 Slots Full</span>';
-        else if(bd.includes('Score')) rejTag='<span style="background:#4b556333;color:#9ca3af;padding:2px 7px;border-radius:3px;font-size:10px">📉 Low Score</span>';
-        else if(bd.includes('R:R')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">⚖️ Poor R:R</span>';
-        else if(bd.includes('Confidence')) rejTag='<span style="background:#ca8a0422;color:#eab308;padding:2px 7px;border-radius:3px;font-size:10px">🎯 Low Conf.</span>';
-        else if(bd.includes('SELL')) rejTag='<span style="background:#dc262622;color:#ef4444;padding:2px 7px;border-radius:3px;font-size:10px">📉 SELL Signal</span>';
-        else rejTag=`<span style="color:#4b5563;font-size:11px">${bd}</span>`;
-        const symColor=bd==='Will buy*'?'#f9fafb':bd.includes('Already Held')||bd.includes('Already held')?'#60a5fa':'#9ca3af';
-        return `<tr style="border-bottom:1px solid #1f293766">
-          <td style="padding:7px 8px;font-weight:700;color:${symColor}">${s.symbol}</td>
-          <td style="padding:7px 6px;color:#4b5563;font-size:11px">${s.sector||'—'}</td>
-          <td style="text-align:center;padding:7px 6px;color:${score>=80?'#22c55e':score>=70?'#eab308':'#4b5563'};font-size:12px;font-weight:600">${score||'—'}</td>
-          <td style="text-align:center;padding:7px 6px;color:#4b5563;font-size:11px">${conf?conf+'%':'—'}</td>
-          <td style="padding:7px 6px">${rejTag}</td>
-        </tr>`;
-      }).join('');
-    } else {
-      rejBody.innerHTML='<tr><td colspan="5" style="text-align:center;color:#4b5563;padding:16px">Scan running — results appear here in ~30s</td></tr>';
-    }
-
-    // Confidence meters (top candidates only)
-    const cmEl=document.getElementById('s-conf-meters');
-    const topPicks=candidates.slice(0,5);
-    cmEl.innerHTML=topPicks.map(s=>{
-      const sc=Math.round((s.confidence||0)*100);
-      return `<div style="margin-bottom:10px">
-        <div class="flex justify-between" style="margin-bottom:3px">
-          <span style="font-size:12px;font-weight:600;color:#f9fafb">${s.symbol}</span>
-          <span style="font-size:12px;color:${scoreColor(sc)}">${sc}%</span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill" style="width:${sc}%;background:${scoreColor(sc)}"></div></div>
-      </div>`;
-    }).join('')||'<div style="color:#4b5563;font-size:13px">No actionable picks yet</div>';
-
-    // Top detail panel
-    const topD=document.getElementById('s-top-detail');
-    if(candidates.length&&topD){
-      const t=candidates[0];
-      const score=Math.round(t.overall_score||0);
-      const conf=Math.round((t.confidence||0)*100);
-      topD.innerHTML=`<div style="font-size:15px;font-weight:700;color:#f9fafb;margin-bottom:8px">${t.symbol} <span style="font-size:12px;font-weight:400;color:#4b5563">${t.sector||''}</span></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
-          <div><span style="color:#4b5563;font-size:11px">Score</span><br><b style="color:${score>=80?'#22c55e':'#eab308'}">${score}/100</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Confidence</span><br><b style="color:#93c5fd">${conf}%</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Entry</span><br><b>${rupee(t.price)}</b></div>
-          <div><span style="color:#4b5563;font-size:11px">Target / SL</span><br><b class="green">${rupee(t.target)}</b> / <b class="red">${rupee(t.stop_loss)}</b></div>
-        </div>
-        <div style="font-size:11px;color:#6b7280;line-height:1.5">${(t.reasoning||'').substring(0,200)}…</div>`;
-    } else if(topD){
-      topD.innerHTML='<span style="color:#4b5563">No actionable signals yet</span>';
-    }
+    if (typeof renderAiSignals === 'function') renderAiSignals(d);
 
     // ── TAB: ANALYTICS ────────────────────────────────────────────────────────
     const strat=d.strategy_stats||{};
@@ -3930,7 +3817,7 @@ async function load(){
     document.getElementById('bs-last-scan').textContent=nowStr;
     document.getElementById('bs-next-scan').textContent=nextStr;
     document.getElementById('bs-scanned').textContent=d.stocks_scanned||'—';
-    document.getElementById('bs-ai-signals').textContent=allSigs.length;
+    document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
     document.getElementById('bs-orders-exec').textContent=d.total_trades||0;
     document.getElementById('bs-cfg-amount').textContent=rupee(d.cfg_trading_amount||d.budget||5000);
     document.getElementById('bs-cfg-maxpos').textContent=(d.cfg_max_positions||5);

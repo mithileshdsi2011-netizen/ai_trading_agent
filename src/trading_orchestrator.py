@@ -971,24 +971,24 @@ class TradingOrchestrator:
         """
         logger.info(f"Starting scheduled trading with {interval_minutes} minute intervals")
         self.is_running = True
-        
-        # Schedule trading cycles (non-reentrant wrapper prevents overlaps)
-        schedule.every(interval_minutes).minutes.do(self._run_once_wrapper)
-        
-        # Schedule end-of-day close at 14:55 IST — 5 min before cutoff
-        schedule.every().day.at("14:55").do(self.end_of_day_close)
-        
-        # Schedule daily email report at 4:00 PM IST
-        schedule.every().day.at("16:00").do(self.daily_email_report)
-        
-        # Schedule pre-market check (9:20 AM IST - 10 minutes before open)
-        schedule.every().day.at("09:20").do(self.pre_market_check)
-        
-        # Schedule daily reset
-        schedule.every().day.at("09:00").do(self.daily_reset)
 
-        # Schedule IP check every 30 minutes to catch dynamic IP changes early
+        # Daily reset (before anything else)
+        schedule.every().day.at("08:45").do(self.daily_reset)
+
+        # Pre-market preparation
+        schedule.every().day.at("09:05").do(self.pre_market_check)
+
+        # Trading cycle
+        schedule.every(interval_minutes).minutes.do(self._run_once_wrapper)
+
+        # IP check
         schedule.every(30).minutes.do(self._check_ip_whitelist)
+
+        # End-of-day position close (if enabled)
+        schedule.every().day.at("15:10").do(self.end_of_day_close)
+
+        # Daily email report at 3:30 PM IST
+        schedule.every().day.at("15:30").do(self.daily_email_report)
 
         # Run one cycle immediately on startup so we don't wait up to 15 min
         logger.info("Running immediate startup cycle...")
@@ -1656,7 +1656,7 @@ class TradingOrchestrator:
         }
     
     def daily_email_report(self):
-        """Send daily email report at 4:00 PM IST — trading days only."""
+        """Send daily email report at 3:30 PM IST — trading days only."""
         if not self._is_trading_day():
             logger.info("Daily email report skipped — not a trading day (weekend/holiday)")
             return
