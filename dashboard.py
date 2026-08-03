@@ -1337,6 +1337,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
   <button class="tab-btn" onclick="switchTab('portfolio-optimizer',this)">📊 Portfolio Optimizer</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
+  <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -2921,6 +2922,51 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-portfolio-optimizer -->
 
+<!-- ===== TAB: BACKTESTING ===== -->
+<div id="tab-backtesting" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🧪 Enterprise Backtesting</h3>
+      <button class="btn" onclick="refreshBacktesting()">Refresh</button>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="bt-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Equity Curve</div>
+      <div id="bt-equity-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Drawdown Curve</div>
+      <div id="bt-drawdown-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Monthly Returns</div>
+      <div id="bt-monthly" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Walk-Forward Results</div>
+      <div id="bt-walkforward" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Monte Carlo Distribution</div>
+    <div id="bt-monte" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Strategy Comparison</div>
+    <div id="bt-compare" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-backtesting -->
+
 </div><!-- /main container -->
 
 <script>
@@ -2970,6 +3016,7 @@ function switchTab(id,btn){
   if(id==='explain') loadExplainability();
   if(id==='market-intelligence') loadMarketIntelligence();
   if(id==='portfolio-optimizer') loadPortfolioOptimizer();
+  if(id==='backtesting') loadBacktesting();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -5180,6 +5227,108 @@ function renderAIMessage(d){
   }
   return `<div class="msg-ai">${body}</div>`;
 }
+
+// ─── Backtesting Loader ───────────────────────────────────────────────────────
+async function loadBacktesting(){
+  try{
+    const r=await fetch('/api/backtest/results');
+    const d=await r.json();
+    if(d.error){throw new Error(d.error);}
+    const b=d.backtest||{};
+    const wf=d.walk_forward||[];
+    const mc=d.monte_carlo||{};
+
+    const kpi=document.getElementById('bt-kpi');
+    if(kpi){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('Total Return', pct(b.total_return_pct)),
+        add('CAGR', pct(b.cagr_pct)),
+        add('Max Drawdown', pct(b.max_drawdown_pct), 'red'),
+        add('Win Rate', pct(b.win_rate_pct)),
+        add('Sharpe', b.sharpe!=null?b.sharpe.toFixed(2):'—'),
+        add('Sortino', b.sortino!=null?b.sortino.toFixed(2):'—'),
+        add('Calmar', b.calmar!=null?b.calmar.toFixed(2):'—'),
+        add('Profit Factor', b.profit_factor!=null?b.profit_factor.toFixed(2):'—'),
+        add('Avg Win', rupee(b.avg_win)),
+        add('Avg Loss', rupee(b.avg_loss), 'red'),
+        add('Expectancy', rupee(b.expectancy)),
+        add('Avg Holding', b.avg_holding_days!=null?b.avg_holding_days.toFixed(1)+'d':'—'),
+      ].join('');
+    }
+
+    const fmtCurve=(data, key='equity')=>{
+      if(!data||!data.length)return 'No data';
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Date</th><th style="padding:4px;text-align:left;color:#f9fafb">Value</th></tr></thead><tbody>';
+      data.slice(-30).forEach(pt=>{
+        const v=parseFloat(pt[key]||0).toFixed(2);
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${pt.date}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${key==='equity'?rupee(v):pct(v)}</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      return rows;
+    };
+    const equity=document.getElementById('bt-equity-curve');
+    if(equity)equity.innerHTML=fmtCurve(b.equity_curve,'equity');
+    const dd=document.getElementById('bt-drawdown-curve');
+    if(dd)dd.innerHTML=fmtCurve(b.drawdown_curve,'drawdown_pct');
+
+    const mon=document.getElementById('bt-monthly');
+    if(mon){
+      const m=b.monthly_returns||{};
+      const rows=Object.entries(m).map(([dt,v])=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:100px;display:inline-block">${dt.split(' ')[0]}</span><span class="stat-value-sm ${v>=0?'green':'red'}">${pct(v)}</span></div>`).join('');
+      mon.innerHTML=rows||'No data';
+    }
+
+    const wfd=document.getElementById('bt-walkforward');
+    if(wfd){
+      if(!wf.length){wfd.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Fold</th><th style="padding:4px;text-align:right;color:#f9fafb">Return</th><th style="padding:4px;text-align:right;color:#f9fafb">Trades</th><th style="padding:4px;text-align:right;color:#f9fafb">Sharpe</th></tr></thead><tbody>';
+        wf.forEach(f=>{
+          const res=f.result||{};
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${f.name}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${pct(res.total_return_pct)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${res.trades_count||0}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${res.sharpe!=null?res.sharpe.toFixed(2):'—'}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        wfd.innerHTML=rows;
+      }
+    }
+
+    const mcEl=document.getElementById('bt-monte');
+    if(mcEl){
+      mcEl.innerHTML=[
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Simulations</span><span style="color:#f9fafb">${mc.n_simulations||0}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Probability of Profit</span><span class="stat-value-sm ${mc.probability_of_profit>=50?'green':'red'}">${pct(mc.probability_of_profit)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Worst Drawdown (5th %ile)</span><span style="color:#f87171">${pct(mc.worst_drawdown_pct)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Best Drawdown (95th %ile)</span><span style="color:#4ade80">${pct(mc.best_drawdown_pct)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Mean Final P&L</span><span style="color:#f9fafb">${rupee(mc.mean_final_pnl)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">95% CI Low</span><span style="color:#f9fafb">${rupee(mc.ci_5_final_pnl)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">95% CI High</span><span style="color:#f9fafb">${rupee(mc.ci_95_final_pnl)}</span></div>`,
+      ].join('');
+    }
+
+    const cmp=document.getElementById('bt-compare');
+    if(cmp){
+      const c=d.comparison||{};
+      const strats=c.strategies||[];
+      if(!strats.length){cmp.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:right;color:#f9fafb">CAGR %</th><th style="padding:4px;text-align:right;color:#f9fafb">CAGR Δ</th><th style="padding:4px;text-align:right;color:#f9fafb">Sharpe Δ</th><th style="padding:4px;text-align:right;color:#f9fafb">DD Δ</th></tr></thead><tbody>';
+        strats.forEach(s=>{
+          const imp=s.improvement_pct||{};
+          const base=s.metrics||{};
+          const arrow=(v)=>v>0?'↗':v<0?'↘':'—';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${s.strategy}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${pct(base.cagr_pct)}</td><td style="padding:4px;color:${imp.cagr_pct>=0?'#4ade80':'#f87171'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.cagr_pct)} ${(imp.cagr_pct||0).toFixed(1)}%</td><td style="padding:4px;color:${imp.sharpe>=0?'#4ade80':'#f87171'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.sharpe)} ${(imp.sharpe||0).toFixed(1)}%</td><td style="padding:4px;color:${imp.max_drawdown_pct>0?'#f87171':imp.max_drawdown_pct<0?'#4ade80':'#9ca3af'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.max_drawdown_pct)} ${(imp.max_drawdown_pct||0).toFixed(1)}%</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        cmp.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('Backtesting load error:',e);}
+}
+
+async function refreshBacktesting(){
+  await loadBacktesting();
+}
 </script>
 </body></html>"""
 
@@ -6732,6 +6881,29 @@ def api_backtest():
         return jsonify(result)
     except Exception as e:
         logger.exception("Backtest error")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/backtest/results')
+def api_backtest_results():
+    """Return latest EnterpriseBacktestEngine results (run, walk-forward, Monte Carlo, comparison)."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from persistence import get_store
+        store = get_store()
+        raw_run = store.get_latest_backtest_results() or {}
+        result_json = raw_run.get('result_json', '{}')
+        backtest = json.loads(result_json) if isinstance(result_json, str) else {}
+        wf = store.get_latest_walk_forward_results(limit=5)
+        mc = store.get_latest_monte_carlo_results() or {}
+        mc_json = mc.get('result_json', '{}')
+        monte = json.loads(mc_json) if isinstance(mc_json, str) else {}
+        return jsonify({
+            'backtest': backtest,
+            'walk_forward': [{'name': r.get('name'), 'result': json.loads(r.get('result_json', '{}'))} for r in wf],
+            'monte_carlo': monte,
+        })
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 

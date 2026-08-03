@@ -289,6 +289,50 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_allocation_history_timestamp
                     ON allocation_history (timestamp);
+
+                CREATE TABLE IF NOT EXISTS backtest_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    initial_capital REAL NOT NULL DEFAULT 0,
+                    final_equity REAL NOT NULL DEFAULT 0,
+                    total_return_pct REAL NOT NULL DEFAULT 0,
+                    trades_count INTEGER NOT NULL DEFAULT 0,
+                    meta_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_backtest_runs_timestamp
+                    ON backtest_runs (timestamp);
+
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    backtest_run_id INTEGER,
+                    timestamp TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (backtest_run_id) REFERENCES backtest_runs(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_backtest_results_timestamp
+                    ON backtest_results (timestamp);
+
+                CREATE TABLE IF NOT EXISTS walk_forward_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    result_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_walk_forward_results_timestamp
+                    ON walk_forward_results (timestamp);
+
+                CREATE TABLE IF NOT EXISTS monte_carlo_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_monte_carlo_results_timestamp
+                    ON monte_carlo_results (timestamp);
                 """
             )
 
@@ -1247,6 +1291,151 @@ class TradingStore:
                     }
                     for r in cur.fetchall()
                 ]
+
+    # ── backtesting ───────────────────────────────────────────────────────
+
+    def save_backtest_run(self, snapshot: Dict[str, Any]) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO backtest_runs
+                    (timestamp, name, initial_capital, final_equity, total_return_pct, trades_count, meta_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("name", ""),
+                        float(snapshot.get("initial_capital", 0)),
+                        float(snapshot.get("final_equity", 0)),
+                        float(snapshot.get("total_return_pct", 0)),
+                        int(snapshot.get("trades_count", 0)),
+                        snapshot.get("meta_json", "{}"),
+                    ),
+                )
+                return cur.lastrowid
+
+    def get_latest_backtest_run(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, timestamp, name, initial_capital, final_equity, total_return_pct, trades_count, meta_json
+                    FROM backtest_runs ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "name": row["name"],
+                    "initial_capital": row["initial_capital"],
+                    "final_equity": row["final_equity"],
+                    "total_return_pct": row["total_return_pct"],
+                    "trades_count": row["trades_count"],
+                    "meta_json": row["meta_json"],
+                }
+
+    def save_backtest_results(self, snapshot: Dict[str, Any]) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO backtest_results
+                    (backtest_run_id, timestamp, result_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("backtest_run_id"),
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("result_json", "{}"),
+                    ),
+                )
+                return cur.lastrowid
+
+    def get_latest_backtest_results(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT r.id, r.timestamp, r.result_json, b.name
+                    FROM backtest_results r
+                    LEFT JOIN backtest_runs b ON b.id = r.backtest_run_id
+                    ORDER BY r.timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "name": row["name"],
+                    "result_json": row["result_json"],
+                }
+
+    def save_walk_forward_results(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO walk_forward_results
+                    (timestamp, name, result_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("name", ""),
+                        snapshot.get("result_json", "{}"),
+                    ),
+                )
+
+    def get_latest_walk_forward_results(self, limit: int = 10) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, name, result_json
+                    FROM walk_forward_results ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "name": r["name"],
+                        "result_json": r["result_json"],
+                    }
+                    for r in cur.fetchall()
+                ]
+
+    def save_monte_carlo_results(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO monte_carlo_results
+                    (timestamp, result_json)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("result_json", "{}"),
+                    ),
+                )
+
+    def get_latest_monte_carlo_results(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, result_json
+                    FROM monte_carlo_results ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {"timestamp": row["timestamp"], "result_json": row["result_json"]}
 
 
 # Singleton instance for the process
