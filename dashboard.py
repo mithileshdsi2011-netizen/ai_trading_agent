@@ -1344,6 +1344,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
   <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
   <button class="tab-btn" onclick="switchTab('monitoring',this)">🚨 Monitoring</button>
+  <button class="tab-btn" onclick="switchTab('smart-execution',this)">⚡ Smart Execution</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -3042,6 +3043,35 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-monitoring -->
 
+<!-- ===== TAB: SMART EXECUTION ===== -->
+<div id="tab-smart-execution" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">⚡ Smart Execution Engine</h3>
+      <div id="exec-quality" style="font-size:22px;font-weight:700">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="exec-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Order Queue</div>
+      <div id="exec-queue" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Today's Orders</div>
+      <div id="exec-orders" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Execution Analytics</div>
+    <div id="exec-analytics" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-smart-execution -->
+
 </div><!-- /main container -->
 
 <script>
@@ -3094,6 +3124,7 @@ function switchTab(id,btn){
   if(id==='backtesting') loadBacktesting();
   if(id==='ai-learning') loadAiLearning();
   if(id==='monitoring') loadMonitoring();
+  if(id==='smart-execution') loadSmartExecution();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -5516,6 +5547,70 @@ async function loadMonitoring(){
   }catch(e){console.error('Monitoring load error:',e);}
 }
 
+// ─── Smart Execution Loader ───────────────────────────────────────────────────
+async function loadSmartExecution(){
+  try{
+    const r=await fetch('/api/smart-execution');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const q=document.getElementById('exec-quality');
+    if(q){
+      const s=d.execution_quality_score||0;
+      let color='#22c55e';
+      if(s<70) color='#84cc16';
+      if(s<50) color='#f97316';
+      if(s<30) color='#ef4444';
+      q.innerHTML=`<span style="color:${color}">${s.toFixed(1)}</span>`;
+    }
+    const kpi=document.getElementById('exec-kpi');
+    if(kpi){
+      const add=(label,value,color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('Today Orders', d.today_orders||0),
+        add('Filled', d.filled||0, 'green'),
+        add('Partial', d.partial||0, 'orange'),
+        add('Rejected', d.rejected||0, 'red'),
+        add('Avg Slippage', (d.avg_slippage_pct||0).toFixed(3)+'%'),
+        add('Avg Fill Time', (d.avg_fill_time_ms||0)+'ms'),
+        add('Broker Latency', (d.broker_latency_ms||0)+'ms'),
+        add('Success %', (d.success_rate_pct||0).toFixed(1)+'%', d.success_rate_pct>=80?'green':''),
+        add('Avg Retries', (d.avg_retry_count||0).toFixed(2))
+      ].join('');
+    }
+    const orders=document.getElementById('exec-orders');
+    if(orders){
+      const list=d.orders||[];
+      if(!list.length){orders.innerHTML='No orders';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:right;color:#f9fafb">Filled</th><th style="padding:4px;text-align:right;color:#f9fafb">Avg</th><th style="padding:4px;text-align:left;color:#f9fafb">Type</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
+        list.forEach(o=>{
+          const statusColor=o.status==='FILLED'?'#4ade80':o.status==='REJECTED'?'#f87171':o.status==='PARTIAL'?'#f97316':'#9ca3af';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.filled_qty}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">₹${(o.avg_price||0).toFixed(2)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.order_type}</td><td style="padding:4px;color:${statusColor};border-bottom:1px solid #374151;font-size:11px;font-weight:600">${o.status}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        orders.innerHTML=rows;
+      }
+    }
+    const queue=document.getElementById('exec-queue');
+    if(queue){
+      const list=d.queue||[];
+      if(!list.length){queue.innerHTML='No queued orders';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
+        list.forEach(o=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.strategy}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.status}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        queue.innerHTML=rows;
+      }
+    }
+    const analytics=document.getElementById('exec-analytics');
+    if(analytics){
+      analytics.innerHTML=`<div class="grid grid-cols-2 md:grid-cols-3 gap-3"><div class="card-sm"><div class="stat-label">Fill Ratio</div><div class="stat-value-sm">${((d.fill_ratio||0)*100).toFixed(1)}%</div></div><div class="card-sm"><div class="stat-label">Avg Broker Latency</div><div class="stat-value-sm">${d.broker_latency_ms||0}ms</div></div><div class="card-sm"><div class="stat-label">Avg Retry Count</div><div class="stat-value-sm">${(d.avg_retry_count||0).toFixed(2)}</div></div></div>`;
+    }
+  }catch(e){console.error('Smart execution load error:',e);}
+}
+
 // ─── AI Learning Loader ───────────────────────────────────────────────────────
 async function loadAiLearning(){
   try{
@@ -7204,6 +7299,19 @@ def api_ack_alert():
         if get_store is not None:
             get_store().acknowledge_alert(alert_id)
         return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/smart-execution')
+def api_smart_execution():
+    """Smart execution analytics and recent orders/queue."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from smart_execution_engine import SmartExecutionEngine
+        from persistence import get_store
+        engine = SmartExecutionEngine(store=get_store())
+        return jsonify(engine.get_dashboard_data())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -457,6 +457,128 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_daily_health_reports_timestamp
                     ON daily_health_reports (timestamp);
+
+                CREATE TABLE IF NOT EXISTS execution_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 0,
+                    filled_qty INTEGER NOT NULL DEFAULT 0,
+                    avg_price REAL NOT NULL DEFAULT 0,
+                    signal_price REAL NOT NULL DEFAULT 0,
+                    current_price REAL NOT NULL DEFAULT 0,
+                    order_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    data_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_execution_orders_timestamp
+                    ON execution_orders (timestamp);
+
+                CREATE INDEX IF NOT EXISTS idx_execution_orders_symbol
+                    ON execution_orders (symbol);
+
+                CREATE TABLE IF NOT EXISTS execution_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 0,
+                    filled_qty INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    strategy TEXT NOT NULL DEFAULT 'VWAP',
+                    data_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_execution_queue_status
+                    ON execution_queue (status);
+
+                CREATE TABLE IF NOT EXISTS execution_retries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    order_id INTEGER NOT NULL DEFAULT 0,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_execution_retries_order_id
+                    ON execution_retries (order_id);
+
+                CREATE TABLE IF NOT EXISTS fill_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 0,
+                    filled_qty INTEGER NOT NULL DEFAULT 0,
+                    avg_price REAL NOT NULL DEFAULT 0,
+                    signal_price REAL NOT NULL DEFAULT 0,
+                    order_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    slippage_pct REAL NOT NULL DEFAULT 0,
+                    execution_time_ms REAL NOT NULL DEFAULT 0,
+                    data_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_fill_history_timestamp
+                    ON fill_history (timestamp);
+
+                CREATE TABLE IF NOT EXISTS slippage_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    signal_price REAL NOT NULL DEFAULT 0,
+                    avg_price REAL NOT NULL DEFAULT 0,
+                    filled_qty INTEGER NOT NULL DEFAULT 0,
+                    side TEXT NOT NULL,
+                    slippage_pct REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_slippage_history_timestamp
+                    ON slippage_history (timestamp);
+
+                CREATE TABLE IF NOT EXISTS broker_latency (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    latency_ms REAL NOT NULL DEFAULT 0,
+                    slices INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_broker_latency_timestamp
+                    ON broker_latency (timestamp);
+
+                CREATE TABLE IF NOT EXISTS execution_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    total_orders INTEGER NOT NULL DEFAULT 0,
+                    filled_orders INTEGER NOT NULL DEFAULT 0,
+                    partial_orders INTEGER NOT NULL DEFAULT 0,
+                    rejected_orders INTEGER NOT NULL DEFAULT 0,
+                    fill_ratio REAL NOT NULL DEFAULT 0,
+                    avg_fill_time_ms REAL NOT NULL DEFAULT 0,
+                    avg_broker_latency_ms REAL NOT NULL DEFAULT 0,
+                    avg_slippage_pct REAL NOT NULL DEFAULT 0,
+                    avg_retry_count REAL NOT NULL DEFAULT 0,
+                    success_rate REAL NOT NULL DEFAULT 0,
+                    data_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_execution_metrics_timestamp
+                    ON execution_metrics (timestamp);
+
+                CREATE TABLE IF NOT EXISTS execution_quality (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    score REAL NOT NULL DEFAULT 0,
+                    data_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_execution_quality_timestamp
+                    ON execution_quality (timestamp);
                 """
             )
 
@@ -1960,6 +2082,277 @@ class TradingStore:
                 return {
                     "timestamp": row["timestamp"],
                     "report": self._loads(row["report_json"]),
+                }
+
+    # ── execution engine ──────────────────────────────────────────────────
+
+    def save_execution_order(self, rec: Dict[str, Any]) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO execution_orders
+                    (timestamp, symbol, side, quantity, filled_qty, avg_price,
+                     signal_price, current_price, order_type, status, reason, data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("ts") or rec.get("timestamp") or datetime.now().isoformat(),
+                        rec.get("symbol", ""),
+                        rec.get("side", ""),
+                        int(rec.get("quantity", 0)),
+                        int(rec.get("filled_qty", 0)),
+                        float(rec.get("avg_price", 0)),
+                        float(rec.get("signal_price", 0)),
+                        float(rec.get("current_price", 0)),
+                        rec.get("order_type", ""),
+                        rec.get("status", ""),
+                        rec.get("reason", ""),
+                        rec.get("data_json") or json.dumps(rec.get("data", rec)),
+                    ),
+                )
+                return cur.lastrowid
+
+    def get_execution_orders(self, limit: int = 20, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                q = "SELECT * FROM execution_orders"
+                params: List[Any] = []
+                if symbol:
+                    q += " WHERE symbol = ?"
+                    params.append(symbol)
+                q += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                cur = conn.execute(q, tuple(params))
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def save_execution_queue(self, rec: Dict[str, Any]) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO execution_queue
+                    (timestamp, symbol, side, quantity, filled_qty, status, strategy, data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("timestamp") or datetime.now().isoformat(),
+                        rec.get("symbol", ""),
+                        rec.get("side", ""),
+                        int(rec.get("quantity", 0)),
+                        int(rec.get("filled_qty", 0)),
+                        rec.get("status", "PENDING"),
+                        rec.get("strategy", "VWAP"),
+                        rec.get("data_json") or json.dumps(rec.get("data", rec)),
+                    ),
+                )
+                return cur.lastrowid
+
+    def get_execution_queue(self, limit: int = 20, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                q = "SELECT * FROM execution_queue"
+                params: List[Any] = []
+                if status:
+                    q += " WHERE status = ?"
+                    params.append(status)
+                q += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                cur = conn.execute(q, tuple(params))
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def save_execution_retry(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO execution_retries
+                    (timestamp, order_id, attempt, status, message)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("timestamp") or datetime.now().isoformat(),
+                        int(rec.get("order_id", 0)),
+                        int(rec.get("attempt", 0)),
+                        rec.get("status", ""),
+                        rec.get("message", ""),
+                    ),
+                )
+
+    def get_execution_retries(self, order_id: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT * FROM execution_retries
+                    WHERE order_id = ? ORDER BY timestamp DESC
+                    """,
+                    (order_id,),
+                )
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def save_fill_history(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO fill_history
+                    (timestamp, symbol, side, quantity, filled_qty, avg_price,
+                     signal_price, order_type, status, slippage_pct, execution_time_ms, data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("ts") or rec.get("timestamp") or datetime.now().isoformat(),
+                        rec.get("symbol", ""),
+                        rec.get("side", ""),
+                        int(rec.get("quantity", 0)),
+                        int(rec.get("filled_qty", 0)),
+                        float(rec.get("avg_price", 0)),
+                        float(rec.get("signal_price", 0)),
+                        rec.get("order_type", ""),
+                        rec.get("status", ""),
+                        float(rec.get("slippage_pct", 0)),
+                        float(rec.get("execution_time_ms", 0)),
+                        rec.get("data_json") or json.dumps(rec.get("data", rec)),
+                    ),
+                )
+
+    def get_fill_history(self, limit: int = 20, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                q = "SELECT * FROM fill_history"
+                params: List[Any] = []
+                if symbol:
+                    q += " WHERE symbol = ?"
+                    params.append(symbol)
+                q += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                cur = conn.execute(q, tuple(params))
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def save_slippage_history(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO slippage_history
+                    (timestamp, symbol, signal_price, avg_price, filled_qty, side, slippage_pct)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("timestamp") or datetime.now().isoformat(),
+                        rec.get("symbol", ""),
+                        float(rec.get("signal_price", 0)),
+                        float(rec.get("avg_price", 0)),
+                        int(rec.get("filled_qty", 0)),
+                        rec.get("side", ""),
+                        float(rec.get("slippage_pct", 0)),
+                    ),
+                )
+
+    def save_broker_latency(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO broker_latency
+                    (timestamp, symbol, latency_ms, slices)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("timestamp") or datetime.now().isoformat(),
+                        rec.get("symbol", ""),
+                        float(rec.get("latency_ms", 0)),
+                        int(rec.get("slices", 0)),
+                    ),
+                )
+
+    def save_execution_metrics(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO execution_metrics
+                    (timestamp, total_orders, filled_orders, partial_orders, rejected_orders,
+                     fill_ratio, avg_fill_time_ms, avg_broker_latency_ms, avg_slippage_pct,
+                     avg_retry_count, success_rate, data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("ts") or rec.get("timestamp") or datetime.now().isoformat(),
+                        int(rec.get("total_orders", 0)),
+                        int(rec.get("filled_orders", 0)),
+                        int(rec.get("partial_orders", 0)),
+                        int(rec.get("rejected_orders", 0)),
+                        float(rec.get("fill_ratio", 0)),
+                        float(rec.get("avg_fill_time_ms", 0)),
+                        float(rec.get("avg_broker_latency_ms", 0)),
+                        float(rec.get("avg_slippage_pct", 0)),
+                        float(rec.get("avg_retry_count", 0)),
+                        float(rec.get("success_rate", 0)),
+                        rec.get("data_json") or json.dumps(rec.get("data", rec)),
+                    ),
+                )
+
+    def get_execution_metrics_latest(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT * FROM execution_metrics ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "total_orders": row["total_orders"],
+                    "filled_orders": row["filled_orders"],
+                    "partial_orders": row["partial_orders"],
+                    "rejected_orders": row["rejected_orders"],
+                    "fill_ratio": row["fill_ratio"],
+                    "avg_fill_time_ms": row["avg_fill_time_ms"],
+                    "avg_broker_latency_ms": row["avg_broker_latency_ms"],
+                    "avg_slippage_pct": row["avg_slippage_pct"],
+                    "avg_retry_count": row["avg_retry_count"],
+                    "success_rate": row["success_rate"],
+                }
+
+    def save_execution_quality(self, rec: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO execution_quality
+                    (timestamp, score, data_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        rec.get("timestamp") or datetime.now().isoformat(),
+                        float(rec.get("score", 0)),
+                        rec.get("data_json") or json.dumps(rec.get("data", rec)),
+                    ),
+                )
+
+    def get_execution_quality_latest(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, score, data_json
+                    FROM execution_quality ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "score": row["score"],
+                    "data": self._loads(row["data_json"]),
                 }
 
 
