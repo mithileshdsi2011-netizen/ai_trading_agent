@@ -2408,9 +2408,25 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Reconciliation Monitor -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Reconciliation Status</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="card-sm"><div class="stat-label">Health</div><div style="font-size:15px;font-weight:700" id="rs-healthy">—</div></div>
+      <div class="card-sm"><div class="stat-label">Last Sync</div><div style="font-size:14px;font-weight:600" id="rs-last-sync">—</div></div>
+      <div class="card-sm"><div class="stat-label">Objects Checked</div><div style="font-size:14px;font-weight:600" id="rs-objects">—</div></div>
+      <div class="card-sm"><div class="stat-label">Repairs</div><div style="font-size:14px;font-weight:600" id="rs-repairs">—</div></div>
+      <div class="card-sm"><div class="stat-label">Mismatches</div><div style="font-size:14px;font-weight:600" id="rs-mismatches">—</div></div>
+      <div class="card-sm"><div class="stat-label">Duration</div><div style="font-size:14px;font-weight:600" id="rs-duration">—</div></div>
+      <div class="card-sm"><div class="stat-label">SQLite</div><div style="font-size:14px;font-weight:600" id="rs-sqlite">—</div></div>
+      <div class="card-sm"><div class="stat-label">Broker Status</div><div style="font-size:14px;font-weight:600" id="rs-broker">—</div></div>
+    </div>
+  </div>
+
   <div style="text-align:right;font-size:11px;color:#374151;padding:8px 0">
     <a href="/api/data" style="color:#374151;text-decoration:underline">Raw API JSON</a> &nbsp;|
-    <a href="/api/health" style="color:#374151;text-decoration:underline">Health JSON</a>
+    <a href="/api/health" style="color:#374151;text-decoration:underline">Health JSON</a> &nbsp;|
+    <a href="/api/reconciliation/status" style="color:#374151;text-decoration:underline">Reconciliation JSON</a>
   </div>
 
 </div><!-- /tab-botstatus -->
@@ -3880,6 +3896,28 @@ async function load(){
       if(cpuEl){const cp=parseFloat(h.cpu_pct||0);cpuEl.textContent=cp.toFixed(0)+'%';cpuEl.className='stat-value '+(cp<60?'green':cp<80?'yellow':'red');}
     }).catch(()=>{});
 
+    // Reconciliation status (already embedded in api_data)
+    const rs=d.reconciliation_status||{};
+    const rsHealthyEl=document.getElementById('rs-healthy');
+    if(rsHealthyEl){rsHealthyEl.innerHTML=rs.healthy?'<span class="green">✅ Synced</span>':'<span class="red">❌ Out of sync</span>';}
+    const rsLastEl=document.getElementById('rs-last-sync');
+    if(rsLastEl){rsLastEl.textContent=fmtDateTime(rs.last_sync)||'—';}
+    const rsObjEl=document.getElementById('rs-objects');
+    if(rsObjEl){
+      const oc=rs.objects_checked||{};
+      rsObjEl.textContent=(oc.positions||0)+' pos / '+(oc.trades||0)+' trades';
+    }
+    const rsRepEl=document.getElementById('rs-repairs');
+    if(rsRepEl){rsRepEl.textContent=(rs.repairs||0);rsRepEl.className='stat-value '+((rs.repairs||0)===0?'green':'yellow');}
+    const rsMisEl=document.getElementById('rs-mismatches');
+    if(rsMisEl){rsMisEl.textContent=(rs.mismatches||0);rsMisEl.className='stat-value '+((rs.mismatches||0)===0?'green':'red');}
+    const rsDurEl=document.getElementById('rs-duration');
+    if(rsDurEl){rsDurEl.textContent=(rs.duration_ms||0)+' ms';}
+    const rsSqlEl=document.getElementById('rs-sqlite');
+    if(rsSqlEl){rsSqlEl.textContent=(rs.objects_checked?'Active':'Unknown');rsSqlEl.className='stat-value '+(rs.objects_checked?'green':'yellow');}
+    const rsBrEl=document.getElementById('rs-broker');
+    if(rsBrEl){rsBrEl.innerHTML=d.broker_live_ready?'<span class="green">✅ Ready</span>':'<span class="red">❌ Not ready</span>';}
+
     prevData=d;
 
   }catch(e){
@@ -4802,7 +4840,14 @@ def api_data():
             "vix": 0,
             "market_regime": "UNKNOWN"
         },
-        "market_data_metrics": {}
+        "market_data_metrics": {},
+        "reconciliation_status": {
+            "healthy": False,
+            "last_sync": None,
+            "mismatches": 0,
+            "repairs": 0,
+            "duration_ms": 0
+        }
     }
 
     # Load broker mode status (written by broker_integration.py at startup)
@@ -4826,6 +4871,16 @@ def api_data():
         data['broker_live_ready'] = False
         data['broker_startup_timestamp'] = '—'
         data['broker_error'] = None
+
+    # Reconciliation status
+    try:
+        if get_store is not None:
+            _rs = get_store().get_broker_state('reconciliation') or {}
+        else:
+            _rs = {}
+        data['reconciliation_status'] = _rs if _rs else data['reconciliation_status']
+    except Exception:
+        pass
 
     if not kite:
         return jsonify(data)
@@ -5281,21 +5336,20 @@ def api_data():
     # Portfolio health — computed here after account_balance is fully set (cash + holdings)
     try:
         account_value = data.get('account_balance', 0) or data.get('cash', 0)
-        _peak_file = os.path.join(os.path.dirname(__file__), 'data', 'peak_value.json')
         peak_value = account_value
         try:
-            if os.path.exists(_peak_file):
-                with open(_peak_file) as _pf:
-                    _saved = json.load(_pf)
-                    _saved_peak = _saved.get('peak_value', account_value)
-                    if _saved.get('date', '') == today_str:
-                        peak_value = max(_saved_peak, account_value)
+            if get_store is not None:
+                _snap = get_store().get_latest_portfolio_snapshot() or {}
+                _saved_peak = _snap.get('peak_value', account_value)
+                if _snap.get('date', '') == today_str:
+                    peak_value = max(_saved_peak, account_value)
+                elif _saved_peak and _saved_peak > peak_value:
+                    peak_value = _saved_peak
         except Exception:
             pass
         try:
-            os.makedirs(os.path.dirname(_peak_file), exist_ok=True)
-            with open(_peak_file, 'w') as _pf:
-                json.dump({"peak_value": peak_value, "date": today_str}, _pf)
+            if get_store is not None:
+                get_store().save_portfolio_snapshot({"peak_value": peak_value, "date": today_str})
         except Exception:
             pass
         drawdown = (peak_value - account_value) / peak_value if peak_value > 0 else 0
@@ -6069,6 +6123,25 @@ def api_health():
     except Exception:
         pass
     return jsonify(h)
+
+
+@app.route('/api/reconciliation/status')
+def api_reconciliation_status():
+    """Reconciliation engine health: last sync, mismatches, repairs, duration."""
+    try:
+        if get_store is not None:
+            status = get_store().get_broker_state('reconciliation') or {
+                'healthy': False,
+                'last_sync': None,
+                'mismatches': 0,
+                'repairs': 0,
+                'duration_ms': 0
+            }
+        else:
+            status = {'healthy': False, 'last_sync': None, 'mismatches': 0, 'repairs': 0, 'duration_ms': 0}
+    except Exception:
+        status = {'healthy': False, 'last_sync': None, 'mismatches': 0, 'repairs': 0, 'duration_ms': 0}
+    return jsonify(status)
 
 
 _BT_CACHE: dict = {}

@@ -16,6 +16,7 @@ from market_data import MarketDataFetcher
 from telegram_alerts import TelegramAlerter
 from trade_journal import TradeJournal
 from persistence import get_store
+from reconciliation_engine import ReconciliationEngine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +33,7 @@ class OrderExecutor:
         self.telegram = TelegramAlerter()
         self.journal = TradeJournal()
         self._store = get_store()
+        self.reconciliation_engine = ReconciliationEngine(broker=self.broker)
         self.executed_orders = []
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
@@ -550,6 +552,9 @@ class OrderExecutor:
             self.executed_orders.append(execution_result)
             logger.info(f"Signal executed successfully: {signal['symbol']}")
 
+            # Trigger reconciliation for BUY
+            self.reconciliation_engine.trigger('BUY_executed')
+
             # Auto-log BUY to trade journal (only if order_id confirmed)
             if not order_result.get('order_id'):
                 return execution_result
@@ -672,6 +677,10 @@ class OrderExecutor:
             logger.warning(f"Journal SELL log failed: {je}")
 
         logger.info(f"SELL executed: {sym} @ ₹{current_price:.2f} Reason: {reason}")
+
+        # Trigger reconciliation for SELL
+        self.reconciliation_engine.trigger('SELL_executed')
+
         return {
             'success': True,
             'order_id': order_result.get('order_id'),
