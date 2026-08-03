@@ -1537,7 +1537,22 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: Economic Events -->
+  <!-- Row 3: Global Markets -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🌍 Global Markets</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">Sentiment</div><div class="stat-value-sm" id="gm-sentiment">—</div></div>
+      <div class="card-sm"><div class="stat-label">NASDAQ</div><div class="stat-value-sm" id="gm-nasdaq">—</div></div>
+      <div class="card-sm"><div class="stat-label">Dow</div><div class="stat-value-sm" id="gm-dow">—</div></div>
+      <div class="card-sm"><div class="stat-label">S&amp;P500</div><div class="stat-value-sm" id="gm-sp500">—</div></div>
+      <div class="card-sm"><div class="stat-label">SGX Nifty</div><div class="stat-value-sm" id="gm-sgx">—</div></div>
+      <div class="card-sm"><div class="stat-label">Brent</div><div class="stat-value-sm" id="gm-brent">—</div></div>
+      <div class="card-sm"><div class="stat-label">Gold</div><div class="stat-value-sm" id="gm-gold">—</div></div>
+      <div class="card-sm"><div class="stat-label">USDINR</div><div class="stat-value-sm" id="gm-usdinr">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Economic Events -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🗓️ Economic Events</div>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -3429,6 +3444,22 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // Global Markets
+    const gm=d.global_markets||{};
+    const gmAssets=gm.assets||{};
+    const gmSent=parseFloat(gm.sentiment_score||50);
+    const gmSentEl=document.getElementById('gm-sentiment');
+    gmSentEl.textContent=gmSent.toFixed(1);
+    gmSentEl.className='stat-value-sm '+(gmSent>=70?'green':gmSent>=40?'yellow':'red');
+    const fmtRet=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(1)+'%';};
+    const ids={'NASDAQ':'gm-nasdaq','Dow Jones':'gm-dow','S&P500':'gm-sp500','SGX Nifty':'gm-sgx','Brent':'gm-brent','Gold':'gm-gold','USDINR':'gm-usdinr'};
+    for(const [name,id] of Object.entries(ids)){
+      const a=gmAssets[name]||{};
+      const el=document.getElementById(id);
+      el.textContent=fmtRet(a.return_5d_pct);
+      el.className='stat-value-sm '+(a.return_5d_pct>=0?'green':'red');
+    }
 
     // Economic Events
     const ev=d.economic_event_risk||{};
@@ -5934,6 +5965,13 @@ def api_data():
         data['economic_event_risk'] = EconomicEventRiskEngine().risk_status()
     except Exception:
         data['economic_event_risk'] = {}
+
+    # Global market snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['global_markets'] = get_store().get_latest_global_markets() or {}
+    except Exception:
+        data['global_markets'] = {}
 
     return jsonify(data)
 

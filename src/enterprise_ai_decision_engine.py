@@ -13,6 +13,7 @@ from market_intelligence import MarketBreadthEngine
 from sector_rotation import SectorRotationEngine
 from fii_dii import FII_DII_Engine
 from options_intelligence import OptionsIntelligenceEngine
+from global_markets import GlobalMarketMonitor
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +67,7 @@ class EnterpriseAIDecisionEngine:
         self.sector_rotation = SectorRotationEngine(market_data=self.market_data)
         self.fii_dii_engine = FII_DII_Engine(market_data=self.market_data)
         self.options_intelligence = OptionsIntelligenceEngine(market_data=self.market_data)
+        self.global_markets = GlobalMarketMonitor(market_data=self.market_data)
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.feature_success = {}
         self._load_adaptive_weights()
@@ -134,6 +136,10 @@ class EnterpriseAIDecisionEngine:
         options_adj = self.options_intelligence.adjust_confidence(final_confidence)
         final_confidence = round(options_adj['adjusted_confidence'], 2)
 
+        # 6b. Global market sentiment confidence adjustment
+        global_adj = self.global_markets.adjust_confidence(final_confidence)
+        final_confidence = round(global_adj['adjusted_confidence'], 2)
+
         # 7. Dynamic threshold
         threshold = self._dynamic_threshold(market_regime)
 
@@ -143,7 +149,7 @@ class EnterpriseAIDecisionEngine:
         # 9. Explain
         explain = self._build_explain(
             symbol, sub_scores, confidences, final_score, final_confidence,
-            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii, options_adj
+            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii, options_adj, global_adj
         )
 
         score_components = dict(sub_scores)
@@ -163,6 +169,8 @@ class EnterpriseAIDecisionEngine:
         score_components['options_short_buildup'] = options_adj['short_buildup']
         score_components['options_strong_oi_support'] = options_adj['strong_oi_support']
         score_components['options_confidence_boost'] = options_adj['confidence_boost']
+        score_components['global_sentiment_score'] = global_adj['sentiment_score']
+        score_components['global_sentiment_adjustment'] = global_adj['adjustment']
 
         return {
             'symbol': symbol,
@@ -460,6 +468,7 @@ class EnterpriseAIDecisionEngine:
         sector: Optional[Dict] = None,
         fii_dii: Optional[Dict] = None,
         options: Optional[Dict] = None,
+        global_markets: Optional[Dict] = None,
     ) -> Dict:
         """Build a human-readable AI explain."""
         lines = [f"{symbol}: {action} | Final {final_score} (threshold {threshold}) | Confidence {final_confidence}%"]
@@ -505,6 +514,14 @@ class EnterpriseAIDecisionEngine:
             lines.append(
                 f"  {'Options':20s} {o['pcr']:6.2f}  ("
                 f"max pain {o['max_pain']}, {flag_str}, +{o['confidence_boost']}% confidence)"
+            )
+
+        if global_markets:
+            g = global_markets
+            sign = '+' if g.get('adjustment', 0) >= 0 else ''
+            lines.append(
+                f"  {'Global Sentiment':20s} {g['sentiment_score']:6.2f}  ("
+                f"{sign}{g['adjustment']}% confidence)"
             )
 
         if tech_factors:

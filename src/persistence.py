@@ -225,6 +225,17 @@ class TradingStore:
                     ON event_calendar (timestamp);
                 CREATE INDEX IF NOT EXISTS idx_event_calendar_date
                     ON event_calendar (event_date);
+
+                CREATE TABLE IF NOT EXISTS global_markets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    sentiment_score REAL NOT NULL DEFAULT 50.0,
+                    raw_score REAL NOT NULL DEFAULT 0.0,
+                    assets TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_global_markets_timestamp
+                    ON global_markets (timestamp);
                 """
             )
 
@@ -978,6 +989,45 @@ class TradingStore:
                         "description": r["description"],
                     })
                 return rows
+
+    # ── global markets ────────────────────────────────────────────────────
+
+    def save_global_markets(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a global market snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO global_markets
+                    (timestamp, sentiment_score, raw_score, assets)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        float(snapshot.get("sentiment_score", 50.0)),
+                        float(snapshot.get("raw_score", 0.0)),
+                        self._dumps(snapshot.get("assets", {})),
+                    ),
+                )
+
+    def get_latest_global_markets(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent global market snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, sentiment_score, raw_score, assets
+                    FROM global_markets ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "sentiment_score": row["sentiment_score"],
+                    "raw_score": row["raw_score"],
+                    "assets": self._loads(row["assets"]),
+                }
 
 
 # Singleton instance for the process
