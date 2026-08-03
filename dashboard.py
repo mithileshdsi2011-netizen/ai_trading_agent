@@ -4076,11 +4076,11 @@ async function load(){
     }
 
     // Portfolio Heat Map
-    const ph = d.portfolio_heat || {};
+    const portfolioHeat = d.portfolio_heat || {};
     const phGrid = document.getElementById('portfolio-heat-grid');
     if(phGrid){
-      const exposure = ph.exposure_by_sector || {};
-      const maxPct = (ph.max_sector_exposure_pct || 0.30) * 100;
+      const exposure = portfolioHeat.exposure_by_sector || {};
+      const maxPct = (portfolioHeat.max_sector_exposure_pct || 0.30) * 100;
       document.getElementById('ph-max-pct').textContent = maxPct + '%';
       const rows = Object.entries(exposure).sort((a,b)=>b[1]-a[1]);
       if(rows.length){
