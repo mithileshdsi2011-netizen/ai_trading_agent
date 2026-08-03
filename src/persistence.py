@@ -236,6 +236,59 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_global_markets_timestamp
                     ON global_markets (timestamp);
+
+                CREATE TABLE IF NOT EXISTS portfolio_optimizer (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    cash REAL NOT NULL DEFAULT 0,
+                    capital_used REAL NOT NULL DEFAULT 0,
+                    portfolio_beta REAL NOT NULL DEFAULT 1.0,
+                    portfolio_volatility REAL NOT NULL DEFAULT 0.0,
+                    diversification_score REAL NOT NULL DEFAULT 0.0,
+                    sector_exposure TEXT NOT NULL DEFAULT '{}',
+                    industry_exposure TEXT NOT NULL DEFAULT '{}',
+                    capital_limit_pct REAL NOT NULL DEFAULT 1.0,
+                    max_deployable REAL NOT NULL DEFAULT 0,
+                    cash_remaining REAL NOT NULL DEFAULT 0,
+                    open_positions INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_portfolio_optimizer_timestamp
+                    ON portfolio_optimizer (timestamp);
+
+                CREATE TABLE IF NOT EXISTS correlation_matrix (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbols TEXT NOT NULL DEFAULT '[]',
+                    matrix TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_correlation_matrix_timestamp
+                    ON correlation_matrix (timestamp);
+
+                CREATE TABLE IF NOT EXISTS portfolio_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    beta REAL NOT NULL DEFAULT 1.0,
+                    volatility REAL NOT NULL DEFAULT 0.0,
+                    diversification REAL NOT NULL DEFAULT 0.0,
+                    capital_used REAL NOT NULL DEFAULT 0,
+                    cash_remaining REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_portfolio_metrics_timestamp
+                    ON portfolio_metrics (timestamp);
+
+                CREATE TABLE IF NOT EXISTS allocation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    allocated_amount REAL NOT NULL DEFAULT 0,
+                    reason TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_allocation_history_timestamp
+                    ON allocation_history (timestamp);
                 """
             )
 
@@ -1028,6 +1081,172 @@ class TradingStore:
                     "raw_score": row["raw_score"],
                     "assets": self._loads(row["assets"]),
                 }
+
+    # ── portfolio optimizer ───────────────────────────────────────────────
+
+    def save_portfolio_optimizer(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a portfolio optimizer snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_optimizer
+                    (timestamp, cash, capital_used, portfolio_beta, portfolio_volatility,
+                    diversification_score, sector_exposure, industry_exposure,
+                    capital_limit_pct, max_deployable, cash_remaining, open_positions)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        float(snapshot.get("cash", 0)),
+                        float(snapshot.get("capital_used", 0)),
+                        float(snapshot.get("portfolio_beta", 1.0)),
+                        float(snapshot.get("portfolio_volatility", 0)),
+                        float(snapshot.get("diversification_score", 0)),
+                        self._dumps(snapshot.get("sector_exposure", {})),
+                        self._dumps(snapshot.get("industry_exposure", {})),
+                        float(snapshot.get("capital_limit_pct", 1.0)),
+                        float(snapshot.get("max_deployable", 0)),
+                        float(snapshot.get("cash_remaining", 0)),
+                        int(snapshot.get("open_positions", 0)),
+                    ),
+                )
+
+    def get_latest_portfolio_optimizer(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent portfolio optimizer snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT * FROM portfolio_optimizer ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "cash": row["cash"],
+                    "capital_used": row["capital_used"],
+                    "portfolio_beta": row["portfolio_beta"],
+                    "portfolio_volatility": row["portfolio_volatility"],
+                    "diversification_score": row["diversification_score"],
+                    "sector_exposure": self._loads(row["sector_exposure"]),
+                    "industry_exposure": self._loads(row["industry_exposure"]),
+                    "capital_limit_pct": row["capital_limit_pct"],
+                    "max_deployable": row["max_deployable"],
+                    "cash_remaining": row["cash_remaining"],
+                    "open_positions": row["open_positions"],
+                }
+
+    def save_correlation_matrix(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO correlation_matrix
+                    (timestamp, symbols, matrix)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        self._dumps(snapshot.get("symbols", [])),
+                        self._dumps(snapshot.get("matrix", {})),
+                    ),
+                )
+
+    def get_latest_correlation_matrix(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, symbols, matrix
+                    FROM correlation_matrix ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "symbols": self._loads(row["symbols"]),
+                    "matrix": self._loads(row["matrix"]),
+                }
+
+    def save_portfolio_metrics(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_metrics
+                    (timestamp, beta, volatility, diversification, capital_used, cash_remaining)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        float(snapshot.get("beta", 1.0)),
+                        float(snapshot.get("volatility", 0)),
+                        float(snapshot.get("diversification", 0)),
+                        float(snapshot.get("capital_used", 0)),
+                        float(snapshot.get("cash_remaining", 0)),
+                    ),
+                )
+
+    def get_latest_portfolio_metrics(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, beta, volatility, diversification,
+                        capital_used, cash_remaining
+                    FROM portfolio_metrics ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "beta": row["beta"],
+                    "volatility": row["volatility"],
+                    "diversification": row["diversification"],
+                    "capital_used": row["capital_used"],
+                    "cash_remaining": row["cash_remaining"],
+                }
+
+    def save_allocation_history(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO allocation_history
+                    (timestamp, symbol, allocated_amount, reason)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("symbol", ""),
+                        float(snapshot.get("allocated_amount", 0)),
+                        snapshot.get("reason", ""),
+                    ),
+                )
+
+    def get_allocation_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, symbol, allocated_amount, reason
+                    FROM allocation_history ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "symbol": r["symbol"],
+                        "allocated_amount": r["allocated_amount"],
+                        "reason": r["reason"],
+                    }
+                    for r in cur.fetchall()
+                ]
 
 
 # Singleton instance for the process

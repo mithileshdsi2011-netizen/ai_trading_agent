@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from config import config
+from portfolio_optimizer import EnterprisePortfolioOptimizer
 from market_data import MarketDataFetcher
 from vix_risk_engine import IndiaVIXRiskEngine
 from economic_events import EconomicEventRiskEngine
@@ -61,6 +62,7 @@ class EnterpriseRiskEngine:
         self._market_data: Optional[MarketDataFetcher] = None
         self._vix_engine = IndiaVIXRiskEngine(market_data=self.market_data)
         self._event_engine = EconomicEventRiskEngine()
+        self._optimizer = EnterprisePortfolioOptimizer(market_data=self.market_data, risk_manager=self._risk)
 
     @property
     def market_data(self) -> MarketDataFetcher:
@@ -282,6 +284,28 @@ class EnterpriseRiskEngine:
             pass
         return True, "ok", 1.0
 
+    def _capital_allocation_gate(self, signal: Dict) -> Tuple[bool, str, Dict]:
+        """Portfolio optimizer: enforce dynamic capital envelope before a BUY."""
+        try:
+            regime = (signal.get("market_regime") or "UNKNOWN").upper()
+            price = float(signal.get("current_price", 0.0) or 0.0)
+            qty = int(signal.get("position_size", 0) or 0)
+            required = price * qty
+            positions = self._open_positions()
+            analysis = self._optimizer.analyze(
+                positions=positions,
+                cash=float(config.TRADING_AMOUNT),
+                regime=regime,
+                hist={},
+            )
+            self._optimizer.persist_analysis(analysis)
+            if required > analysis["cash_remaining"] + 1e-6:
+                return False, f"Capital envelope: ₹{required:.0f} needed but only ₹{analysis['cash_remaining']:.0f} available", analysis
+            return True, "ok", analysis
+        except Exception as e:
+            logger.warning(f"Capital allocation gate failed: {e}")
+            return True, "ok", {}
+
     # ── master pre-BUY gate ─────────────────────────────────────────────
 
     def pre_buy_risk_check(self, signal: Dict) -> bool:
@@ -328,6 +352,7 @@ class EnterpriseRiskEngine:
         vol_factor, vol_metrics = (1.0, {})
         quantity = signal.get("position_size", 0)
         kelly_factor = 1.0
+        portfolio_analysis = {}
         if allow:
             vol_factor, vol_metrics = self._volatility_metrics(signal)
             # Apply economic event size factor (24h rule)
@@ -335,6 +360,12 @@ class EnterpriseRiskEngine:
             kelly_factor = self._kelly_size_factor(float(signal.get("confidence", 0.0)))
             quantity = self._dynamic_position_size(signal, vol_factor)
             signal["position_size"] = quantity
+
+        # 6. Portfolio optimizer capital allocation gate
+        if allow:
+            ok, msg, portfolio_analysis = self._capital_allocation_gate(signal)
+            if not ok:
+                allow, reason = False, msg
 
         signal["_enterprise_risk"] = {
             "allow": allow,
@@ -346,6 +377,7 @@ class EnterpriseRiskEngine:
             "regime_limit": _REGIME_LIMITS.get((signal.get("market_regime") or "UNKNOWN").upper(), 2),
             "exposure": self._exposure_by_sector(),
             "volatility": vol_metrics,
+            "portfolio_optimizer": portfolio_analysis,
         }
 
         if not allow:

@@ -1335,6 +1335,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('market-intelligence',this)">🌐 Market Intelligence</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
+  <button class="tab-btn" onclick="switchTab('portfolio-optimizer',this)">📊 Portfolio Optimizer</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
 </div>
 
@@ -2899,6 +2900,27 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-backtest -->
 
+<!-- ===== TAB: PORTFOLIO OPTIMIZER ===== -->
+<div id="tab-portfolio-optimizer" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">📊 Portfolio Optimizer</h3>
+      <div id="po-div" style="font-size:22px;font-weight:800">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3" id="po-grid">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Suggested Allocation</div>
+    <div id="po-allocation" style="color:#f9fafb;font-size:13px">—</div>
+  </div>
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Correlation Heatmap</div>
+    <div id="po-corr" style="overflow-x:auto;font-size:12px">—</div>
+  </div>
+</div><!-- /tab-portfolio-optimizer -->
+
 </div><!-- /main container -->
 
 <script>
@@ -2947,6 +2969,7 @@ function switchTab(id,btn){
   if(id==='skipped') loadSkippedOpportunities();
   if(id==='explain') loadExplainability();
   if(id==='market-intelligence') loadMarketIntelligence();
+  if(id==='portfolio-optimizer') loadPortfolioOptimizer();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -4539,6 +4562,60 @@ async function loadMarketIntelligence(){
     add('Event Risk',d.economic_event_risk?d.economic_event_risk.reason:'—');
     document.getElementById('mi-grid').innerHTML=rows.join('');
   }catch(e){console.error('Market Intelligence load error:',e);}
+}
+
+// ─── Portfolio Optimizer Loader ───────────────────────────────────────────────
+async function loadPortfolioOptimizer(){
+  try{
+    const r=await fetch('/api/portfolio/optimizer');
+    const d=await r.json();
+    const po=d.portfolio_optimizer||{};
+    const cm=d.correlation_matrix||{};
+    const reb=d.rebalance_suggestions||[];
+
+    const divEl=document.getElementById('po-div');
+    divEl.textContent=po.diversification_score!=null?po.diversification_score.toFixed(0):'—';
+    divEl.style.color=(po.diversification_score>=70?'#4ade80':po.diversification_score>=40?'#facc15':'#f87171');
+
+    const rows=[];
+    const add=(label, value, colorClass='')=>{
+      rows.push(`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${colorClass}">${value}</div></div>`);
+    };
+    add('Diversification',po.diversification_score!=null?po.diversification_score.toFixed(1):'—');
+    add('Capital Used',rupee(po.capital_used));
+    add('Cash Remaining',rupee(po.cash_remaining));
+    add('Max Deployable',rupee(po.max_deployable));
+    add('Portfolio Beta',po.portfolio_beta!=null?po.portfolio_beta.toFixed(2):'—');
+    add('Volatility',po.portfolio_volatility!=null?po.portfolio_volatility.toFixed(2)+'%':'—');
+    add('Capital Limit',po.capital_limit_pct!=null?(po.capital_limit_pct*100).toFixed(0)+'%':'—');
+    add('Open Positions',po.open_positions!=null?po.open_positions:'—');
+    document.getElementById('po-grid').innerHTML=rows.join('');
+
+    const se=po.sector_exposure||{};
+    const sectorHtml=Object.entries(se).map(([s,p])=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:100px;display:inline-block">${s}</span><span style="color:#f9fafb">${p.toFixed(1)}%</span></div>`).join('');
+    document.getElementById('po-allocation').innerHTML=sectorHtml||'No data';
+
+    const syms=cm.symbols||[];
+    const matrix=cm.matrix||{};
+    if(syms.length && Object.keys(matrix).length){
+      let html='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:6px;text-align:left"></th>';
+      syms.forEach(s=>{html+=`<th style="padding:6px;text-align:left;color:#f9fafb;font-size:11px">${s}</th>`;});
+      html+='</tr></thead><tbody>';
+      syms.forEach(s1=>{
+        html+=`<tr><td style="padding:6px;color:#f9fafb;font-size:11px;border-bottom:1px solid #374151">${s1}</td>`;
+        syms.forEach(s2=>{
+          const v=parseFloat((matrix[s1]||{})[s2]||0);
+          const c=Math.abs(v)>=0.8?(v>0?'#f87171':'#facc15'):'#9ca3af';
+          html+=`<td style="padding:6px;color:${c};font-size:11px;border-bottom:1px solid #374151">${v.toFixed(2)}</td>`;
+        });
+        html+='</tr>';
+      });
+      html+='</tbody></table>';
+      document.getElementById('po-corr').innerHTML=html;
+    }else{
+      document.getElementById('po-corr').innerHTML='No correlation data';
+    }
+  }catch(e){console.error('Portfolio optimizer load error:',e);}
 }
 
 // ─── AI Explainability ───────────────────────────────────────────────────────
@@ -6568,6 +6645,26 @@ def api_health():
     except Exception:
         pass
     return jsonify(h)
+
+
+@app.route('/api/portfolio/optimizer')
+def api_portfolio_optimizer():
+    """Latest portfolio optimizer snapshot and correlation matrix."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from portfolio_optimizer import EnterprisePortfolioOptimizer
+        opt = EnterprisePortfolioOptimizer()
+        analysis = opt.analyze()
+        opt.persist_analysis(analysis)
+        opt.persist_correlation(opt.current_positions())
+        cm = opt.get_latest_correlation_matrix() or {}
+        return jsonify({
+            'portfolio_optimizer': analysis,
+            'correlation_matrix': cm,
+            'rebalance_suggestions': opt.rebalance_suggestions(opt.current_positions(), analysis['cash']),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'portfolio_optimizer': {}, 'correlation_matrix': {}}), 500
 
 
 @app.route('/api/reconciliation/status')
