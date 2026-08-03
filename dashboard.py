@@ -4299,17 +4299,28 @@ async function loadExplainability(){
     }
     const rupee=(n)=>{n=parseFloat(n)||0; return '₹'+n.toFixed(2);};
     const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return ts||'—';}};
+    const scoreBar=(k,v)=>{
+      const pct=Math.max(0,Math.min(100,parseFloat(v)||0));
+      const c=pct>=70?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
+      return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0"><span style="width:90px;color:#9ca3af;font-size:11px">${k}</span><div style="flex:1;background:#1f2937;height:6px;border-radius:3px"><div style="width:${pct}%;background:${c};height:6px;border-radius:3px"></div></div><span style="width:32px;text-align:right;color:#f9fafb;font-size:11px">${pct.toFixed(0)}</span></div>`;
+    };
     tbody.innerHTML=actions.map(a=>{
       const isBuy=a.action==='BUY';
       const isSell=(typeof a.action==='string') && a.action.startsWith('SELL');
       const actionColor=isBuy?'#16a34a':isSell?'#dc2626':'#9ca3af';
       const pnl=parseFloat(a.pnl||0);
       const pnlColor=pnl>0?'#16a34a':pnl<0?'#dc2626':'#9ca3af';
+      const subScores=a.sub_scores||{};
+      const scoreRows=Object.entries(subScores)
+        .filter(([_,v])=>typeof v==='number' && v>=0 && v<=100)
+        .map(([k,v])=>scoreBar(k.replace(/_/g,' ').toLowerCase(),v))
+        .join('');
+      const reasonBlock=`<div style="color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</div>${scoreRows?`<div style="margin-top:6px">${scoreRows}</div>`:''}`;
       return `<tr style="border-bottom:1px solid #1f2937">
         <td style="padding:8px;color:#9ca3af;font-family:monospace;font-size:11px">${fmtTime(a.timestamp)}</td>
         <td style="padding:8px;font-weight:700;color:#f9fafb">${a.symbol||'—'}</td>
         <td style="padding:8px;color:${actionColor};font-weight:600">${a.action||'—'}</td>
-        <td style="padding:8px;color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</td>
+        <td style="padding:8px">${reasonBlock}</td>
         <td style="padding:8px;color:#60a5fa">${a.score!=null?a.score.toFixed(1):'—'}</td>
         <td style="padding:8px;color:#f59e0b">${a.confidence!=null?(a.confidence*100).toFixed(0)+'%':'—'}</td>
         <td style="padding:8px;color:${pnlColor}">${pnl!==0?rupee(pnl):'—'}</td>
@@ -6162,7 +6173,8 @@ def api_explain():
                         'pnl': t.get('net_pnl'),
                         'price': t.get('entry_price'),
                         'quantity': t.get('quantity'),
-                        'sector': t.get('sector', 'Unknown')
+                        'sector': t.get('sector', 'Unknown'),
+                        'sub_scores': t.get('score_components', {})
                     })
 
         # Evaluated-but-skipped opportunities from the live trading log
@@ -6183,7 +6195,8 @@ def api_explain():
                 'pnl': 0.0,
                 'price': d.entry_price,
                 'quantity': d.position_size_calculated,
-                'sector': d.sector or 'Unknown'
+                'sector': d.sector or 'Unknown',
+                'sub_scores': d.detailed_factors or {}
             })
 
         # Deduplicate: keep the first authoritative record per (symbol, action) when iterating backwards;
