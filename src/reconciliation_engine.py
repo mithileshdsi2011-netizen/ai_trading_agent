@@ -473,11 +473,11 @@ class ReconciliationEngine:
         sqlite_trades = self._store.all_trades()
         sqlite_by_id = {t.get('order_id') or t.get('id'): t for t in sqlite_trades if t.get('order_id') or t.get('id')}
 
-        # Deduplicate by order_id + symbol (always run, even without broker)
+        # Deduplicate by order_id + key trade fields (always run, even without broker)
         seen: set = set()
         duplicates: List[int] = []
         for t in sqlite_trades:
-            key = (t.get('order_id'), t.get('symbol'), t.get('timestamp'))
+            key = (t.get('order_id'), t.get('symbol'), t.get('timestamp'), t.get('entry_price'), t.get('exit_price'), t.get('quantity'), t.get('action'))
             if key in seen:
                 duplicates.append(t.get('id'))
             else:
