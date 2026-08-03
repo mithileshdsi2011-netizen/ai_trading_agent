@@ -3879,11 +3879,11 @@ async function load(){
     nEl.textContent=pct(nChg);nEl.className='stat-value-sm '+(nChg>=0?'green':'red');
     const bEl=document.getElementById('d-banknifty');
     bEl.textContent=pct(bChg);bEl.className='stat-value-sm '+(bChg>=0?'green':'red');
-    const vix=parseFloat(ms2.vix||0);
+    const marketVix=parseFloat(ms2.vix||0);
     const vixEl=document.getElementById('d-vix');
-    vixEl.textContent=vix.toFixed(1);
-    vixEl.className='stat-value-sm '+(vix<15?'green':vix<20?'yellow':'red');
-    document.getElementById('d-vix-label').textContent=vix<15?'🟢 LOW FEAR':vix<20?'🟡 MODERATE':'🔴 HIGH FEAR';
+    vixEl.textContent=marketVix.toFixed(1);
+    vixEl.className='stat-value-sm '+(marketVix<15?'green':marketVix<20?'yellow':'red');
+    document.getElementById('d-vix-label').textContent=marketVix<15?'🟢 LOW FEAR':marketVix<20?'🟡 MODERATE':'🔴 HIGH FEAR';
     const regEl=document.getElementById('d-regime');
     regEl.textContent=ms2.market_regime||d.market_regime||'—';
     regEl.className='stat-value-sm '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
