@@ -171,6 +171,25 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_vix_risk_timestamp
                     ON vix_risk (timestamp);
+
+                CREATE TABLE IF NOT EXISTS fii_dii (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    fii_buy REAL NOT NULL DEFAULT 0,
+                    fii_sell REAL NOT NULL DEFAULT 0,
+                    dii_buy REAL NOT NULL DEFAULT 0,
+                    dii_sell REAL NOT NULL DEFAULT 0,
+                    fii_net REAL NOT NULL DEFAULT 0,
+                    dii_net REAL NOT NULL DEFAULT 0,
+                    net_flow REAL NOT NULL DEFAULT 0,
+                    sentiment TEXT NOT NULL DEFAULT 'NEUTRAL'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_fii_dii_timestamp
+                    ON fii_dii (timestamp);
+                CREATE INDEX IF NOT EXISTS idx_fii_dii_date
+                    ON fii_dii (date);
                 """
             )
 
@@ -762,6 +781,59 @@ class TradingStore:
                     "volatility_score": row["volatility_score"],
                     "risk_factor": row["risk_factor"],
                     "risk_level": row["risk_level"],
+                }
+
+    # ── fii/dii flow ──────────────────────────────────────────────────────
+
+    def save_fii_dii(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a FII/DII flow snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO fii_dii
+                    (timestamp, date, fii_buy, fii_sell, dii_buy, dii_sell,
+                     fii_net, dii_net, net_flow, sentiment)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("date") or datetime.now().strftime("%Y-%m-%d"),
+                        float(snapshot.get("fii_buy", 0.0)),
+                        float(snapshot.get("fii_sell", 0.0)),
+                        float(snapshot.get("dii_buy", 0.0)),
+                        float(snapshot.get("dii_sell", 0.0)),
+                        float(snapshot.get("fii_net", 0.0)),
+                        float(snapshot.get("dii_net", 0.0)),
+                        float(snapshot.get("net_flow", 0.0)),
+                        str(snapshot.get("sentiment", "NEUTRAL")),
+                    ),
+                )
+
+    def get_latest_fii_dii(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent FII/DII flow snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, date, fii_buy, fii_sell, dii_buy, dii_sell,
+                           fii_net, dii_net, net_flow, sentiment
+                    FROM fii_dii ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "date": row["date"],
+                    "fii_buy": row["fii_buy"],
+                    "fii_sell": row["fii_sell"],
+                    "dii_buy": row["dii_buy"],
+                    "dii_sell": row["dii_sell"],
+                    "fii_net": row["fii_net"],
+                    "dii_net": row["dii_net"],
+                    "net_flow": row["net_flow"],
+                    "sentiment": row["sentiment"],
                 }
 
 

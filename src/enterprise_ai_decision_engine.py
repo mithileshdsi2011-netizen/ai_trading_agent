@@ -11,6 +11,7 @@ import numpy as np
 from trade_journal import TradeJournal
 from market_intelligence import MarketBreadthEngine
 from sector_rotation import SectorRotationEngine
+from fii_dii import FII_DII_Engine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -62,6 +63,7 @@ class EnterpriseAIDecisionEngine:
         self.trade_journal = trade_journal or TradeJournal()
         self.breadth_engine = MarketBreadthEngine(market_data=self.market_data)
         self.sector_rotation = SectorRotationEngine(market_data=self.market_data)
+        self.fii_dii_engine = FII_DII_Engine(market_data=self.market_data)
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.feature_success = {}
         self._load_adaptive_weights()
@@ -119,19 +121,23 @@ class EnterpriseAIDecisionEngine:
         sector_adj = self.sector_rotation.adjust_ai_score(final_score, sector)
         final_score = round(sector_adj['adjusted_score'], 2)
 
-        # 5. Confidence
+        # 5. FII/DII institutional flow adjustment
+        fii_dii = self.fii_dii_engine.adjust_ai_score(final_score)
+        final_score = round(fii_dii['adjusted_score'], 2)
+
+        # 6. Confidence
         final_confidence = self._compute_confidence(sub_scores, confidences)
 
-        # 5. Dynamic threshold
+        # 7. Dynamic threshold
         threshold = self._dynamic_threshold(market_regime)
 
-        # 6. Decision (after breadth adjustment)
+        # 8. Decision
         action = self._determine_action(final_score, threshold, final_confidence)
 
-        # 7. Explain
+        # 9. Explain
         explain = self._build_explain(
             symbol, sub_scores, confidences, final_score, final_confidence,
-            threshold, action, self.weights, tech_factors, breadth, sector_adj
+            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii
         )
 
         score_components = dict(sub_scores)
@@ -142,6 +148,9 @@ class EnterpriseAIDecisionEngine:
         score_components['sector_momentum_score'] = sector_adj['momentum_score']
         score_components['sector_rank'] = sector_adj['rank']
         score_components['sector_adjustment'] = sector_adj['adjustment']
+        score_components['fii_dii_net_flow'] = fii_dii['net_flow']
+        score_components['fii_dii_sentiment'] = fii_dii['sentiment']
+        score_components['fii_dii_adjustment'] = fii_dii['adjustment']
 
         return {
             'symbol': symbol,
@@ -437,6 +446,7 @@ class EnterpriseAIDecisionEngine:
         tech_factors: Dict,
         breadth: Optional[Dict] = None,
         sector: Optional[Dict] = None,
+        fii_dii: Optional[Dict] = None,
     ) -> Dict:
         """Build a human-readable AI explain."""
         lines = [f"{symbol}: {action} | Final {final_score} (threshold {threshold}) | Confidence {final_confidence}%"]
@@ -459,6 +469,14 @@ class EnterpriseAIDecisionEngine:
             lines.append(
                 f"  {'Sector Rotation':20s} {s['momentum_score']:6.2f}  ("
                 f"rank {s['rank']}, {s['sector']}, {sign}{s['adjustment']} score)"
+            )
+
+        if fii_dii:
+            f = fii_dii
+            sign = '+' if f.get('adjustment', 0) >= 0 else ''
+            lines.append(
+                f"  {'FII/DII Flow':20s} {f['net_flow']:6.2f}  ("
+                f"{f['sentiment']}, {sign}{f['adjustment']} score)"
             )
 
         if tech_factors:

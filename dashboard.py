@@ -1537,7 +1537,18 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: VIX Risk -->
+  <!-- Row 3: FII/DII Flow -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🏦 FII/DII Flow</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">FII Net</div><div class="stat-value-sm" id="fii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">DII Net</div><div class="stat-value-sm" id="dii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">Net Flow</div><div class="stat-value-sm" id="fii-dii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">Institutional Sentiment</div><div class="stat-value-sm" id="fii-dii-sentiment">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: VIX Risk -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ India VIX Risk</div>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -3392,6 +3403,26 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // FII/DII Flow
+    const fd=d.fii_dii||{};
+    const fmtCr=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(0)+' Cr';};
+    const fiiNet=parseFloat(fd.fii_net||0);
+    const diiNet=parseFloat(fd.dii_net||0);
+    const netFlow=parseFloat(fd.net_flow||0);
+    const fiiNetEl=document.getElementById('fii-net');
+    fiiNetEl.textContent=fmtCr(fiiNet);
+    fiiNetEl.className='stat-value-sm '+(fiiNet>=0?'green':'red');
+    const diiNetEl=document.getElementById('dii-net');
+    diiNetEl.textContent=fmtCr(diiNet);
+    diiNetEl.className='stat-value-sm '+(diiNet>=0?'green':'red');
+    const netFlowEl=document.getElementById('fii-dii-net');
+    netFlowEl.textContent=fmtCr(netFlow);
+    netFlowEl.className='stat-value-sm '+(netFlow>=0?'green':'red');
+    const sentEl=document.getElementById('fii-dii-sentiment');
+    const sent=(fd.sentiment||'NEUTRAL').toUpperCase();
+    sentEl.textContent=sent;
+    sentEl.className='stat-value-sm '+(sent==='POSITIVE'?'green':sent==='NEGATIVE'?'red':'yellow');
 
     // VIX Risk
     const vix=d.vix_risk||{};
@@ -5822,6 +5853,13 @@ def api_data():
             data['vix_risk'] = get_store().get_latest_vix_risk() or {}
     except Exception:
         data['vix_risk'] = {}
+
+    # FII/DII institutional flow snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['fii_dii'] = get_store().get_latest_fii_dii() or {}
+    except Exception:
+        data['fii_dii'] = {}
 
     return jsonify(data)
 
