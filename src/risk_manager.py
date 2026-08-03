@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 
 from config import config
+from enterprise_risk_engine import EnterpriseRiskEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class RiskManager:
         self._last_exit_by_symbol: Dict[str, datetime] = {}
         self._load_daily_state()
         self._load_positions()
+        self._enterprise = EnterpriseRiskEngine(self)
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -286,8 +288,13 @@ class RiskManager:
     def can_open_position(self, signal: Dict) -> bool:
         """
         Check if a new position can be opened based on risk parameters.
+        Enterprise portfolio-level gate runs first.
         """
         symbol = signal['symbol']
+
+        # ── Enterprise master pre-BUY gate ───────────────────────────
+        if not self._enterprise.pre_buy_risk_check(signal):
+            return False
 
         # Check daily blacklist (SL-hit stocks are banned for the rest of the day)
         if self.is_blacklisted(symbol):
@@ -415,11 +422,13 @@ class RiskManager:
         )
         partial_target = entry_price * (1 + partial_profit_pct)
 
-        # Volatility-based quantity
+        # Volatility-based quantity; prefer enterprise-engine size
         per_slot = config.TRADING_AMOUNT / max(1, config.MAX_POSITIONS)
-        quantity = self.volatility_position_size(per_slot, entry_price, atr)
-        # Don't exceed what signal already calculated if smaller
-        quantity = min(quantity, signal.get('position_size', quantity))
+        enterprise_qty = signal.get('position_size')
+        if isinstance(enterprise_qty, int) and enterprise_qty > 0:
+            quantity = enterprise_qty
+        else:
+            quantity = self.volatility_position_size(per_slot, entry_price, atr)
         quantity = max(1, quantity)
 
         position = Position(
@@ -709,6 +718,12 @@ class RiskManager:
         
         return False
     
+    def get_portfolio_heat(self) -> Dict:
+        """Return current portfolio-level heat map data."""
+        if self._enterprise is None:
+            return {}
+        return self._enterprise.portfolio_heat()
+
     def reset_daily(self):
         """Reset daily statistics and clear blacklist."""
         self.daily_pnl = 0.0

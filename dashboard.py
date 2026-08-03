@@ -1808,6 +1808,17 @@ tr:last-child td{border:none}
     <canvas id="chart-pnl" style="max-height:160px"></canvas>
   </div>
 
+  <!-- Portfolio Heat Map -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔥 Portfolio Heat (Sector Exposure)</div>
+    <div id="portfolio-heat-grid" class="grid grid-cols-1 gap-2" style="color:#e2e8f0">
+      <div style="font-size:12px;color:#6b7280">Loading heat map...</div>
+    </div>
+    <div style="font-size:11px;color:#6b7280;margin-top:10px">
+      Red bar = over <span id="ph-max-pct">30%</span> sector limit. Hover for exposure %.
+    </div>
+  </div>
+
 </div><!-- /tab-portfolio -->
 
 
@@ -3629,6 +3640,33 @@ async function load(){
       document.getElementById('p-summary-current').textContent = '₹—';
       document.getElementById('p-summary-day-pnl').textContent = '₹—';
       document.getElementById('p-summary-total-pnl').textContent = '₹—';
+    }
+
+    // Portfolio Heat Map
+    const ph = d.portfolio_heat || {};
+    const phGrid = document.getElementById('portfolio-heat-grid');
+    if(phGrid){
+      const exposure = ph.exposure_by_sector || {};
+      const maxPct = (ph.max_sector_exposure_pct || 0.30) * 100;
+      document.getElementById('ph-max-pct').textContent = maxPct + '%';
+      const rows = Object.entries(exposure).sort((a,b)=>b[1]-a[1]);
+      if(rows.length){
+        phGrid.innerHTML = rows.map(([sec,pct])=>{
+          const width = Math.min(100, Math.max(0, (pct||0)*100)).toFixed(1);
+          const over = (pct||0)*100 > maxPct;
+          const color = over ? '#ef4444' : (pct||0)*100 > maxPct*0.7 ? '#f59e0b' : '#22c55e';
+          return `
+            <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+              <div style="width:90px;color:#94a3b8;text-transform:capitalize">${sec}</div>
+              <div style="flex:1;background:#1f2937;border-radius:4px;height:18px;overflow:hidden">
+                <div style="width:${width}%;height:100%;background:${color};border-radius:4px;transition:width .4s"></div>
+              </div>
+              <div style="width:50px;text-align:right;color:#e2e8f0;font-weight:600">${(pct*100).toFixed(1)}%</div>
+            </div>`;
+        }).join('');
+      } else {
+        phGrid.innerHTML = '<div style="font-size:12px;color:#6b7280">No open positions</div>';
+      }
     }
 
     // Recent Activity table
@@ -5581,6 +5619,19 @@ def api_data():
         data['market_data_metrics'] = MarketDataFetcher.load_cycle_metrics()
     except Exception:
         pass
+
+    # Portfolio heat map (sector exposure, open positions, regime limits)
+    try:
+        from risk_manager import RiskManager
+        data['portfolio_heat'] = RiskManager().get_portfolio_heat()
+    except Exception:
+        data['portfolio_heat'] = {
+            'total_value': 0,
+            'exposure_by_sector': {},
+            'open_positions': 0,
+            'regime_limits': {},
+            'max_sector_exposure_pct': 0.3
+        }
 
     return jsonify(data)
 
