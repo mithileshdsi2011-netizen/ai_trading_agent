@@ -5238,6 +5238,7 @@ function _btRenderResults(data){
 load();
 loadJournal();
 loadHealthBadge();
+switchTab('dashboard', document.querySelector('.tab-btn.active'));
 setInterval(load,60000);
 setInterval(loadJournal,120000);
 setInterval(loadHealthBadge,60000);
