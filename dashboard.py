@@ -1537,7 +1537,26 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: Risk Monitor -->
+  <!-- Row 3: Sector Rotation -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Sector Rotation</div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">Top 5 Strongest</div>
+        <div id="sr-strong" style="font-size:13px;color:#22c55e">—</div>
+      </div>
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">Top 5 Weakest</div>
+        <div id="sr-weak" style="font-size:13px;color:#ef4444">—</div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+      <div class="card-sm"><div class="stat-label">NIFTY 7d</div><div class="stat-value-sm" id="sr-nifty-7d">—</div></div>
+      <div class="card-sm"><div class="stat-label">NIFTY 30d</div><div class="stat-value-sm" id="sr-nifty-30d">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Risk Monitor -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ Risk Monitor</div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -3362,6 +3381,16 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // Sector Rotation
+    const sr=d.sector_rotation||{};
+    const fmtPct=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':n.toFixed(2)+'%';};
+    document.getElementById('sr-nifty-7d').textContent=fmtPct(sr.nifty_7d);
+    document.getElementById('sr-nifty-30d').textContent=fmtPct(sr.nifty_30d);
+    const strong=(sr.top5_strong||[]);
+    const weak=(sr.top5_weak||[]);
+    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
+    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
 
     // Heatmap
     const hm=document.getElementById('d-heatmap');
@@ -5755,6 +5784,13 @@ def api_data():
             data['market_breadth'] = get_store().get_latest_market_breadth() or {}
     except Exception:
         data['market_breadth'] = {}
+
+    # Sector rotation snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['sector_rotation'] = get_store().get_latest_sector_rotation() or {}
+    except Exception:
+        data['sector_rotation'] = {}
 
     return jsonify(data)
 

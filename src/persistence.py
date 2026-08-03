@@ -146,6 +146,19 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_market_breadth_timestamp
                     ON market_breadth (timestamp);
+
+                CREATE TABLE IF NOT EXISTS sector_rotation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    nifty_7d REAL NOT NULL DEFAULT 0,
+                    nifty_30d REAL NOT NULL DEFAULT 0,
+                    top5_strong TEXT NOT NULL DEFAULT '[]',
+                    top5_weak TEXT NOT NULL DEFAULT '[]',
+                    all_sectors TEXT NOT NULL DEFAULT '[]'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sector_rotation_timestamp
+                    ON sector_rotation (timestamp);
                 """
             )
 
@@ -653,6 +666,49 @@ class TradingStore:
                     "above200": row["above200"],
                     "breadth_score": row["breadth_score"],
                     "market_strength": row["market_strength"],
+                }
+
+    # ── sector rotation ───────────────────────────────────────────────────
+
+    def save_sector_rotation(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a sector rotation snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sector_rotation
+                    (timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        float(snapshot.get("nifty_7d", 0.0)),
+                        float(snapshot.get("nifty_30d", 0.0)),
+                        self._dumps(snapshot.get("top5_strong", [])),
+                        self._dumps(snapshot.get("top5_weak", [])),
+                        self._dumps(snapshot.get("all_sectors", [])),
+                    ),
+                )
+
+    def get_latest_sector_rotation(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent sector rotation snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors
+                    FROM sector_rotation ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "nifty_7d": row["nifty_7d"],
+                    "nifty_30d": row["nifty_30d"],
+                    "top5_strong": self._loads(row["top5_strong"]),
+                    "top5_weak": self._loads(row["top5_weak"]),
+                    "all_sectors": self._loads(row["all_sectors"]),
                 }
 
 
