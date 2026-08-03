@@ -7328,4 +7328,4 @@ if __name__ == '__main__':
     print("  Auto-refreshes every 60 seconds")
     print("  Press Ctrl+C to stop")
     print("="*55 + "\n")
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
