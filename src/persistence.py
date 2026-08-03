@@ -190,6 +190,27 @@ class TradingStore:
                     ON fii_dii (timestamp);
                 CREATE INDEX IF NOT EXISTS idx_fii_dii_date
                     ON fii_dii (date);
+
+                CREATE TABLE IF NOT EXISTS options_intelligence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    spot REAL NOT NULL DEFAULT 0,
+                    pcr REAL NOT NULL DEFAULT 1.0,
+                    max_pain REAL NOT NULL DEFAULT 0,
+                    oi_build_up REAL NOT NULL DEFAULT 0,
+                    long_buildup INTEGER NOT NULL DEFAULT 0,
+                    short_buildup INTEGER NOT NULL DEFAULT 0,
+                    put_wall_strike REAL NOT NULL DEFAULT 0,
+                    put_wall_oi REAL NOT NULL DEFAULT 0,
+                    strong_oi_support INTEGER NOT NULL DEFAULT 0,
+                    confidence_boost REAL NOT NULL DEFAULT 0,
+                    total_call_oi REAL NOT NULL DEFAULT 0,
+                    total_put_oi REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_options_intelligence_timestamp
+                    ON options_intelligence (timestamp);
                 """
             )
 
@@ -834,6 +855,69 @@ class TradingStore:
                     "dii_net": row["dii_net"],
                     "net_flow": row["net_flow"],
                     "sentiment": row["sentiment"],
+                }
+
+    # ── options intelligence ─────────────────────────────────────────────
+
+    def save_options_intelligence(self, snapshot: Dict[str, Any]) -> None:
+        """Persist an options intelligence snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO options_intelligence
+                    (timestamp, symbol, spot, pcr, max_pain, oi_build_up,
+                     long_buildup, short_buildup, put_wall_strike, put_wall_oi,
+                     strong_oi_support, confidence_boost, total_call_oi, total_put_oi)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        str(snapshot.get("symbol", "")),
+                        float(snapshot.get("spot", 0.0)),
+                        float(snapshot.get("pcr", 1.0)),
+                        float(snapshot.get("max_pain", 0.0)),
+                        float(snapshot.get("oi_build_up", 0.0)),
+                        1 if snapshot.get("long_buildup", False) else 0,
+                        1 if snapshot.get("short_buildup", False) else 0,
+                        float(snapshot.get("put_wall_strike", 0.0)),
+                        float(snapshot.get("put_wall_oi", 0.0)),
+                        1 if snapshot.get("strong_oi_support", False) else 0,
+                        float(snapshot.get("confidence_boost", 0.0)),
+                        float(snapshot.get("total_call_oi", 0.0)),
+                        float(snapshot.get("total_put_oi", 0.0)),
+                    ),
+                )
+
+    def get_latest_options_intelligence(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent options intelligence snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, symbol, spot, pcr, max_pain, oi_build_up,
+                           long_buildup, short_buildup, put_wall_strike, put_wall_oi,
+                           strong_oi_support, confidence_boost, total_call_oi, total_put_oi
+                    FROM options_intelligence ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "symbol": row["symbol"],
+                    "spot": row["spot"],
+                    "pcr": row["pcr"],
+                    "max_pain": row["max_pain"],
+                    "oi_build_up": row["oi_build_up"],
+                    "long_buildup": bool(row["long_buildup"]),
+                    "short_buildup": bool(row["short_buildup"]),
+                    "put_wall_strike": row["put_wall_strike"],
+                    "put_wall_oi": row["put_wall_oi"],
+                    "strong_oi_support": bool(row["strong_oi_support"]),
+                    "confidence_boost": row["confidence_boost"],
+                    "total_call_oi": row["total_call_oi"],
+                    "total_put_oi": row["total_put_oi"],
                 }
 
 

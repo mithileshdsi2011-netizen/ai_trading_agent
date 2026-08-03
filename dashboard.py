@@ -1537,7 +1537,22 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: FII/DII Flow -->
+  <!-- Row 3: Options Chain Intelligence -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Options Intelligence</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">PCR</div><div class="stat-value-sm" id="oi-pcr">—</div></div>
+      <div class="card-sm"><div class="stat-label">Max Pain</div><div class="stat-value-sm" id="oi-max-pain">—</div></div>
+      <div class="card-sm"><div class="stat-label">OI Build-up</div><div class="stat-value-sm" id="oi-buildup">—</div></div>
+      <div class="card-sm"><div class="stat-label">Long Build-up</div><div class="stat-value-sm" id="oi-long">—</div></div>
+      <div class="card-sm"><div class="stat-label">Short Build-up</div><div class="stat-value-sm" id="oi-short">—</div></div>
+      <div class="card-sm"><div class="stat-label">Put Wall</div><div class="stat-value-sm" id="oi-put-wall">—</div></div>
+      <div class="card-sm"><div class="stat-label">Strong OI Support</div><div class="stat-value-sm" id="oi-support">—</div></div>
+      <div class="card-sm"><div class="stat-label">Conf Boost</div><div class="stat-value-sm" id="oi-conf-boost">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: FII/DII Flow -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🏦 FII/DII Flow</div>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -3403,6 +3418,26 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // Options Intelligence
+    const oi=d.options_intelligence||{};
+    document.getElementById('oi-pcr').textContent=oi.pcr!=null?oi.pcr.toFixed(2):'—';
+    document.getElementById('oi-max-pain').textContent=oi.max_pain?oi.max_pain.toFixed(0):'—';
+    document.getElementById('oi-buildup').textContent=oi.oi_build_up!=null?oi.oi_build_up.toFixed(0):'—';
+    const longEl=document.getElementById('oi-long');
+    longEl.textContent=oi.long_buildup?'Yes':'No';
+    longEl.className='stat-value-sm '+(oi.long_buildup?'green':'yellow');
+    const shortEl=document.getElementById('oi-short');
+    shortEl.textContent=oi.short_buildup?'Yes':'No';
+    shortEl.className='stat-value-sm '+(oi.short_buildup?'red':'yellow');
+    document.getElementById('oi-put-wall').textContent=oi.put_wall_strike?oi.put_wall_strike.toFixed(0):'—';
+    const supportEl=document.getElementById('oi-support');
+    supportEl.textContent=oi.strong_oi_support?'Yes':'No';
+    supportEl.className='stat-value-sm '+(oi.strong_oi_support?'green':'yellow');
+    const confBoostEl=document.getElementById('oi-conf-boost');
+    const confBoost=parseFloat(oi.confidence_boost||0);
+    confBoostEl.textContent=confBoost>0?('+'+confBoost.toFixed(0)+'%'):'—';
+    confBoostEl.className='stat-value-sm '+(confBoost>0?'green':'yellow');
 
     // FII/DII Flow
     const fd=d.fii_dii||{};
@@ -5860,6 +5895,13 @@ def api_data():
             data['fii_dii'] = get_store().get_latest_fii_dii() or {}
     except Exception:
         data['fii_dii'] = {}
+
+    # Options chain intelligence snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['options_intelligence'] = get_store().get_latest_options_intelligence() or {}
+    except Exception:
+        data['options_intelligence'] = {}
 
     return jsonify(data)
 

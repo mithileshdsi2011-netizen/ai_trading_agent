@@ -12,6 +12,7 @@ from trade_journal import TradeJournal
 from market_intelligence import MarketBreadthEngine
 from sector_rotation import SectorRotationEngine
 from fii_dii import FII_DII_Engine
+from options_intelligence import OptionsIntelligenceEngine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +65,7 @@ class EnterpriseAIDecisionEngine:
         self.breadth_engine = MarketBreadthEngine(market_data=self.market_data)
         self.sector_rotation = SectorRotationEngine(market_data=self.market_data)
         self.fii_dii_engine = FII_DII_Engine(market_data=self.market_data)
+        self.options_intelligence = OptionsIntelligenceEngine(market_data=self.market_data)
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.feature_success = {}
         self._load_adaptive_weights()
@@ -128,6 +130,10 @@ class EnterpriseAIDecisionEngine:
         # 6. Confidence
         final_confidence = self._compute_confidence(sub_scores, confidences)
 
+        # 6a. Options-chain confidence boost
+        options_adj = self.options_intelligence.adjust_confidence(final_confidence)
+        final_confidence = round(options_adj['adjusted_confidence'], 2)
+
         # 7. Dynamic threshold
         threshold = self._dynamic_threshold(market_regime)
 
@@ -137,7 +143,7 @@ class EnterpriseAIDecisionEngine:
         # 9. Explain
         explain = self._build_explain(
             symbol, sub_scores, confidences, final_score, final_confidence,
-            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii
+            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii, options_adj
         )
 
         score_components = dict(sub_scores)
@@ -151,6 +157,12 @@ class EnterpriseAIDecisionEngine:
         score_components['fii_dii_net_flow'] = fii_dii['net_flow']
         score_components['fii_dii_sentiment'] = fii_dii['sentiment']
         score_components['fii_dii_adjustment'] = fii_dii['adjustment']
+        score_components['options_pcr'] = options_adj['pcr']
+        score_components['options_max_pain'] = options_adj['max_pain']
+        score_components['options_long_buildup'] = options_adj['long_buildup']
+        score_components['options_short_buildup'] = options_adj['short_buildup']
+        score_components['options_strong_oi_support'] = options_adj['strong_oi_support']
+        score_components['options_confidence_boost'] = options_adj['confidence_boost']
 
         return {
             'symbol': symbol,
@@ -447,6 +459,7 @@ class EnterpriseAIDecisionEngine:
         breadth: Optional[Dict] = None,
         sector: Optional[Dict] = None,
         fii_dii: Optional[Dict] = None,
+        options: Optional[Dict] = None,
     ) -> Dict:
         """Build a human-readable AI explain."""
         lines = [f"{symbol}: {action} | Final {final_score} (threshold {threshold}) | Confidence {final_confidence}%"]
@@ -477,6 +490,21 @@ class EnterpriseAIDecisionEngine:
             lines.append(
                 f"  {'FII/DII Flow':20s} {f['net_flow']:6.2f}  ("
                 f"{f['sentiment']}, {sign}{f['adjustment']} score)"
+            )
+
+        if options:
+            o = options
+            flags = []
+            if o.get('pcr', 1.0) > 1.0:
+                flags.append('PCR>1')
+            if o.get('long_buildup'):
+                flags.append('Long Build-up')
+            if o.get('strong_oi_support'):
+                flags.append('OI Support')
+            flag_str = ', '.join(flags) if flags else 'neutral'
+            lines.append(
+                f"  {'Options':20s} {o['pcr']:6.2f}  ("
+                f"max pain {o['max_pain']}, {flag_str}, +{o['confidence_boost']}% confidence)"
             )
 
         if tech_factors:
