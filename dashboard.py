@@ -22,6 +22,11 @@ try:
 except ImportError:
     _SCORE_SKIP_THRESHOLD = 60
 
+try:
+    from persistence import get_store
+except ImportError:
+    get_store = None
+
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 IST = pytz.timezone("Asia/Kolkata")
@@ -1230,7 +1235,7 @@ tr:last-child td{border:none}
 .stat-label{color:#9ca3af;font-size:12px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em}
 .stat-value{font-size:22px;font-weight:700;line-height:1.1}
 .stat-value-sm{font-size:16px;font-weight:700}
-.tab-btn{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .2s;color:#6b7280;background:transparent}
+.tab-btn{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .2s;color:#6b7280;background:transparent;white-space:nowrap}
 .tab-btn.active{background:#1d4ed8;color:#fff}
 .tab-btn:hover:not(.active){background:#1f2937;color:#e2e8f0}
 .tab-content{display:none}
@@ -1284,6 +1289,10 @@ tr:last-child td{border:none}
       <div style="font-size:16px;font-weight:700;color:#f9fafb">AI Swing Trading Bot</div>
       <div style="font-size:11px;color:#4b5563" id="last-updated">Initializing...</div>
     </div>
+    <div id="health-badge" style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;background:#1f2937;font-size:12px;font-weight:600">
+      <span id="health-dot" style="width:10px;height:10px;border-radius:50%;background:#9ca3af"></span>
+      <span id="health-text">Unknown</span>
+    </div>
   </div>
   <div class="flex items-center gap-4 flex-wrap">
     <div class="text-center">
@@ -1314,11 +1323,12 @@ tr:last-child td{border:none}
 </div>
 
 <!-- TAB NAV -->
-<div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px" class="flex gap-2">
+<div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px;flex-wrap:wrap;" class="flex gap-2">
   <button class="tab-btn active" onclick="switchTab('dashboard',this)">🏠 Dashboard</button>
   <button class="tab-btn" onclick="switchTab('morning',this)" id="morning-tab-btn">🌅 Morning Intel</button>
   <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
   <button class="tab-btn" onclick="switchTab('positions',this)">📋 Positions</button>
+  <button class="tab-btn" onclick="switchTab('lifecycle',this)">🔄 Trade Lifecycle</button>
   <button class="tab-btn" onclick="switchTab('history',this)">🕒 History</button>
   <button class="tab-btn" onclick="switchTab('signals',this)">🤖 AI Signals</button>
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
@@ -1326,9 +1336,15 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
   <button class="tab-btn" onclick="switchTab('explain',this)">🔍 AI Explain</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
+  <button class="tab-btn" onclick="switchTab('market-intelligence',this)">🌐 Market Intelligence</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
+  <button class="tab-btn" onclick="switchTab('portfolio-optimizer',this)">📊 Portfolio Optimizer</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
+  <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
+  <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
+  <button class="tab-btn" onclick="switchTab('monitoring',this)">🚨 Monitoring</button>
+  <button class="tab-btn" onclick="switchTab('smart-execution',this)">⚡ Smart Execution</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -1516,7 +1532,104 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 2: Risk Monitor -->
+  <!-- Row 2: Market Breadth -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🌊 Market Breadth</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="d-market-breadth">
+      <div class="card-sm"><div class="stat-label">Advance</div><div class="stat-value-sm green" id="mb-advance">—</div></div>
+      <div class="card-sm"><div class="stat-label">Decline</div><div class="stat-value-sm red" id="mb-decline">—</div></div>
+      <div class="card-sm"><div class="stat-label">A/D Ratio</div><div class="stat-value-sm" id="mb-ad-ratio">—</div></div>
+      <div class="card-sm"><div class="stat-label">Breadth Score</div><div class="stat-value-sm" id="mb-breadth-score">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 20 EMA</div><div class="stat-value-sm" id="mb-above20">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 50 EMA</div><div class="stat-value-sm" id="mb-above50">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 200 EMA</div><div class="stat-value-sm" id="mb-above200">—</div></div>
+      <div class="card-sm"><div class="stat-label">Market Strength</div><div class="stat-value-sm" id="mb-market-strength">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 3: Global Markets -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🌍 Global Markets</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">Sentiment</div><div class="stat-value-sm" id="gm-sentiment">—</div></div>
+      <div class="card-sm"><div class="stat-label">NASDAQ</div><div class="stat-value-sm" id="gm-nasdaq">—</div></div>
+      <div class="card-sm"><div class="stat-label">Dow</div><div class="stat-value-sm" id="gm-dow">—</div></div>
+      <div class="card-sm"><div class="stat-label">S&amp;P500</div><div class="stat-value-sm" id="gm-sp500">—</div></div>
+      <div class="card-sm"><div class="stat-label">SGX Nifty</div><div class="stat-value-sm" id="gm-sgx">—</div></div>
+      <div class="card-sm"><div class="stat-label">Brent</div><div class="stat-value-sm" id="gm-brent">—</div></div>
+      <div class="card-sm"><div class="stat-label">Gold</div><div class="stat-value-sm" id="gm-gold">—</div></div>
+      <div class="card-sm"><div class="stat-label">USDINR</div><div class="stat-value-sm" id="gm-usdinr">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Economic Events -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🗓️ Economic Events</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">Next Event</div><div class="stat-value-sm" id="evt-name">—</div></div>
+      <div class="card-sm"><div class="stat-label">Hours Away</div><div class="stat-value-sm" id="evt-hours">—</div></div>
+      <div class="card-sm"><div class="stat-label">Size Factor</div><div class="stat-value-sm" id="evt-factor">—</div></div>
+      <div class="card-sm"><div class="stat-label">New BUYs</div><div class="stat-value-sm" id="evt-buy">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Options Chain Intelligence -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Options Intelligence</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">PCR</div><div class="stat-value-sm" id="oi-pcr">—</div></div>
+      <div class="card-sm"><div class="stat-label">Max Pain</div><div class="stat-value-sm" id="oi-max-pain">—</div></div>
+      <div class="card-sm"><div class="stat-label">OI Build-up</div><div class="stat-value-sm" id="oi-buildup">—</div></div>
+      <div class="card-sm"><div class="stat-label">Long Build-up</div><div class="stat-value-sm" id="oi-long">—</div></div>
+      <div class="card-sm"><div class="stat-label">Short Build-up</div><div class="stat-value-sm" id="oi-short">—</div></div>
+      <div class="card-sm"><div class="stat-label">Put Wall</div><div class="stat-value-sm" id="oi-put-wall">—</div></div>
+      <div class="card-sm"><div class="stat-label">Strong OI Support</div><div class="stat-value-sm" id="oi-support">—</div></div>
+      <div class="card-sm"><div class="stat-label">Conf Boost</div><div class="stat-value-sm" id="oi-conf-boost">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: FII/DII Flow -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🏦 FII/DII Flow</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">FII Net</div><div class="stat-value-sm" id="fii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">DII Net</div><div class="stat-value-sm" id="dii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">Net Flow</div><div class="stat-value-sm" id="fii-dii-net">—</div></div>
+      <div class="card-sm"><div class="stat-label">Institutional Sentiment</div><div class="stat-value-sm" id="fii-dii-sentiment">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: VIX Risk -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ India VIX Risk</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">VIX</div><div class="stat-value-sm" id="vix-value">—</div></div>
+      <div class="card-sm"><div class="stat-label">Volatility Score</div><div class="stat-value-sm" id="vix-score">—</div></div>
+      <div class="card-sm"><div class="stat-label">Risk Factor</div><div class="stat-value-sm" id="vix-factor">—</div></div>
+      <div class="card-sm"><div class="stat-label">Risk Level</div><div class="stat-value-sm" id="vix-level">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Sector Rotation -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Sector Rotation</div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">Top 5 Strongest</div>
+        <div id="sr-strong" style="font-size:13px;color:#22c55e">—</div>
+      </div>
+      <div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px;font-weight:600">Top 5 Weakest</div>
+        <div id="sr-weak" style="font-size:13px;color:#ef4444">—</div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+      <div class="card-sm"><div class="stat-label">NIFTY 7d</div><div class="stat-value-sm" id="sr-nifty-7d">—</div></div>
+      <div class="card-sm"><div class="stat-label">NIFTY 30d</div><div class="stat-value-sm" id="sr-nifty-30d">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Risk Monitor -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ Risk Monitor</div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -1803,6 +1916,17 @@ tr:last-child td{border:none}
     <canvas id="chart-pnl" style="max-height:160px"></canvas>
   </div>
 
+  <!-- Portfolio Heat Map -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔥 Portfolio Heat (Sector Exposure)</div>
+    <div id="portfolio-heat-grid" class="grid grid-cols-1 gap-2" style="color:#e2e8f0">
+      <div style="font-size:12px;color:#6b7280">Loading heat map...</div>
+    </div>
+    <div style="font-size:11px;color:#6b7280;margin-top:10px">
+      Red bar = over <span id="ph-max-pct">30%</span> sector limit. Hover for exposure %.
+    </div>
+  </div>
+
 </div><!-- /tab-portfolio -->
 
 
@@ -1925,6 +2049,35 @@ tr:last-child td{border:none}
   </div>
 
 </div><!-- /tab-history -->
+
+
+<!-- ===== TAB: TRADE LIFECYCLE ===== -->
+<div id="tab-lifecycle" class="tab-content">
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Trade Lifecycle Monitor</div>
+    <div class="overflow-x-auto">
+      <table class="w-full" style="font-size:12px;border-collapse:collapse">
+        <thead>
+          <tr style="color:#94a3b8;text-align:left;border-bottom:1px solid #334155">
+            <th style="padding:8px">Symbol</th>
+            <th style="padding:8px;text-align:right">Entry</th>
+            <th style="padding:8px;text-align:right">LTP</th>
+            <th style="padding:8px;text-align:right">Qty</th>
+            <th style="padding:8px;text-align:right">RR</th>
+            <th style="padding:8px;text-align:right">ATR</th>
+            <th style="padding:8px;text-align:right">Trail SL</th>
+            <th style="padding:8px;text-align:right">Target</th>
+            <th style="padding:8px;text-align:center">Break-Even</th>
+            <th style="padding:8px;text-align:center">Partial</th>
+            <th style="padding:8px;text-align:center">Days</th>
+            <th style="padding:8px">Next Action</th>
+          </tr>
+        </thead>
+        <tbody id="lifecycle-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /tab-lifecycle -->
 
 
 <!-- ===== TAB: AI SIGNALS ===== -->
@@ -2249,6 +2402,7 @@ tr:last-child td{border:none}
             <th style="padding:8px;text-align:left;color:#f9fafb">Action</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Reason</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">MIS</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Conf.</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">P&L</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Price</th>
@@ -2257,7 +2411,7 @@ tr:last-child td{border:none}
           </tr>
         </thead>
         <tbody id="explain-table">
-          <tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
+          <tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
         </tbody>
       </table>
     </div>
@@ -2311,6 +2465,20 @@ tr:last-child td{border:none}
 
   </div>
 </div><!-- /tab-askai -->
+
+
+<!-- ===== TAB: MARKET INTELLIGENCE ===== -->
+<div id="tab-market-intelligence" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🌐 Unified Market Intelligence</h3>
+      <div id="mi-score" style="font-size:22px;font-weight:800;color:#60a5fa">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3" id="mi-grid">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+</div><!-- /tab-market-intelligence -->
 
 
 <!-- ===== TAB: BOT STATUS ===== -->
@@ -2403,9 +2571,25 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <!-- Reconciliation Monitor -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Reconciliation Status</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div class="card-sm"><div class="stat-label">Health</div><div style="font-size:15px;font-weight:700" id="rs-healthy">—</div></div>
+      <div class="card-sm"><div class="stat-label">Last Sync</div><div style="font-size:14px;font-weight:600" id="rs-last-sync">—</div></div>
+      <div class="card-sm"><div class="stat-label">Objects Checked</div><div style="font-size:14px;font-weight:600" id="rs-objects">—</div></div>
+      <div class="card-sm"><div class="stat-label">Repairs</div><div style="font-size:14px;font-weight:600" id="rs-repairs">—</div></div>
+      <div class="card-sm"><div class="stat-label">Mismatches</div><div style="font-size:14px;font-weight:600" id="rs-mismatches">—</div></div>
+      <div class="card-sm"><div class="stat-label">Duration</div><div style="font-size:14px;font-weight:600" id="rs-duration">—</div></div>
+      <div class="card-sm"><div class="stat-label">SQLite</div><div style="font-size:14px;font-weight:600" id="rs-sqlite">—</div></div>
+      <div class="card-sm"><div class="stat-label">Broker Status</div><div style="font-size:14px;font-weight:600" id="rs-broker">—</div></div>
+    </div>
+  </div>
+
   <div style="text-align:right;font-size:11px;color:#374151;padding:8px 0">
     <a href="/api/data" style="color:#374151;text-decoration:underline">Raw API JSON</a> &nbsp;|
-    <a href="/api/health" style="color:#374151;text-decoration:underline">Health JSON</a>
+    <a href="/api/health" style="color:#374151;text-decoration:underline">Health JSON</a> &nbsp;|
+    <a href="/api/reconciliation/status" style="color:#374151;text-decoration:underline">Reconciliation JSON</a>
   </div>
 
 </div><!-- /tab-botstatus -->
@@ -2724,6 +2908,170 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-backtest -->
 
+<!-- ===== TAB: PORTFOLIO OPTIMIZER ===== -->
+<div id="tab-portfolio-optimizer" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">📊 Portfolio Optimizer</h3>
+      <div id="po-div" style="font-size:22px;font-weight:800">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3" id="po-grid">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Suggested Allocation</div>
+    <div id="po-allocation" style="color:#f9fafb;font-size:13px">—</div>
+  </div>
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Correlation Heatmap</div>
+    <div id="po-corr" style="overflow-x:auto;font-size:12px">—</div>
+  </div>
+</div><!-- /tab-portfolio-optimizer -->
+
+<!-- ===== TAB: BACKTESTING ===== -->
+<div id="tab-backtesting" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🧪 Enterprise Backtesting</h3>
+      <button class="btn" onclick="refreshBacktesting()">Refresh</button>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="bt-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Equity Curve</div>
+      <div id="bt-equity-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Drawdown Curve</div>
+      <div id="bt-drawdown-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Monthly Returns</div>
+      <div id="bt-monthly" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Walk-Forward Results</div>
+      <div id="bt-walkforward" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Monte Carlo Distribution</div>
+    <div id="bt-monte" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Strategy Comparison</div>
+    <div id="bt-compare" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-backtesting -->
+
+<!-- ===== TAB: AI LEARNING ===== -->
+<div id="tab-ai-learning" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🧠 AI Learning Engine</h3>
+      <div id="ai-last-retrain" style="font-size:12px;color:#9ca3af">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="ai-metrics">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Top Predictive Indicators</div>
+      <div id="ai-top" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Worst Indicators</div>
+      <div id="ai-worst" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Feature Importance</div>
+      <div id="ai-importance" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Model Weights</div>
+      <div id="ai-weights" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Learning Curve</div>
+    <div id="ai-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-ai-learning -->
+
+<!-- ===== TAB: MONITORING ===== -->
+<div id="tab-monitoring" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🚨 System Monitoring</h3>
+      <div id="mon-score" style="font-size:22px;font-weight:700">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="mon-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Component Status</div>
+      <div id="mon-status" style="font-size:12px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Heartbeat Log</div>
+      <div id="mon-heartbeat" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Alerts</div>
+    <div id="mon-alerts" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-monitoring -->
+
+<!-- ===== TAB: SMART EXECUTION ===== -->
+<div id="tab-smart-execution" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">⚡ Smart Execution Engine</h3>
+      <div id="exec-quality" style="font-size:22px;font-weight:700">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="exec-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Order Queue</div>
+      <div id="exec-queue" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Today's Orders</div>
+      <div id="exec-orders" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Execution Analytics</div>
+    <div id="exec-analytics" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-smart-execution -->
+
 </div><!-- /main container -->
 
 <script>
@@ -2771,6 +3119,12 @@ function switchTab(id,btn){
   if(id==='morning') loadMorningReport();
   if(id==='skipped') loadSkippedOpportunities();
   if(id==='explain') loadExplainability();
+  if(id==='market-intelligence') loadMarketIntelligence();
+  if(id==='portfolio-optimizer') loadPortfolioOptimizer();
+  if(id==='backtesting') loadBacktesting();
+  if(id==='ai-learning') loadAiLearning();
+  if(id==='monitoring') loadMonitoring();
+  if(id==='smart-execution') loadSmartExecution();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -3268,6 +3622,117 @@ async function load(){
     const ddEl2=document.getElementById('d-drawdown');
     ddEl2.textContent=dd.toFixed(2)+'%';ddEl2.className='stat-value-sm '+(dd<=1?'green':dd<=3?'yellow':'red');
 
+    // Market Breadth
+    const mb=d.market_breadth||{};
+    document.getElementById('mb-advance').textContent=mb.advance!=null?mb.advance:'—';
+    document.getElementById('mb-decline').textContent=mb.decline!=null?mb.decline:'—';
+    document.getElementById('mb-ad-ratio').textContent=mb.ad_ratio!=null?mb.ad_ratio.toFixed(2):'—';
+    document.getElementById('mb-above20').textContent=mb.above20!=null?mb.above20.toFixed(0)+'%':'—';
+    document.getElementById('mb-above50').textContent=mb.above50!=null?mb.above50.toFixed(0)+'%':'—';
+    document.getElementById('mb-above200').textContent=mb.above200!=null?mb.above200.toFixed(0)+'%':'—';
+    const bScoreEl=document.getElementById('mb-breadth-score');
+    const bScore=parseFloat(mb.breadth_score||0);
+    bScoreEl.textContent=bScore>0?bScore.toFixed(0):'—';
+    bScoreEl.className='stat-value-sm '+(bScore>=75?'green':bScore>=45?'yellow':'red');
+    const msEl=document.getElementById('mb-market-strength');
+    const ms=(mb.market_strength||'NEUTRAL').toUpperCase();
+    const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
+    msEl.textContent=msIcon+' '+ms;
+    msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // Global Markets
+    const gm=d.global_markets||{};
+    const gmAssets=gm.assets||{};
+    const gmSent=parseFloat(gm.sentiment_score||50);
+    const gmSentEl=document.getElementById('gm-sentiment');
+    gmSentEl.textContent=gmSent.toFixed(1);
+    gmSentEl.className='stat-value-sm '+(gmSent>=70?'green':gmSent>=40?'yellow':'red');
+    const fmtRet=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(1)+'%';};
+    const ids={'NASDAQ':'gm-nasdaq','Dow Jones':'gm-dow','S&P500':'gm-sp500','SGX Nifty':'gm-sgx','Brent':'gm-brent','Gold':'gm-gold','USDINR':'gm-usdinr'};
+    for(const [name,id] of Object.entries(ids)){
+      const a=gmAssets[name]||{};
+      const el=document.getElementById(id);
+      el.textContent=fmtRet(a.return_5d_pct);
+      el.className='stat-value-sm '+(a.return_5d_pct>=0?'green':'red');
+    }
+
+    // Economic Events
+    const ev=d.economic_event_risk||{};
+    const next=ev.next_event||{};
+    document.getElementById('evt-name').textContent=next.event_type||'—';
+    document.getElementById('evt-hours').textContent=ev.hours_to_event!=null?ev.hours_to_event.toFixed(1):'—';
+    const evtFactor=parseFloat(ev.size_factor||1);
+    const evtFactorEl=document.getElementById('evt-factor');
+    evtFactorEl.textContent=evtFactor.toFixed(2);
+    evtFactorEl.className='stat-value-sm '+(evtFactor>=1?'green':evtFactor>=0.5?'yellow':'red');
+    const evtBuyEl=document.getElementById('evt-buy');
+    const canBuy=ev.no_new_buy?false:true;
+    evtBuyEl.textContent=canBuy?'Allowed':'Blocked';
+    evtBuyEl.className='stat-value-sm '+(canBuy?'green':'red');
+
+    // Options Intelligence
+    const oi=d.options_intelligence||{};
+    document.getElementById('oi-pcr').textContent=oi.pcr!=null?oi.pcr.toFixed(2):'—';
+    document.getElementById('oi-max-pain').textContent=oi.max_pain?oi.max_pain.toFixed(0):'—';
+    document.getElementById('oi-buildup').textContent=oi.oi_build_up!=null?oi.oi_build_up.toFixed(0):'—';
+    const longEl=document.getElementById('oi-long');
+    longEl.textContent=oi.long_buildup?'Yes':'No';
+    longEl.className='stat-value-sm '+(oi.long_buildup?'green':'yellow');
+    const shortEl=document.getElementById('oi-short');
+    shortEl.textContent=oi.short_buildup?'Yes':'No';
+    shortEl.className='stat-value-sm '+(oi.short_buildup?'red':'yellow');
+    document.getElementById('oi-put-wall').textContent=oi.put_wall_strike?oi.put_wall_strike.toFixed(0):'—';
+    const supportEl=document.getElementById('oi-support');
+    supportEl.textContent=oi.strong_oi_support?'Yes':'No';
+    supportEl.className='stat-value-sm '+(oi.strong_oi_support?'green':'yellow');
+    const confBoostEl=document.getElementById('oi-conf-boost');
+    const confBoost=parseFloat(oi.confidence_boost||0);
+    confBoostEl.textContent=confBoost>0?('+'+confBoost.toFixed(0)+'%'):'—';
+    confBoostEl.className='stat-value-sm '+(confBoost>0?'green':'yellow');
+
+    // FII/DII Flow
+    const fd=d.fii_dii||{};
+    const fmtCr=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(0)+' Cr';};
+    const fiiNet=parseFloat(fd.fii_net||0);
+    const diiNet=parseFloat(fd.dii_net||0);
+    const netFlow=parseFloat(fd.net_flow||0);
+    const fiiNetEl=document.getElementById('fii-net');
+    fiiNetEl.textContent=fmtCr(fiiNet);
+    fiiNetEl.className='stat-value-sm '+(fiiNet>=0?'green':'red');
+    const diiNetEl=document.getElementById('dii-net');
+    diiNetEl.textContent=fmtCr(diiNet);
+    diiNetEl.className='stat-value-sm '+(diiNet>=0?'green':'red');
+    const netFlowEl=document.getElementById('fii-dii-net');
+    netFlowEl.textContent=fmtCr(netFlow);
+    netFlowEl.className='stat-value-sm '+(netFlow>=0?'green':'red');
+    const sentEl=document.getElementById('fii-dii-sentiment');
+    const sent=(fd.sentiment||'NEUTRAL').toUpperCase();
+    sentEl.textContent=sent;
+    sentEl.className='stat-value-sm '+(sent==='POSITIVE'?'green':sent==='NEGATIVE'?'red':'yellow');
+
+    // VIX Risk
+    const vix=d.vix_risk||{};
+    document.getElementById('vix-value').textContent=vix.vix!=null?vix.vix.toFixed(2):'—';
+    document.getElementById('vix-score').textContent=vix.volatility_score!=null?vix.volatility_score.toFixed(1):'—';
+    const vixFactorEl=document.getElementById('vix-factor');
+    const vixFactor=parseFloat(vix.risk_factor||1);
+    vixFactorEl.textContent=vixFactor.toFixed(2);
+    vixFactorEl.className='stat-value-sm '+(vixFactor>=0.8?'green':vixFactor>=0.5?'yellow':'red');
+    const vixLevelEl=document.getElementById('vix-level');
+    const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
+    vixLevelEl.textContent=vixLevel;
+    vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':'red');
+
+    // Sector Rotation
+    const sr=d.sector_rotation||{};
+    const fmtPct=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':n.toFixed(2)+'%';};
+    document.getElementById('sr-nifty-7d').textContent=fmtPct(sr.nifty_7d);
+    document.getElementById('sr-nifty-30d').textContent=fmtPct(sr.nifty_30d);
+    const strong=(sr.top5_strong||[]);
+    const weak=(sr.top5_weak||[]);
+    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
+    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
+
     // Heatmap
     const hm=document.getElementById('d-heatmap');
     if(d.positions&&d.positions.length){
@@ -3414,11 +3879,11 @@ async function load(){
     nEl.textContent=pct(nChg);nEl.className='stat-value-sm '+(nChg>=0?'green':'red');
     const bEl=document.getElementById('d-banknifty');
     bEl.textContent=pct(bChg);bEl.className='stat-value-sm '+(bChg>=0?'green':'red');
-    const vix=parseFloat(ms2.vix||0);
+    const marketVix=parseFloat(ms2.vix||0);
     const vixEl=document.getElementById('d-vix');
-    vixEl.textContent=vix.toFixed(1);
-    vixEl.className='stat-value-sm '+(vix<15?'green':vix<20?'yellow':'red');
-    document.getElementById('d-vix-label').textContent=vix<15?'🟢 LOW FEAR':vix<20?'🟡 MODERATE':'🔴 HIGH FEAR';
+    vixEl.textContent=marketVix.toFixed(1);
+    vixEl.className='stat-value-sm '+(marketVix<15?'green':marketVix<20?'yellow':'red');
+    document.getElementById('d-vix-label').textContent=marketVix<15?'🟢 LOW FEAR':marketVix<20?'🟡 MODERATE':'🔴 HIGH FEAR';
     const regEl=document.getElementById('d-regime');
     regEl.textContent=ms2.market_regime||d.market_regime||'—';
     regEl.className='stat-value-sm '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
@@ -3610,6 +4075,33 @@ async function load(){
       document.getElementById('p-summary-total-pnl').textContent = '₹—';
     }
 
+    // Portfolio Heat Map
+    const portfolioHeat = d.portfolio_heat || {};
+    const phGrid = document.getElementById('portfolio-heat-grid');
+    if(phGrid){
+      const exposure = portfolioHeat.exposure_by_sector || {};
+      const maxPct = (portfolioHeat.max_sector_exposure_pct || 0.30) * 100;
+      document.getElementById('ph-max-pct').textContent = maxPct + '%';
+      const rows = Object.entries(exposure).sort((a,b)=>b[1]-a[1]);
+      if(rows.length){
+        phGrid.innerHTML = rows.map(([sec,pct])=>{
+          const width = Math.min(100, Math.max(0, (pct||0)*100)).toFixed(1);
+          const over = (pct||0)*100 > maxPct;
+          const color = over ? '#ef4444' : (pct||0)*100 > maxPct*0.7 ? '#f59e0b' : '#22c55e';
+          return `
+            <div style="display:flex;align-items:center;gap:10px;font-size:12px">
+              <div style="width:90px;color:#94a3b8;text-transform:capitalize">${sec}</div>
+              <div style="flex:1;background:#1f2937;border-radius:4px;height:18px;overflow:hidden">
+                <div style="width:${width}%;height:100%;background:${color};border-radius:4px;transition:width .4s"></div>
+              </div>
+              <div style="width:50px;text-align:right;color:#e2e8f0;font-weight:600">${(pct*100).toFixed(1)}%</div>
+            </div>`;
+        }).join('');
+      } else {
+        phGrid.innerHTML = '<div style="font-size:12px;color:#6b7280">No open positions</div>';
+      }
+    }
+
     // Recent Activity table
     const thEl=document.getElementById('p-trade-history');
     const allOrd=(d.all_orders||[]);
@@ -3725,6 +4217,37 @@ async function load(){
       chartPnl=new Chart(pnlCtx,{type:'bar',data:{labels:days,datasets:[{data:vals,backgroundColor:vals.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]},options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
     } // end Chart guard
+
+    // ── TAB: TRADE LIFECYCLE ─────────────────────────────────────────────────
+    const lcTbl = document.getElementById('lifecycle-table-body');
+    const lcPositions = d.lifecycle_positions || [];
+    if(lcPositions.length && lcTbl){
+      lcTbl.innerHTML = lcPositions.map(lp=>{
+        const ltp = lp.current_price || lp.entry || 0;
+        const rrColor = lp.current_rr > 2 ? 'green' : lp.current_rr > 1 ? 'yellow' : 'red';
+        const beHit = lp.break_even_hit ? '✅' : '⏳';
+        const partialText = lp.partial_count ? `${lp.partial_count}/3` : '—';
+        const nextAction = lp.current_rr > 0
+          ? (lp.scale_in_qty ? 'Trailing' : (lp.current_rr > 1.5 ? 'Scale-out ready' : 'Trailing'))
+          : 'Hold';
+        return `<tr style="border-bottom:1px solid #1f2937">
+          <td style="padding:8px;color:#f9fafb;font-weight:700">${lp.symbol}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.entry)}</td>
+          <td style="padding:8px;text-align:right">${rupee(ltp)}</td>
+          <td style="padding:8px;text-align:right">${lp.quantity}</td>
+          <td style="padding:8px;text-align:right" class="${rrColor}">${lp.current_rr.toFixed(2)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.atr_at_entry)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.trailing_sl)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.next_target_level)}</td>
+          <td style="padding:8px;text-align:center">${beHit}</td>
+          <td style="padding:8px;text-align:center">${partialText}</td>
+          <td style="padding:8px;text-align:center">${lp.days_held}</td>
+          <td style="padding:8px;color:#22c55e;font-size:11px">${nextAction}</td>
+        </tr>`;
+      }).join('');
+    } else if(lcTbl){
+      lcTbl.innerHTML='<tr><td colspan="12" style="text-align:center;color:#4b5563;padding:20px">No open positions to manage</td></tr>';
+    }
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
     if (typeof renderAiSignals === 'function') renderAiSignals(d);
@@ -3874,6 +4397,28 @@ async function load(){
       const cpuEl=document.getElementById('bs-cpu');
       if(cpuEl){const cp=parseFloat(h.cpu_pct||0);cpuEl.textContent=cp.toFixed(0)+'%';cpuEl.className='stat-value '+(cp<60?'green':cp<80?'yellow':'red');}
     }).catch(()=>{});
+
+    // Reconciliation status (already embedded in api_data)
+    const rs=d.reconciliation_status||{};
+    const rsHealthyEl=document.getElementById('rs-healthy');
+    if(rsHealthyEl){rsHealthyEl.innerHTML=rs.healthy?'<span class="green">✅ Synced</span>':'<span class="red">❌ Out of sync</span>';}
+    const rsLastEl=document.getElementById('rs-last-sync');
+    if(rsLastEl){rsLastEl.textContent=fmtDateTime(rs.last_sync)||'—';}
+    const rsObjEl=document.getElementById('rs-objects');
+    if(rsObjEl){
+      const oc=rs.objects_checked||{};
+      rsObjEl.textContent=(oc.positions||0)+' pos / '+(oc.trades||0)+' trades';
+    }
+    const rsRepEl=document.getElementById('rs-repairs');
+    if(rsRepEl){rsRepEl.textContent=(rs.repairs||0);rsRepEl.className='stat-value '+((rs.repairs||0)===0?'green':'yellow');}
+    const rsMisEl=document.getElementById('rs-mismatches');
+    if(rsMisEl){rsMisEl.textContent=(rs.mismatches||0);rsMisEl.className='stat-value '+((rs.mismatches||0)===0?'green':'red');}
+    const rsDurEl=document.getElementById('rs-duration');
+    if(rsDurEl){rsDurEl.textContent=(rs.duration_ms||0)+' ms';}
+    const rsSqlEl=document.getElementById('rs-sqlite');
+    if(rsSqlEl){rsSqlEl.textContent=(rs.objects_checked?'Active':'Unknown');rsSqlEl.className='stat-value '+(rs.objects_checked?'green':'yellow');}
+    const rsBrEl=document.getElementById('rs-broker');
+    if(rsBrEl){rsBrEl.innerHTML=d.broker_live_ready?'<span class="green">✅ Ready</span>':'<span class="red">❌ Not ready</span>';}
 
     prevData=d;
 
@@ -4144,6 +4689,90 @@ function showDetailedDecision(symbol){
   `;
 }
 
+// ─── Market Intelligence Loader ──────────────────────────────────────────────
+async function loadMarketIntelligence(){
+  try{
+    const r=await fetch('/api/data');
+    const d=await r.json();
+    const miScore=d.market_intelligence_score;
+    const scoreEl=document.getElementById('mi-score');
+    if(miScore!=null){
+      scoreEl.textContent=parseFloat(miScore).toFixed(1);
+      scoreEl.style.color=(miScore>=70?'#4ade80':miScore>=45?'#facc15':'#f87171');
+    }else{
+      scoreEl.textContent='—';
+    }
+
+    const rows=[];
+    const add=(label, value, colorClass='')=>{
+      rows.push(`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${colorClass}">${value}</div></div>`);
+    };
+    add('Technical','—');
+    add('Market Breadth',d.market_breadth?d.market_breadth.breadth_score:'—');
+    add('Sector Momentum',d.sector_rotation?d.sector_rotation.momentum_score:'—');
+    add('India VIX',d.vix_risk?d.vix_risk.vix:'—');
+    add('FII/DII Net',d.fii_dii?d.fii_dii.net_flow:'—');
+    add('Options PCR',d.options_intelligence?d.options_intelligence.pcr:'—');
+    add('Global Sentiment',d.global_markets?d.global_markets.sentiment_score:'—');
+    add('Event Risk',d.economic_event_risk?d.economic_event_risk.reason:'—');
+    document.getElementById('mi-grid').innerHTML=rows.join('');
+  }catch(e){console.error('Market Intelligence load error:',e);}
+}
+
+// ─── Portfolio Optimizer Loader ───────────────────────────────────────────────
+async function loadPortfolioOptimizer(){
+  try{
+    const r=await fetch('/api/portfolio/optimizer');
+    const d=await r.json();
+    const po=d.portfolio_optimizer||{};
+    const cm=d.correlation_matrix||{};
+    const reb=d.rebalance_suggestions||[];
+
+    const divEl=document.getElementById('po-div');
+    divEl.textContent=po.diversification_score!=null?po.diversification_score.toFixed(0):'—';
+    divEl.style.color=(po.diversification_score>=70?'#4ade80':po.diversification_score>=40?'#facc15':'#f87171');
+
+    const rows=[];
+    const add=(label, value, colorClass='')=>{
+      rows.push(`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${colorClass}">${value}</div></div>`);
+    };
+    add('Diversification',po.diversification_score!=null?po.diversification_score.toFixed(1):'—');
+    add('Capital Used',rupee(po.capital_used));
+    add('Cash Remaining',rupee(po.cash_remaining));
+    add('Max Deployable',rupee(po.max_deployable));
+    add('Portfolio Beta',po.portfolio_beta!=null?po.portfolio_beta.toFixed(2):'—');
+    add('Volatility',po.portfolio_volatility!=null?po.portfolio_volatility.toFixed(2)+'%':'—');
+    add('Capital Limit',po.capital_limit_pct!=null?(po.capital_limit_pct*100).toFixed(0)+'%':'—');
+    add('Open Positions',po.open_positions!=null?po.open_positions:'—');
+    document.getElementById('po-grid').innerHTML=rows.join('');
+
+    const se=po.sector_exposure||{};
+    const sectorHtml=Object.entries(se).map(([s,p])=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:100px;display:inline-block">${s}</span><span style="color:#f9fafb">${p.toFixed(1)}%</span></div>`).join('');
+    document.getElementById('po-allocation').innerHTML=sectorHtml||'No data';
+
+    const syms=cm.symbols||[];
+    const matrix=cm.matrix||{};
+    if(syms.length && Object.keys(matrix).length){
+      let html='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:6px;text-align:left"></th>';
+      syms.forEach(s=>{html+=`<th style="padding:6px;text-align:left;color:#f9fafb;font-size:11px">${s}</th>`;});
+      html+='</tr></thead><tbody>';
+      syms.forEach(s1=>{
+        html+=`<tr><td style="padding:6px;color:#f9fafb;font-size:11px;border-bottom:1px solid #374151">${s1}</td>`;
+        syms.forEach(s2=>{
+          const v=parseFloat((matrix[s1]||{})[s2]||0);
+          const c=Math.abs(v)>=0.8?(v>0?'#f87171':'#facc15'):'#9ca3af';
+          html+=`<td style="padding:6px;color:${c};font-size:11px;border-bottom:1px solid #374151">${v.toFixed(2)}</td>`;
+        });
+        html+='</tr>';
+      });
+      html+='</tbody></table>';
+      document.getElementById('po-corr').innerHTML=html;
+    }else{
+      document.getElementById('po-corr').innerHTML='No correlation data';
+    }
+  }catch(e){console.error('Portfolio optimizer load error:',e);}
+}
+
 // ─── AI Explainability ───────────────────────────────────────────────────────
 async function loadExplainability(){
   try{
@@ -4152,33 +4781,34 @@ async function loadExplainability(){
     const actions=d.actions||[];
     const tbody=document.getElementById('explain-table');
     if(actions.length===0){
-      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
+      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
       return;
     }
-    const rupee=(n)=>{n=parseFloat(n)||0; return '₹'+n.toFixed(2);};
-    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return ts||'—';}};
+    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit'})}catch(e){return ts||'—';}};
     tbody.innerHTML=actions.map(a=>{
-      const isBuy=a.action==='BUY';
-      const isSell=(typeof a.action==='string') && a.action.startsWith('SELL');
-      const actionColor=isBuy?'#16a34a':isSell?'#dc2626':'#9ca3af';
-      const pnl=parseFloat(a.pnl||0);
-      const pnlColor=pnl>0?'#16a34a':pnl<0?'#dc2626':'#9ca3af';
-      return `<tr style="border-bottom:1px solid #1f2937">
-        <td style="padding:8px;color:#9ca3af;font-family:monospace;font-size:11px">${fmtTime(a.timestamp)}</td>
-        <td style="padding:8px;font-weight:700;color:#f9fafb">${a.symbol||'—'}</td>
-        <td style="padding:8px;color:${actionColor};font-weight:600">${a.action||'—'}</td>
-        <td style="padding:8px;color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</td>
-        <td style="padding:8px;color:#60a5fa">${a.score!=null?a.score.toFixed(1):'—'}</td>
-        <td style="padding:8px;color:#f59e0b">${a.confidence!=null?(a.confidence*100).toFixed(0)+'%':'—'}</td>
-        <td style="padding:8px;color:${pnlColor}">${pnl!==0?rupee(pnl):'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.price?rupee(a.price):'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.quantity||'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.sector||'Unknown'}</td>
+      const ts=fmtTime(a.timestamp);
+      const sc=parseFloat(a.score||0).toFixed(1);
+      const conf=parseFloat(a.confidence||0).toFixed(1);
+      const pnl=a.net_pnl!==undefined?parseFloat(a.net_pnl).toFixed(2):'—';
+      const mis=(a.score_components&&a.score_components.market_intelligence_score!=null)?parseFloat(a.score_components.market_intelligence_score).toFixed(1):'—';
+      const color=a.action==='BUY'?'green':(a.action||'').startsWith('SELL')?'red':'yellow';
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #374151">${ts}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.symbol||'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151"><span class="stat-value-sm ${color}">${a.action||'—'}</span></td>
+        <td style="padding:8px;border-bottom:1px solid #374151;max-width:250px;white-space:pre-wrap">${a.reason||'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${sc}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${mis}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${conf}%</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${pnl}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.price!=null?a.price.toFixed(2):'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.quantity!=null?a.quantity:'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.sector||'—'}</td>
       </tr>`;
     }).join('');
   }catch(e){
     console.error('Explainability load error:',e);
-    document.getElementById('explain-table').innerHTML='<tr><td colspan="10" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
+    document.getElementById('explain-table').innerHTML='<tr><td colspan="11" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
   }
 }
 
@@ -4607,8 +5237,11 @@ function _btRenderResults(data){
 
 load();
 loadJournal();
+loadHealthBadge();
+switchTab('dashboard', document.querySelector('.tab-btn.active'));
 setInterval(load,60000);
 setInterval(loadJournal,120000);
+setInterval(loadHealthBadge,60000);
 
 // ─── Ask AI Chat ──────────────────────────────────────────────────────────────
 function chipAsk(el){ document.getElementById('chat-input').value=el.textContent; sendChat(); }
@@ -4705,6 +5338,347 @@ function renderAIMessage(d){
   }
   return `<div class="msg-ai">${body}</div>`;
 }
+
+// ─── Backtesting Loader ───────────────────────────────────────────────────────
+async function loadBacktesting(){
+  try{
+    const r=await fetch('/api/backtest/results');
+    const d=await r.json();
+    if(d.error){throw new Error(d.error);}
+    const b=d.backtest||{};
+    const wf=d.walk_forward||[];
+    const mc=d.monte_carlo||{};
+
+    const kpi=document.getElementById('bt-kpi');
+    if(kpi){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('Total Return', pct(b.total_return_pct)),
+        add('CAGR', pct(b.cagr_pct)),
+        add('Max Drawdown', pct(b.max_drawdown_pct), 'red'),
+        add('Win Rate', pct(b.win_rate_pct)),
+        add('Sharpe', b.sharpe!=null?b.sharpe.toFixed(2):'—'),
+        add('Sortino', b.sortino!=null?b.sortino.toFixed(2):'—'),
+        add('Calmar', b.calmar!=null?b.calmar.toFixed(2):'—'),
+        add('Profit Factor', b.profit_factor!=null?b.profit_factor.toFixed(2):'—'),
+        add('Avg Win', rupee(b.avg_win)),
+        add('Avg Loss', rupee(b.avg_loss), 'red'),
+        add('Expectancy', rupee(b.expectancy)),
+        add('Avg Holding', b.avg_holding_days!=null?b.avg_holding_days.toFixed(1)+'d':'—'),
+      ].join('');
+    }
+
+    const fmtCurve=(data, key='equity')=>{
+      if(!data||!data.length)return 'No data';
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Date</th><th style="padding:4px;text-align:left;color:#f9fafb">Value</th></tr></thead><tbody>';
+      data.slice(-30).forEach(pt=>{
+        const v=parseFloat(pt[key]||0).toFixed(2);
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${pt.date}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${key==='equity'?rupee(v):pct(v)}</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      return rows;
+    };
+    const equity=document.getElementById('bt-equity-curve');
+    if(equity)equity.innerHTML=fmtCurve(b.equity_curve,'equity');
+    const dd=document.getElementById('bt-drawdown-curve');
+    if(dd)dd.innerHTML=fmtCurve(b.drawdown_curve,'drawdown_pct');
+
+    const mon=document.getElementById('bt-monthly');
+    if(mon){
+      const m=b.monthly_returns||{};
+      const rows=Object.entries(m).map(([dt,v])=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:100px;display:inline-block">${dt.split(' ')[0]}</span><span class="stat-value-sm ${v>=0?'green':'red'}">${pct(v)}</span></div>`).join('');
+      mon.innerHTML=rows||'No data';
+    }
+
+    const wfd=document.getElementById('bt-walkforward');
+    if(wfd){
+      if(!wf.length){wfd.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Fold</th><th style="padding:4px;text-align:right;color:#f9fafb">Return</th><th style="padding:4px;text-align:right;color:#f9fafb">Trades</th><th style="padding:4px;text-align:right;color:#f9fafb">Sharpe</th></tr></thead><tbody>';
+        wf.forEach(f=>{
+          const res=f.result||{};
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${f.name}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${pct(res.total_return_pct)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${res.trades_count||0}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${res.sharpe!=null?res.sharpe.toFixed(2):'—'}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        wfd.innerHTML=rows;
+      }
+    }
+
+    const mcEl=document.getElementById('bt-monte');
+    if(mcEl){
+      mcEl.innerHTML=[
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Simulations</span><span style="color:#f9fafb">${mc.n_simulations||0}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Probability of Profit</span><span class="stat-value-sm ${mc.probability_of_profit>=50?'green':'red'}">${pct(mc.probability_of_profit)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Worst Drawdown (5th %ile)</span><span style="color:#f87171">${pct(mc.worst_drawdown_pct)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Best Drawdown (95th %ile)</span><span style="color:#4ade80">${pct(mc.best_drawdown_pct)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">Mean Final P&L</span><span style="color:#f9fafb">${rupee(mc.mean_final_pnl)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">95% CI Low</span><span style="color:#f9fafb">${rupee(mc.ci_5_final_pnl)}</span></div>`,
+        `<div style="margin:2px 0"><span style="color:#9ca3af;width:200px;display:inline-block">95% CI High</span><span style="color:#f9fafb">${rupee(mc.ci_95_final_pnl)}</span></div>`,
+      ].join('');
+    }
+
+    const cmp=document.getElementById('bt-compare');
+    if(cmp){
+      const c=d.comparison||{};
+      const strats=c.strategies||[];
+      if(!strats.length){cmp.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:right;color:#f9fafb">CAGR %</th><th style="padding:4px;text-align:right;color:#f9fafb">CAGR Δ</th><th style="padding:4px;text-align:right;color:#f9fafb">Sharpe Δ</th><th style="padding:4px;text-align:right;color:#f9fafb">DD Δ</th></tr></thead><tbody>';
+        strats.forEach(s=>{
+          const imp=s.improvement_pct||{};
+          const base=s.metrics||{};
+          const arrow=(v)=>v>0?'↗':v<0?'↘':'—';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${s.strategy}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${pct(base.cagr_pct)}</td><td style="padding:4px;color:${imp.cagr_pct>=0?'#4ade80':'#f87171'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.cagr_pct)} ${(imp.cagr_pct||0).toFixed(1)}%</td><td style="padding:4px;color:${imp.sharpe>=0?'#4ade80':'#f87171'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.sharpe)} ${(imp.sharpe||0).toFixed(1)}%</td><td style="padding:4px;color:${imp.max_drawdown_pct>0?'#f87171':imp.max_drawdown_pct<0?'#4ade80':'#9ca3af'};border-bottom:1px solid #374151;font-size:11px;text-align:right">${arrow(imp.max_drawdown_pct)} ${(imp.max_drawdown_pct||0).toFixed(1)}%</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        cmp.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('Backtesting load error:',e);}
+}
+
+async function refreshBacktesting(){
+  await loadBacktesting();
+}
+
+// ─── Health Badge Loader ──────────────────────────────────────────────────────
+async function loadHealthBadge(){
+  try{
+    const r=await fetch('/api/monitoring');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const score=d.health_score||0;
+    const dot=document.getElementById('health-dot');
+    const txt=document.getElementById('health-text');
+    if(!dot||!txt)return;
+    let label='Excellent', color='#22c55e';
+    if(score<70){label='Good'; color='#84cc16';}
+    if(score<50){label='Warning'; color='#f97316';}
+    if(score<30){label='Critical'; color='#ef4444';}
+    dot.style.background=color;
+    txt.textContent=label+' ('+score+')';
+    txt.style.color=color;
+  }catch(e){console.error('Health badge load error:',e);}
+}
+
+// ─── Monitoring Loader ────────────────────────────────────────────────────────
+async function loadMonitoring(){
+  try{
+    const r=await fetch('/api/monitoring');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const m=d.metrics||{};
+    const sys=m.system||{};
+    const sql=m.sqlite||{};
+    const hb=m.scheduler_heartbeat||{};
+    const rh=m.reconciliation||{};
+    const k=m.kite||{};
+    const inet=m.internet;
+
+    const score=document.getElementById('mon-score');
+    if(score){
+      const s=d.health_score||0;
+      let color='#22c55e';
+      if(s<70) color='#84cc16';
+      if(s<50) color='#f97316';
+      if(s<30) color='#ef4444';
+      score.innerHTML=`<span style="color:${color}">${s}</span>`;
+    }
+
+    const kpi=document.getElementById('mon-kpi');
+    if(kpi){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('CPU', (sys.cpu_percent||0).toFixed(1)+'%'),
+        add('Memory', (sys.memory_percent||0).toFixed(1)+'%'),
+        add('Disk', (sys.disk_percent||0).toFixed(1)+'%'),
+        add('API Latency', (m.api_latency_ms||0).toFixed(1)+'ms'),
+        add('SQLite', sql.ok?'OK':'FAIL', sql.ok?'green':'red'),
+        add('SQLite Latency', (sql.response_ms||0).toFixed(1)+'ms'),
+        add('Internet', inet?'UP':'DOWN', inet?'green':'red'),
+        add('Kite', k.ok?'UP':'DOWN', k.ok?'green':'red'),
+        add('Scheduler', hb.ok?'OK':'MISSING', hb.ok?'green':'red'),
+        add('Reconciliation', rh.ok?'OK':'FAIL', rh.ok?'green':'red')
+      ].join('');
+    }
+
+    const status=document.getElementById('mon-status');
+    if(status){
+      const row=(label, ok)=>`<div style="margin:3px 0;display:flex;justify-content:space-between"><span style="color:#9ca3af">${label}</span><span style="color:${ok?'#4ade80':'#f87171'}">${ok?'●':'●'}</span></div>`;
+      status.innerHTML=[
+        row('SQLite', sql.ok),
+        row('Internet', inet),
+        row('Kite', k.ok||k),
+        row('Scheduler Heartbeat', hb.ok),
+        row('Reconciliation', rh.ok),
+        row('AI Engine', m.ai_engine&&m.ai_engine.ok),
+        row('Portfolio Optimizer', m.portfolio_optimizer&&m.portfolio_optimizer.ok),
+        row('AI Learning', m.ai_learning&&m.ai_learning.ok)
+      ].join('');
+    }
+
+    const hblog=document.getElementById('mon-heartbeat');
+    if(hblog){
+      const logs=d.heartbeat_logs||[];
+      if(!logs.length){hblog.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Source</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th><th style="padding:4px;text-align:right;color:#f9fafb">ms</th></tr></thead><tbody>';
+        logs.forEach(h=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(h.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${h.source}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${h.status}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${h.latency_ms}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        hblog.innerHTML=rows;
+      }
+    }
+
+    const alerts=document.getElementById('mon-alerts');
+    if(alerts){
+      const list=d.alerts||[];
+      if(!list.length){alerts.innerHTML='No alerts';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Level</th><th style="padding:4px;text-align:left;color:#f9fafb">Source</th><th style="padding:4px;text-align:left;color:#f9fafb">Message</th></tr></thead><tbody>';
+        list.forEach(a=>{
+          const color=a.level==='CRITICAL'?'#f87171':a.level==='WARNING'?'#f97316':'#9ca3af';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(a.timestamp,true)}</td><td style="padding:4px;color:${color};border-bottom:1px solid #374151;font-size:11px;font-weight:600">${a.level}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${a.source}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${a.message}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        alerts.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('Monitoring load error:',e);}
+}
+
+// ─── Smart Execution Loader ───────────────────────────────────────────────────
+async function loadSmartExecution(){
+  try{
+    const r=await fetch('/api/smart-execution');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const q=document.getElementById('exec-quality');
+    if(q){
+      const s=d.execution_quality_score||0;
+      let color='#22c55e';
+      if(s<70) color='#84cc16';
+      if(s<50) color='#f97316';
+      if(s<30) color='#ef4444';
+      q.innerHTML=`<span style="color:${color}">${s.toFixed(1)}</span>`;
+    }
+    const kpi=document.getElementById('exec-kpi');
+    if(kpi){
+      const add=(label,value,color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('Today Orders', d.today_orders||0),
+        add('Filled', d.filled||0, 'green'),
+        add('Partial', d.partial||0, 'orange'),
+        add('Rejected', d.rejected||0, 'red'),
+        add('Avg Slippage', (d.avg_slippage_pct||0).toFixed(3)+'%'),
+        add('Avg Fill Time', (d.avg_fill_time_ms||0)+'ms'),
+        add('Broker Latency', (d.broker_latency_ms||0)+'ms'),
+        add('Success %', (d.success_rate_pct||0).toFixed(1)+'%', d.success_rate_pct>=80?'green':''),
+        add('Avg Retries', (d.avg_retry_count||0).toFixed(2))
+      ].join('');
+    }
+    const orders=document.getElementById('exec-orders');
+    if(orders){
+      const list=d.orders||[];
+      if(!list.length){orders.innerHTML='No orders';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:right;color:#f9fafb">Filled</th><th style="padding:4px;text-align:right;color:#f9fafb">Avg</th><th style="padding:4px;text-align:left;color:#f9fafb">Type</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
+        list.forEach(o=>{
+          const statusColor=o.status==='FILLED'?'#4ade80':o.status==='REJECTED'?'#f87171':o.status==='PARTIAL'?'#f97316':'#9ca3af';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.filled_qty}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">₹${(o.avg_price||0).toFixed(2)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.order_type}</td><td style="padding:4px;color:${statusColor};border-bottom:1px solid #374151;font-size:11px;font-weight:600">${o.status}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        orders.innerHTML=rows;
+      }
+    }
+    const queue=document.getElementById('exec-queue');
+    if(queue){
+      const list=d.queue||[];
+      if(!list.length){queue.innerHTML='No queued orders';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
+        list.forEach(o=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.strategy}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.status}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        queue.innerHTML=rows;
+      }
+    }
+    const analytics=document.getElementById('exec-analytics');
+    if(analytics){
+      analytics.innerHTML=`<div class="grid grid-cols-2 md:grid-cols-3 gap-3"><div class="card-sm"><div class="stat-label">Fill Ratio</div><div class="stat-value-sm">${((d.fill_ratio||0)*100).toFixed(1)}%</div></div><div class="card-sm"><div class="stat-label">Avg Broker Latency</div><div class="stat-value-sm">${d.broker_latency_ms||0}ms</div></div><div class="card-sm"><div class="stat-label">Avg Retry Count</div><div class="stat-value-sm">${(d.avg_retry_count||0).toFixed(2)}</div></div></div>`;
+    }
+  }catch(e){console.error('Smart execution load error:',e);}
+}
+
+// ─── AI Learning Loader ───────────────────────────────────────────────────────
+async function loadAiLearning(){
+  try{
+    const r=await fetch('/api/ai-learning');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const m=d.metrics||{};
+    const feats=d.feature_importance||[];
+    const weights=d.model_weights||[];
+    const curve=d.learning_curve||[];
+    const top=d.top_indicators||[];
+    const worst=d.worst_indicators||[];
+
+    const retrain=document.getElementById('ai-last-retrain');
+    if(retrain)retrain.textContent=m.timestamp?'Last retrain: '+fmtDateTime(m.timestamp,true):'No retrain yet';
+
+    const met=document.getElementById('ai-metrics');
+    if(met){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      met.innerHTML=[
+        add('Model Accuracy', m.accuracy!=null?pct(m.accuracy*100,1):'—'),
+        add('Win Rate', m.win_rate!=null?pct(m.win_rate):'—'),
+        add('Trades Used', m.trades_used!=null?m.trades_used:'—'),
+        add('Learning Progress', m.trades_used!=null?Math.min(100,(m.trades_used/5000)*100).toFixed(1)+'%':'—')
+      ].join('');
+    }
+
+    const fmtList=(list)=>list.map(x=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:120px;display:inline-block">${x.feature}</span><span class="stat-value-sm ${x.importance>=0?'green':'red'}">${x.importance.toFixed(4)}</span></div>`).join('')||'No data';
+    const tEl=document.getElementById('ai-top');
+    if(tEl)tEl.innerHTML=fmtList(top);
+    const wEl=document.getElementById('ai-worst');
+    if(wEl)wEl.innerHTML=fmtList(worst);
+
+    const imp=document.getElementById('ai-importance');
+    if(imp){
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Feature</th><th style="padding:4px;text-align:right;color:#f9fafb">Correlation</th></tr></thead><tbody>';
+      feats.slice(0,20).forEach(f=>{
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${f.feature}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${(f.correlation||0).toFixed(4)}</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      imp.innerHTML=rows||'No data';
+    }
+
+    const wgt=document.getElementById('ai-weights');
+    if(wgt){
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Category</th><th style="padding:4px;text-align:right;color:#f9fafb">Weight</th></tr></thead><tbody>';
+      weights.forEach(w=>{
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${w.category}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${(w.weight*100).toFixed(1)}%</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      wgt.innerHTML=rows||'No data';
+    }
+
+    const cur=document.getElementById('ai-curve');
+    if(cur){
+      if(!curve.length){cur.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Date</th><th style="padding:4px;text-align:right;color:#f9fafb">Accuracy</th><th style="padding:4px;text-align:right;color:#f9fafb">Win Rate</th></tr></thead><tbody>';
+        curve.forEach(c=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(c.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${c.accuracy!=null?pct(c.accuracy*100,1):'—'}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${c.win_rate!=null?pct(c.win_rate):'—'}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        cur.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('AI Learning load error:',e);}
+}
 </script>
 </body></html>"""
 
@@ -4797,15 +5771,23 @@ def api_data():
             "vix": 0,
             "market_regime": "UNKNOWN"
         },
-        "market_data_metrics": {}
+        "market_data_metrics": {},
+        "reconciliation_status": {
+            "healthy": False,
+            "last_sync": None,
+            "mismatches": 0,
+            "repairs": 0,
+            "duration_ms": 0
+        }
     }
 
     # Load broker mode status (written by broker_integration.py at startup)
     try:
-        _bs_path = os.path.join(os.path.dirname(__file__), 'data', 'broker_status.json')
-        if os.path.exists(_bs_path):
-            with open(_bs_path) as _bf:
-                _bs = json.load(_bf)
+        if get_store is not None:
+            _bs = get_store().get_broker_state('status') or {}
+        else:
+            _bs = {}
+        if _bs:
             data['broker_mode'] = _bs.get('mode', 'UNKNOWN')
             data['broker_live_ready'] = _bs.get('live_ready', False)
             data['broker_startup_timestamp'] = _bs.get('startup_timestamp', '—')
@@ -4820,6 +5802,16 @@ def api_data():
         data['broker_live_ready'] = False
         data['broker_startup_timestamp'] = '—'
         data['broker_error'] = None
+
+    # Reconciliation status
+    try:
+        if get_store is not None:
+            _rs = get_store().get_broker_state('reconciliation') or {}
+        else:
+            _rs = {}
+        data['reconciliation_status'] = _rs if _rs else data['reconciliation_status']
+    except Exception:
+        pass
 
     if not kite:
         return jsonify(data)
@@ -4949,14 +5941,11 @@ def api_data():
         data['invested'] = sum(p.get('average_price', 0) * p.get('quantity', 0) for p in all_positions)
 
         # Enrich positions with re-entry metadata from trade journal
-        # ── Enrich with SL / Target from risk_manager positions.json ─────
+        # ── Enrich with SL / Target from risk_manager SQLite positions ─────
         try:
-            _pos_file = os.path.join(os.path.dirname(__file__), 'data', 'positions.json')
             _rm_map = {}
-            if os.path.exists(_pos_file):
-                with open(_pos_file) as _pf:
-                    _pd = json.load(_pf)
-                for _rp in _pd.get('positions', []):
+            if get_store is not None:
+                for _rp in get_store().load_positions():
                     _rm_map[_rp['symbol']] = _rp
         except Exception:
             _rm_map = {}
@@ -4968,7 +5957,7 @@ def api_data():
             sym = pos.get('tradingsymbol')
             avg = pos.get('average_price', 0) or 0
             _rm = _rm_map.get(sym, {})
-            # SL / Target: prefer risk_manager file, fall back to config %
+            # SL / Target: prefer risk_manager store, fall back to config %
             sl  = _rm.get('stop_loss')   or (round(avg * (1 - _sl_pct),  2) if avg else None)
             tgt = _rm.get('target')      or (round(avg * (1 + _tgt_pct), 2) if avg else None)
             tsl = _rm.get('trailing_stop') or sl
@@ -4980,10 +5969,9 @@ def api_data():
 
         # ── Enrich with journal metadata (first entry, days held, re-entry) ──
         try:
-            _jpath = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
-            with open(_jpath) as _jf:
-                _jentries = json.load(_jf)
-            _buy_entries = [e for e in _jentries if e.get('action') == 'BUY']
+            _buy_entries = []
+            if get_store is not None:
+                _buy_entries = get_store().get_trades(action='BUY')
             for pos in all_positions:
                 sym = pos.get('tradingsymbol')
                 sym_buys = [e for e in _buy_entries if e.get('symbol') == sym]
@@ -5061,11 +6049,10 @@ def api_data():
             return order_pnl
         
         # Load journal for buy-price lookup (needed for sells from past sessions)
-        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
         journal_entries = []
         try:
-            with open(journal_path) as _jf:
-                journal_entries = json.load(_jf)
+            if get_store is not None:
+                journal_entries = get_store().all_trades()
         except Exception:
             pass
 
@@ -5164,14 +6151,12 @@ def api_data():
 
         # Pending SELL actions surfaced by the order executor
         try:
-            _ps_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'pending_sells.json')
-            if os.path.exists(_ps_path):
-                with open(_ps_path) as _psf:
-                    _ps_items = json.load(_psf)
-                    if isinstance(_ps_items, list):
-                        data['pending_sells'] = _ps_items
-                    else:
-                        data['pending_sells'] = sorted(list(_ps_items.values()), key=lambda x: x.get('last_attempt', ''), reverse=True)
+            if get_store is not None:
+                _ps_items = get_store().load_daily_state().get('pending_sells', {})
+                if isinstance(_ps_items, list):
+                    data['pending_sells'] = _ps_items
+                else:
+                    data['pending_sells'] = sorted(list(_ps_items.values()), key=lambda x: x.get('last_attempt', ''), reverse=True)
             else:
                 data['pending_sells'] = []
         except Exception as _ps_err:
@@ -5251,8 +6236,6 @@ def api_data():
         }
     except Exception:
         pass
-
-    # Delivery holdings
     try:
         holdings_raw = kite.holdings()
         holdings = []
@@ -5284,21 +6267,20 @@ def api_data():
     # Portfolio health — computed here after account_balance is fully set (cash + holdings)
     try:
         account_value = data.get('account_balance', 0) or data.get('cash', 0)
-        _peak_file = os.path.join(os.path.dirname(__file__), 'data', 'peak_value.json')
         peak_value = account_value
         try:
-            if os.path.exists(_peak_file):
-                with open(_peak_file) as _pf:
-                    _saved = json.load(_pf)
-                    _saved_peak = _saved.get('peak_value', account_value)
-                    if _saved.get('date', '') == today_str:
-                        peak_value = max(_saved_peak, account_value)
+            if get_store is not None:
+                _snap = get_store().get_latest_portfolio_snapshot() or {}
+                _saved_peak = _snap.get('peak_value', account_value)
+                if _snap.get('date', '') == today_str:
+                    peak_value = max(_saved_peak, account_value)
+                elif _saved_peak and _saved_peak > peak_value:
+                    peak_value = _saved_peak
         except Exception:
             pass
         try:
-            os.makedirs(os.path.dirname(_peak_file), exist_ok=True)
-            with open(_peak_file, 'w') as _pf:
-                json.dump({"peak_value": peak_value, "date": today_str}, _pf)
+            if get_store is not None:
+                get_store().save_portfolio_snapshot({"peak_value": peak_value, "date": today_str})
         except Exception:
             pass
         drawdown = (peak_value - account_value) / peak_value if peak_value > 0 else 0
@@ -5460,16 +6442,15 @@ def api_data():
     last_api_call = _last_hb[:19].replace('T', ' ') if _last_hb else '—'
 
     # Last successful order time (from trade journal — newest BUY or SELL)
-    _journal_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'trade_journal.json')
     last_order_time = '—'
     try:
-        if os.path.exists(_journal_file):
-            _jdata = json.load(open(_journal_file))
-            if _jdata:
-                _newest = max(_jdata, key=lambda e: e.get('timestamp', ''))
+        if get_store is not None:
+            _journal_file = get_store().all_trades()
+            if _journal_file:
+                _newest = max(_journal_file, key=lambda e: e.get('timestamp', ''))
                 last_order_time = _newest.get('timestamp', '—')[:16].replace('T', ' ')
     except Exception:
-        pass
+        last_order_time = '—'
 
     # Known (whitelisted) IP
     try:
@@ -5532,7 +6513,95 @@ def api_data():
     except Exception:
         pass
 
+    # Portfolio heat map (sector exposure, open positions, regime limits)
+    try:
+        from risk_manager import RiskManager
+        data['portfolio_heat'] = RiskManager().get_portfolio_heat()
+    except Exception:
+        data['portfolio_heat'] = {
+            'total_value': 0,
+            'exposure_by_sector': {},
+            'open_positions': 0,
+            'regime_limits': {},
+            'max_sector_exposure_pct': 0.3
+        }
+
+    # Trade Lifecycle summary
+    try:
+        from risk_manager import RiskManager
+        from trade_lifecycle_manager import TradeLifecycleManager
+        _prices = {p.get('tradingsymbol'): p.get('last_price', 0) for p in all_positions}
+        _rm = RiskManager()
+        _ltm = TradeLifecycleManager()
+        data['lifecycle_positions'] = _ltm.get_lifecycle_summary(_rm.positions, _prices)
+    except Exception:
+        data['lifecycle_positions'] = []
+
+    # Market breadth snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['market_breadth'] = get_store().get_latest_market_breadth() or {}
+    except Exception:
+        data['market_breadth'] = {}
+
+    # Sector rotation snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['sector_rotation'] = get_store().get_latest_sector_rotation() or {}
+    except Exception:
+        data['sector_rotation'] = {}
+
+    # India VIX risk snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['vix_risk'] = get_store().get_latest_vix_risk() or {}
+    except Exception:
+        data['vix_risk'] = {}
+
+    # FII/DII institutional flow snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['fii_dii'] = get_store().get_latest_fii_dii() or {}
+    except Exception:
+        data['fii_dii'] = {}
+
+    # Options chain intelligence snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['options_intelligence'] = get_store().get_latest_options_intelligence() or {}
+    except Exception:
+        data['options_intelligence'] = {}
+
+    # Economic event risk (computed at runtime from the event calendar)
+    try:
+        from economic_events import EconomicEventRiskEngine
+        data['economic_event_risk'] = EconomicEventRiskEngine().risk_status()
+    except Exception:
+        data['economic_event_risk'] = {}
+
+    # Global market snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['global_markets'] = get_store().get_latest_global_markets() or {}
+    except Exception:
+        data['global_markets'] = {}
+
     return jsonify(data)
+
+
+@app.route('/api/market/breadth')
+def api_market_breadth():
+    """Latest market breadth snapshot."""
+    try:
+        if get_store is not None:
+            snap = get_store().get_latest_market_breadth()
+            if snap:
+                return jsonify({**snap, 'ok': True})
+    except Exception as e:
+        logger.error(f"Market breadth API error: {e}")
+    return jsonify({'ok': False, 'advance': 0, 'decline': 0, 'ad_ratio': 0.0,
+                    'above20': 0, 'above50': 0, 'above200': 0,
+                    'breadth_score': 0, 'market_strength': 'NEUTRAL'})
 
 
 @app.route('/api/start-token-server', methods=['POST'])
@@ -5957,10 +7026,13 @@ def api_explain():
         actions = []
 
         # Executed trades from the journal
-        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
-        if os.path.exists(journal_path):
-            with open(journal_path, 'r') as f:
-                journal = json.load(f)
+        journal = []
+        try:
+            if get_store is not None:
+                journal = get_store().all_trades()
+        except Exception:
+            pass
+        if journal:
             for t in journal:
                 if t.get('status') == 'CLOSED':
                     actions.append({
@@ -5986,7 +7058,8 @@ def api_explain():
                         'pnl': t.get('net_pnl'),
                         'price': t.get('entry_price'),
                         'quantity': t.get('quantity'),
-                        'sector': t.get('sector', 'Unknown')
+                        'sector': t.get('sector', 'Unknown'),
+                        'sub_scores': t.get('score_components', {})
                     })
 
         # Evaluated-but-skipped opportunities from the live trading log
@@ -6007,7 +7080,8 @@ def api_explain():
                 'pnl': 0.0,
                 'price': d.entry_price,
                 'quantity': d.position_size_calculated,
-                'sector': d.sector or 'Unknown'
+                'sector': d.sector or 'Unknown',
+                'sub_scores': d.detailed_factors or {}
             })
 
         # Deduplicate: keep the first authoritative record per (symbol, action) when iterating backwards;
@@ -6072,6 +7146,45 @@ def api_health():
     return jsonify(h)
 
 
+@app.route('/api/portfolio/optimizer')
+def api_portfolio_optimizer():
+    """Latest portfolio optimizer snapshot and correlation matrix."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from portfolio_optimizer import EnterprisePortfolioOptimizer
+        opt = EnterprisePortfolioOptimizer()
+        analysis = opt.analyze()
+        opt.persist_analysis(analysis)
+        opt.persist_correlation(opt.current_positions())
+        cm = opt.get_latest_correlation_matrix() or {}
+        return jsonify({
+            'portfolio_optimizer': analysis,
+            'correlation_matrix': cm,
+            'rebalance_suggestions': opt.rebalance_suggestions(opt.current_positions(), analysis['cash']),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'portfolio_optimizer': {}, 'correlation_matrix': {}}), 500
+
+
+@app.route('/api/reconciliation/status')
+def api_reconciliation_status():
+    """Reconciliation engine health: last sync, mismatches, repairs, duration."""
+    try:
+        if get_store is not None:
+            status = get_store().get_broker_state('reconciliation') or {
+                'healthy': False,
+                'last_sync': None,
+                'mismatches': 0,
+                'repairs': 0,
+                'duration_ms': 0
+            }
+        else:
+            status = {'healthy': False, 'last_sync': None, 'mismatches': 0, 'repairs': 0, 'duration_ms': 0}
+    except Exception:
+        status = {'healthy': False, 'last_sync': None, 'mismatches': 0, 'repairs': 0, 'duration_ms': 0}
+    return jsonify(status)
+
+
 _BT_CACHE: dict = {}
 _BT_LOCK = threading.Lock()
 
@@ -6121,6 +7234,89 @@ def api_backtest():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/backtest/results')
+def api_backtest_results():
+    """Return latest EnterpriseBacktestEngine results (run, walk-forward, Monte Carlo, comparison)."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from persistence import get_store
+        store = get_store()
+        raw_run = store.get_latest_backtest_results() or {}
+        result_json = raw_run.get('result_json', '{}')
+        backtest = json.loads(result_json) if isinstance(result_json, str) else {}
+        wf = store.get_latest_walk_forward_results(limit=5)
+        mc = store.get_latest_monte_carlo_results() or {}
+        mc_json = mc.get('result_json', '{}')
+        monte = json.loads(mc_json) if isinstance(mc_json, str) else {}
+        return jsonify({
+            'backtest': backtest,
+            'walk_forward': [{'name': r.get('name'), 'result': json.loads(r.get('result_json', '{}'))} for r in wf],
+            'monte_carlo': monte,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-learning')
+def api_ai_learning():
+    """Latest AI learning metrics, feature importance and weights."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from ai_learning_engine import EnterpriseLearningEngine
+        engine = EnterpriseLearningEngine()
+        return jsonify(engine.get_dashboard_data())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/monitoring')
+def api_monitoring():
+    """Latest system health snapshot and alert counts."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from system_monitor import EnterpriseSystemMonitor
+        from alert_engine import EnterpriseAlertEngine
+        mon = EnterpriseSystemMonitor()
+        alert_eng = EnterpriseAlertEngine(store=mon.store)
+        metrics = mon.collect()
+        mon.save_snapshot(metrics)
+        counts = alert_eng.daily_summary().get('counts', {'CRITICAL': 0, 'WARNING': 0, 'INFO': 0})
+        return jsonify({
+            'metrics': metrics,
+            'health_score': metrics.get('health_score', 0),
+            'alerts_today': counts,
+            'heartbeat_logs': mon.store.get_latest_heartbeat_logs(limit=10) if hasattr(mon.store, 'get_latest_heartbeat_logs') else [],
+            'alerts': mon.store.get_system_alerts(limit=20) if hasattr(mon.store, 'get_system_alerts') else [],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/alert/ack', methods=['POST'])
+def api_ack_alert():
+    try:
+        body = request.get_json(force=True) or {}
+        alert_id = int(body.get('alert_id', 0))
+        if get_store is not None:
+            get_store().acknowledge_alert(alert_id)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/smart-execution')
+def api_smart_execution():
+    """Smart execution analytics and recent orders/queue."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from smart_execution_engine import SmartExecutionEngine
+        from persistence import get_store
+        engine = SmartExecutionEngine(store=get_store())
+        return jsonify(engine.get_dashboard_data())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     # Start background heartbeat
     _hb = threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat")
@@ -6132,4 +7328,4 @@ if __name__ == '__main__':
     print("  Auto-refreshes every 60 seconds")
     print("  Press Ctrl+C to stop")
     print("="*55 + "\n")
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)

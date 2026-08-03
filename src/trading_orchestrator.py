@@ -26,6 +26,7 @@ from smart_exit import SmartExitAI
 from sell_decision_ai import SellDecisionAI
 from risk_manager import PositionStatus
 from decision_explainer import DecisionExplainer
+from reconciliation_engine import ReconciliationEngine
 
 import os as _os
 _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'logs')
@@ -68,6 +69,15 @@ class TradingOrchestrator:
         broker = self.order_executor.broker
         mode_str = 'PAPER' if broker.paper_trading else ('LIVE' if broker.live_ready else 'UNKNOWN')
         logger.info(f"TradingOrchestrator initialized — broker mode: {mode_str}, startup: {broker.startup_timestamp}")
+
+        # Reconciliation engine: full reconcile before trading, then schedule every 60s
+        self.reconciliation_engine = ReconciliationEngine(broker=broker, market_data_fetcher=self.market_data)
+        recon_status = self.reconciliation_engine.reconcile_all()
+        if not recon_status.get('healthy'):
+            raise RuntimeError(f"Startup reconciliation failed — not starting trading. {recon_status}")
+        self.reconciliation_engine.start_scheduler()
+        logger.info(f"Reconciliation engine started: {recon_status}")
+
         self.is_running = False
         self.trade_log: List[Dict] = []   # capped at 500 entries (in-memory only)
         self._TRADE_LOG_MAX = 500

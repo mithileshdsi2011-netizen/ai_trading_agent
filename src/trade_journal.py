@@ -3,12 +3,13 @@ Trade Journal
 Automatically logs every completed trade with full context.
 Persists to data/trade_journal.json for lifetime analytics.
 """
-import json
 import os
 import logging
 import threading
 from datetime import datetime, date
 from typing import Dict, List, Optional
+
+from persistence import get_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,22 +27,24 @@ class TradeJournal:
 
     def __init__(self, path: str = JOURNAL_FILE):
         self._path = path
+        self._store = get_store()
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
         self._backfill_attribution()
 
     def _backfill_attribution(self):
         """One-time idempotent migration: compute attribution for closed trades without it."""
         try:
-            entries = self._load()
+            entries = self._store.all_trades()
             backfilled = 0
             with self._file_lock:
                 for e in entries:
                     if e.get('action') == 'BUY' and e.get('status') == 'CLOSED' and 'attribution' not in e:
                         net_pnl = float(e.get('net_pnl') or 0)
-                        e['attribution'] = self._compute_attribution(e, net_pnl)
-                        backfilled += 1
+                        updates = {'attribution': self._compute_attribution(e, net_pnl)}
+                        if 'id' in e and e['id'] is not None:
+                            self._store.update_trade(e['id'], updates)
+                            backfilled += 1
                 if backfilled:
-                    self._save(entries)
                     logger.info(f"Backfilled attribution for {backfilled} historical closed trade(s)")
         except Exception as e:
             logger.error(f"Attribution backfill failed: {e}")
@@ -50,9 +53,7 @@ class TradeJournal:
 
     def _load(self) -> List[Dict]:
         try:
-            if os.path.exists(self._path):
-                with open(self._path, 'r') as f:
-                    return json.load(f)
+            return self._store.all_trades()
         except Exception as e:
             logger.error(f"Journal load error: {e}")
         return []
@@ -135,11 +136,8 @@ class TradeJournal:
         }
 
     def _save(self, entries: List[Dict]):
-        try:
-            with open(self._path, 'w') as f:
-                json.dump(entries, f, indent=2, default=str)
-        except Exception as e:
-            logger.error(f"Journal save error: {e}")
+        """No-op; store persists entries immediately."""
+        pass
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -189,11 +187,8 @@ class TradeJournal:
         _mon  = datetime.now().strftime('%B')
 
         with TradeJournal._file_lock:
-            entries = self._load()
-
             if action == 'BUY':
                 entry = {
-                    'id':              len(entries) + 1,
                     'date':            today,
                     'timestamp':       now,
                     'symbol':          symbol,
@@ -235,13 +230,11 @@ class TradeJournal:
                     'week_number':     _week,
                     'month':           _mon,
                 }
+                self._store.add_trade(entry)
             else:
                 # Find the original BUY date from existing journal entries for accurate holding_days
-                _buy_entry = next(
-                    (e for e in entries if e.get('symbol') == symbol
-                     and e.get('action') == 'BUY' and e.get('status') == 'OPEN'),
-                    None
-                )
+                _buy_entry = self._store.get_trades(symbol=symbol, action='BUY', status='OPEN', limit=1)
+                _buy_entry = _buy_entry[0] if _buy_entry else None
                 if _buy_entry and _buy_entry.get('date'):
                     try:
                         _buy_dt = datetime.fromisoformat(_buy_entry['date'])
@@ -257,7 +250,6 @@ class TradeJournal:
                 else:
                     holding_days = 0
                 entry = {
-                    'id':             len(entries) + 1,
                     'date':           today,
                     'timestamp':      now,
                     'symbol':         symbol,
@@ -284,23 +276,24 @@ class TradeJournal:
                     'month':          _mon,
                 }
                 # Update the matching open BUY record so we have one complete row
-                for e in entries:
-                    if (e.get('symbol') == symbol
-                            and e.get('action') == 'BUY'
-                            and e.get('status') == 'OPEN'):
-                        e['exit_price']   = entry['exit_price']
-                        e['exit_date']    = today
-                        e['holding_days'] = holding_days
-                        e['exit_reason']  = exit_reason
-                        e['gross_pnl']    = entry['gross_pnl']
-                        e['net_pnl']      = entry['net_pnl']
-                        e['charges']      = entry['charges']
-                        e['status']       = 'CLOSED'
-                        e['attribution']  = self._compute_attribution(e, float(entry['net_pnl'] or 0))
-                        break
+                buy_updates = {
+                    'exit_price':   entry['exit_price'],
+                    'exit_date':    today,
+                    'holding_days': holding_days,
+                    'exit_reason':  exit_reason,
+                    'gross_pnl':    entry['gross_pnl'],
+                    'net_pnl':      entry['net_pnl'],
+                    'charges':      entry['charges'],
+                    'status':       'CLOSED'
+                }
+                if _buy_entry:
+                    net_pnl_for_attr = float(entry['net_pnl'] or 0)
+                    attribution = self._compute_attribution(_buy_entry, net_pnl_for_attr)
+                    buy_updates['attribution'] = attribution
+                    if 'id' in _buy_entry and _buy_entry['id'] is not None:
+                        self._store.update_trade(_buy_entry['id'], buy_updates)
 
-            entries.append(entry)
-            self._save(entries)
+                self._store.add_trade(entry)
 
         logger.info(f"Journal: logged {action} {symbol} @ ₹{price} (score={trade_score})")
         return entry
@@ -308,11 +301,10 @@ class TradeJournal:
     # ── Read / Analytics ──────────────────────────────────────────────────────
 
     def all_entries(self) -> List[Dict]:
-        return self._load()
+        return self._store.all_trades()
 
     def closed_trades(self) -> List[Dict]:
-        return [e for e in self._load()
-                if e.get('status') == 'CLOSED' and e.get('action') == 'BUY']
+        return self._store.get_trades(action='BUY', status='CLOSED')
 
     def attribution_report(self) -> Dict:
         """Win rate and P&L broken down by the factors that drove each trade."""
