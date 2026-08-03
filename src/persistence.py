@@ -399,6 +399,64 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_learning_metrics_timestamp
                     ON learning_metrics (timestamp);
+
+                CREATE TABLE IF NOT EXISTS system_health (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    health_score INTEGER NOT NULL DEFAULT 0,
+                    metrics_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_system_health_timestamp
+                    ON system_health (timestamp);
+
+                CREATE TABLE IF NOT EXISTS system_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    data_json TEXT NOT NULL DEFAULT '{}',
+                    acknowledged INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_system_alerts_timestamp
+                    ON system_alerts (timestamp);
+
+                CREATE INDEX IF NOT EXISTS idx_system_alerts_acknowledged
+                    ON system_alerts (acknowledged);
+
+                CREATE TABLE IF NOT EXISTS heartbeat_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    latency_ms REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_log_timestamp
+                    ON heartbeat_log (timestamp);
+
+                CREATE TABLE IF NOT EXISTS notification_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    alert_id INTEGER NOT NULL DEFAULT 0,
+                    channel TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_notification_history_timestamp
+                    ON notification_history (timestamp);
+
+                CREATE TABLE IF NOT EXISTS daily_health_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    report_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_daily_health_reports_timestamp
+                    ON daily_health_reports (timestamp);
                 """
             )
 
@@ -1700,6 +1758,209 @@ class TradingStore:
                     }
                     for r in cur.fetchall()
                 ]
+
+    # ── monitoring / alerting ─────────────────────────────────────────────
+
+    def save_system_health(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO system_health (timestamp, health_score, metrics_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        int(snapshot.get("health_score", 0)),
+                        snapshot.get("metrics_json", "{}"),
+                    ),
+                )
+
+    def get_latest_system_health(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, health_score, metrics_json
+                    FROM system_health ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "health_score": row["health_score"],
+                    "metrics": self._loads(row["metrics_json"]),
+                }
+
+    def save_system_alert(self, snapshot: Dict[str, Any]) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO system_alerts
+                    (timestamp, level, source, message, data_json, acknowledged)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("level", "INFO"),
+                        snapshot.get("source", ""),
+                        snapshot.get("message", ""),
+                        snapshot.get("data_json", "{}"),
+                        int(snapshot.get("acknowledged", 0)),
+                    ),
+                )
+                return cur.lastrowid
+
+    def get_system_alerts(
+        self,
+        limit: int = 50,
+        level: Optional[str] = None,
+        unacknowledged: bool = False,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                where = []
+                params: List[Any] = []
+                if level:
+                    where.append("level = ?")
+                    params.append(level)
+                if unacknowledged:
+                    where.append("acknowledged = 0")
+                q = "SELECT * FROM system_alerts"
+                if where:
+                    q += " WHERE " + " AND ".join(where)
+                q += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+                cur = conn.execute(q, tuple(params))
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def acknowledge_alert(self, alert_id: int) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE system_alerts SET acknowledged = 1 WHERE id = ?",
+                    (alert_id,),
+                )
+
+    def get_alert_counts(self, date: Optional[str] = None) -> Dict[str, int]:
+        with self._lock:
+            with self._conn() as conn:
+                q = "SELECT level, COUNT(*) as c FROM system_alerts"
+                params = ()
+                if date:
+                    q += " WHERE date(timestamp) = ?"
+                    params = (date,)
+                q += " GROUP BY level"
+                rows = conn.execute(q, params).fetchall()
+                return {row["level"]: row["c"] for row in rows}
+
+    def save_heartbeat_log(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO heartbeat_log (timestamp, source, status, latency_ms)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        snapshot.get("source", ""),
+                        snapshot.get("status", ""),
+                        float(snapshot.get("latency_ms", 0)),
+                    ),
+                )
+
+    def get_latest_heartbeat_logs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, source, status, latency_ms
+                    FROM heartbeat_log ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "source": r["source"],
+                        "status": r["status"],
+                        "latency_ms": r["latency_ms"],
+                    }
+                    for r in cur.fetchall()
+                ]
+
+    def save_notification_history(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO notification_history
+                    (timestamp, alert_id, channel, status, content)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        int(snapshot.get("alert_id", 0)),
+                        snapshot.get("channel", ""),
+                        snapshot.get("status", ""),
+                        snapshot.get("content", ""),
+                    ),
+                )
+
+    def get_notification_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, alert_id, channel, status, content
+                    FROM notification_history ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "alert_id": r["alert_id"],
+                        "channel": r["channel"],
+                        "status": r["status"],
+                        "content": r["content"],
+                    }
+                    for r in cur.fetchall()
+                ]
+
+    def save_daily_health_report(self, snapshot: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO daily_health_reports (timestamp, report_json)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        json.dumps(snapshot.get("report", snapshot)),
+                    ),
+                )
+
+    def get_latest_daily_health_report(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, report_json
+                    FROM daily_health_reports ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "report": self._loads(row["report_json"]),
+                }
 
 
 # Singleton instance for the process

@@ -1289,6 +1289,10 @@ tr:last-child td{border:none}
       <div style="font-size:16px;font-weight:700;color:#f9fafb">AI Swing Trading Bot</div>
       <div style="font-size:11px;color:#4b5563" id="last-updated">Initializing...</div>
     </div>
+    <div id="health-badge" style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;background:#1f2937;font-size:12px;font-weight:600">
+      <span id="health-dot" style="width:10px;height:10px;border-radius:50%;background:#9ca3af"></span>
+      <span id="health-text">Unknown</span>
+    </div>
   </div>
   <div class="flex items-center gap-4 flex-wrap">
     <div class="text-center">
@@ -1339,6 +1343,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
   <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
   <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
+  <button class="tab-btn" onclick="switchTab('monitoring',this)">🚨 Monitoring</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -3008,6 +3013,35 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-ai-learning -->
 
+<!-- ===== TAB: MONITORING ===== -->
+<div id="tab-monitoring" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🚨 System Monitoring</h3>
+      <div id="mon-score" style="font-size:22px;font-weight:700">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="mon-kpi">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Component Status</div>
+      <div id="mon-status" style="font-size:12px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Heartbeat Log</div>
+      <div id="mon-heartbeat" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Alerts</div>
+    <div id="mon-alerts" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-monitoring -->
+
 </div><!-- /main container -->
 
 <script>
@@ -3059,6 +3093,7 @@ function switchTab(id,btn){
   if(id==='portfolio-optimizer') loadPortfolioOptimizer();
   if(id==='backtesting') loadBacktesting();
   if(id==='ai-learning') loadAiLearning();
+  if(id==='monitoring') loadMonitoring();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -5171,8 +5206,10 @@ function _btRenderResults(data){
 
 load();
 loadJournal();
+loadHealthBadge();
 setInterval(load,60000);
 setInterval(loadJournal,120000);
+setInterval(loadHealthBadge,60000);
 
 // ─── Ask AI Chat ──────────────────────────────────────────────────────────────
 function chipAsk(el){ document.getElementById('chat-input').value=el.textContent; sendChat(); }
@@ -5370,6 +5407,113 @@ async function loadBacktesting(){
 
 async function refreshBacktesting(){
   await loadBacktesting();
+}
+
+// ─── Health Badge Loader ──────────────────────────────────────────────────────
+async function loadHealthBadge(){
+  try{
+    const r=await fetch('/api/monitoring');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const score=d.health_score||0;
+    const dot=document.getElementById('health-dot');
+    const txt=document.getElementById('health-text');
+    if(!dot||!txt)return;
+    let label='Excellent', color='#22c55e';
+    if(score<70){label='Good'; color='#84cc16';}
+    if(score<50){label='Warning'; color='#f97316';}
+    if(score<30){label='Critical'; color='#ef4444';}
+    dot.style.background=color;
+    txt.textContent=label+' ('+score+')';
+    txt.style.color=color;
+  }catch(e){console.error('Health badge load error:',e);}
+}
+
+// ─── Monitoring Loader ────────────────────────────────────────────────────────
+async function loadMonitoring(){
+  try{
+    const r=await fetch('/api/monitoring');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const m=d.metrics||{};
+    const sys=m.system||{};
+    const sql=m.sqlite||{};
+    const hb=m.scheduler_heartbeat||{};
+    const rh=m.reconciliation||{};
+    const k=m.kite||{};
+    const inet=m.internet;
+
+    const score=document.getElementById('mon-score');
+    if(score){
+      const s=d.health_score||0;
+      let color='#22c55e';
+      if(s<70) color='#84cc16';
+      if(s<50) color='#f97316';
+      if(s<30) color='#ef4444';
+      score.innerHTML=`<span style="color:${color}">${s}</span>`;
+    }
+
+    const kpi=document.getElementById('mon-kpi');
+    if(kpi){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      kpi.innerHTML=[
+        add('CPU', (sys.cpu_percent||0).toFixed(1)+'%'),
+        add('Memory', (sys.memory_percent||0).toFixed(1)+'%'),
+        add('Disk', (sys.disk_percent||0).toFixed(1)+'%'),
+        add('API Latency', (m.api_latency_ms||0).toFixed(1)+'ms'),
+        add('SQLite', sql.ok?'OK':'FAIL', sql.ok?'green':'red'),
+        add('SQLite Latency', (sql.response_ms||0).toFixed(1)+'ms'),
+        add('Internet', inet?'UP':'DOWN', inet?'green':'red'),
+        add('Kite', k.ok?'UP':'DOWN', k.ok?'green':'red'),
+        add('Scheduler', hb.ok?'OK':'MISSING', hb.ok?'green':'red'),
+        add('Reconciliation', rh.ok?'OK':'FAIL', rh.ok?'green':'red')
+      ].join('');
+    }
+
+    const status=document.getElementById('mon-status');
+    if(status){
+      const row=(label, ok)=>`<div style="margin:3px 0;display:flex;justify-content:space-between"><span style="color:#9ca3af">${label}</span><span style="color:${ok?'#4ade80':'#f87171'}">${ok?'●':'●'}</span></div>`;
+      status.innerHTML=[
+        row('SQLite', sql.ok),
+        row('Internet', inet),
+        row('Kite', k.ok||k),
+        row('Scheduler Heartbeat', hb.ok),
+        row('Reconciliation', rh.ok),
+        row('AI Engine', m.ai_engine&&m.ai_engine.ok),
+        row('Portfolio Optimizer', m.portfolio_optimizer&&m.portfolio_optimizer.ok),
+        row('AI Learning', m.ai_learning&&m.ai_learning.ok)
+      ].join('');
+    }
+
+    const hblog=document.getElementById('mon-heartbeat');
+    if(hblog){
+      const logs=d.heartbeat_logs||[];
+      if(!logs.length){hblog.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Source</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th><th style="padding:4px;text-align:right;color:#f9fafb">ms</th></tr></thead><tbody>';
+        logs.forEach(h=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(h.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${h.source}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${h.status}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${h.latency_ms}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        hblog.innerHTML=rows;
+      }
+    }
+
+    const alerts=document.getElementById('mon-alerts');
+    if(alerts){
+      const list=d.alerts||[];
+      if(!list.length){alerts.innerHTML='No alerts';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Level</th><th style="padding:4px;text-align:left;color:#f9fafb">Source</th><th style="padding:4px;text-align:left;color:#f9fafb">Message</th></tr></thead><tbody>';
+        list.forEach(a=>{
+          const color=a.level==='CRITICAL'?'#f87171':a.level==='WARNING'?'#f97316':'#9ca3af';
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(a.timestamp,true)}</td><td style="padding:4px;color:${color};border-bottom:1px solid #374151;font-size:11px;font-weight:600">${a.level}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${a.source}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${a.message}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        alerts.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('Monitoring load error:',e);}
 }
 
 // ─── AI Learning Loader ───────────────────────────────────────────────────────
@@ -7025,6 +7169,41 @@ def api_ai_learning():
         from ai_learning_engine import EnterpriseLearningEngine
         engine = EnterpriseLearningEngine()
         return jsonify(engine.get_dashboard_data())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/monitoring')
+def api_monitoring():
+    """Latest system health snapshot and alert counts."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from system_monitor import EnterpriseSystemMonitor
+        from alert_engine import EnterpriseAlertEngine
+        mon = EnterpriseSystemMonitor()
+        alert_eng = EnterpriseAlertEngine(store=mon.store)
+        metrics = mon.collect()
+        mon.save_snapshot(metrics)
+        counts = alert_eng.daily_summary().get('counts', {'CRITICAL': 0, 'WARNING': 0, 'INFO': 0})
+        return jsonify({
+            'metrics': metrics,
+            'health_score': metrics.get('health_score', 0),
+            'alerts_today': counts,
+            'heartbeat_logs': mon.store.get_latest_heartbeat_logs(limit=10) if hasattr(mon.store, 'get_latest_heartbeat_logs') else [],
+            'alerts': mon.store.get_system_alerts(limit=20) if hasattr(mon.store, 'get_system_alerts') else [],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/alert/ack', methods=['POST'])
+def api_ack_alert():
+    try:
+        body = request.get_json(force=True) or {}
+        alert_id = int(body.get('alert_id', 0))
+        if get_store is not None:
+            get_store().acknowledge_alert(alert_id)
+        return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
