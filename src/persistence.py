@@ -130,6 +130,22 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_broker_type
                     ON broker_state (type);
+
+                CREATE TABLE IF NOT EXISTS market_breadth (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    advance INTEGER NOT NULL DEFAULT 0,
+                    decline INTEGER NOT NULL DEFAULT 0,
+                    ad_ratio REAL NOT NULL DEFAULT 0,
+                    above20 REAL NOT NULL DEFAULT 0,
+                    above50 REAL NOT NULL DEFAULT 0,
+                    above200 REAL NOT NULL DEFAULT 0,
+                    breadth_score REAL NOT NULL DEFAULT 0,
+                    market_strength TEXT NOT NULL DEFAULT 'NEUTRAL'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_market_breadth_timestamp
+                    ON market_breadth (timestamp);
                 """
             )
 
@@ -588,6 +604,56 @@ class TradingStore:
                 logger.error(f"Could not migrate journal: {e}")
 
         return counts
+
+
+    # ── market breadth ────────────────────────────────────────────────────
+
+    def save_market_breadth(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a market breadth snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO market_breadth
+                    (timestamp, advance, decline, ad_ratio, above20, above50, above200, breadth_score, market_strength)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        int(snapshot.get("advance", 0)),
+                        int(snapshot.get("decline", 0)),
+                        float(snapshot.get("ad_ratio", 0.0)),
+                        float(snapshot.get("above20", 0.0)),
+                        float(snapshot.get("above50", 0.0)),
+                        float(snapshot.get("above200", 0.0)),
+                        float(snapshot.get("breadth_score", 0.0)),
+                        str(snapshot.get("market_strength", "NEUTRAL")),
+                    ),
+                )
+
+    def get_latest_market_breadth(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent market breadth snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, advance, decline, ad_ratio, above20, above50, above200, breadth_score, market_strength
+                    FROM market_breadth ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "advance": row["advance"],
+                    "decline": row["decline"],
+                    "ad_ratio": row["ad_ratio"],
+                    "above20": row["above20"],
+                    "above50": row["above50"],
+                    "above200": row["above200"],
+                    "breadth_score": row["breadth_score"],
+                    "market_strength": row["market_strength"],
+                }
 
 
 # Singleton instance for the process

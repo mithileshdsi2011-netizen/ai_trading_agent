@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from trade_journal import TradeJournal
+from market_intelligence import MarketBreadthEngine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -58,6 +59,7 @@ class EnterpriseAIDecisionEngine:
     def __init__(self, market_data=None, trade_journal: Optional[TradeJournal] = None):
         self.market_data = market_data
         self.trade_journal = trade_journal or TradeJournal()
+        self.breadth_engine = MarketBreadthEngine(market_data=self.market_data)
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.feature_success = {}
         self._load_adaptive_weights()
@@ -106,23 +108,30 @@ class EnterpriseAIDecisionEngine:
             final_score += v * self.weights.get(k, self.DEFAULT_WEIGHTS.get(k, 0.0))
         final_score = round(max(0.0, min(100.0, final_score)), 2)
 
-        # 3. Confidence
+        # 3. Market breadth adjustment
+        breadth = self.breadth_engine.adjust_ai_score(final_score)
+        final_score = round(breadth['adjusted_score'], 2)
+
+        # 4. Confidence
         final_confidence = self._compute_confidence(sub_scores, confidences)
 
-        # 4. Dynamic threshold
+        # 5. Dynamic threshold
         threshold = self._dynamic_threshold(market_regime)
 
-        # 5. Decision
+        # 6. Decision (after breadth adjustment)
         action = self._determine_action(final_score, threshold, final_confidence)
 
-        # 6. Explain
+        # 7. Explain
         explain = self._build_explain(
             symbol, sub_scores, confidences, final_score, final_confidence,
-            threshold, action, self.weights, tech_factors
+            threshold, action, self.weights, tech_factors, breadth
         )
 
         score_components = dict(sub_scores)
         score_components.update(tech_factors)
+        score_components['breadth_score'] = breadth['breadth_score']
+        score_components['breadth_adjustment'] = breadth['adjustment']
+        score_components['market_strength'] = breadth['market_strength']
 
         return {
             'symbol': symbol,
@@ -416,6 +425,7 @@ class EnterpriseAIDecisionEngine:
         action: str,
         weights: Dict,
         tech_factors: Dict,
+        breadth: Optional[Dict] = None,
     ) -> Dict:
         """Build a human-readable AI explain."""
         lines = [f"{symbol}: {action} | Final {final_score} (threshold {threshold}) | Confidence {final_confidence}%"]
@@ -423,6 +433,14 @@ class EnterpriseAIDecisionEngine:
             w = round(weights.get(k, 0) * 100, 1)
             c = confidences.get(k, 0) * 100
             lines.append(f"  {k.replace('_', ' ').title():20s} {v:6.2f}  (weight {w:5.1f}%, confidence {c:5.1f}%)")
+
+        if breadth:
+            b = breadth
+            sign = '+' if b.get('adjustment', 0) >= 0 else ''
+            lines.append(
+                f"  {'Market Breadth':20s} {b['breadth_score']:6.2f}  ("
+                f"{b['market_strength']}, {sign}{b['adjustment']} score)"
+            )
 
         if tech_factors:
             lines.append("  Technical factors:")
@@ -437,6 +455,7 @@ class EnterpriseAIDecisionEngine:
             'details': {k: {'score': v, 'weight': weights.get(k, 0), 'confidence': confidences.get(k, 0)}
                         for k, v in sub_scores.items()},
             'technical_factors': tech_factors,
+            'breadth': breadth or {},
         }
 
     # ── Helpers ──────────────────────────────────────────────────────────────

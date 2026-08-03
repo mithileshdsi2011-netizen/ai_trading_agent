@@ -1522,7 +1522,22 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 2: Risk Monitor -->
+  <!-- Row 2: Market Breadth -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🌊 Market Breadth</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="d-market-breadth">
+      <div class="card-sm"><div class="stat-label">Advance</div><div class="stat-value-sm green" id="mb-advance">—</div></div>
+      <div class="card-sm"><div class="stat-label">Decline</div><div class="stat-value-sm red" id="mb-decline">—</div></div>
+      <div class="card-sm"><div class="stat-label">A/D Ratio</div><div class="stat-value-sm" id="mb-ad-ratio">—</div></div>
+      <div class="card-sm"><div class="stat-label">Breadth Score</div><div class="stat-value-sm" id="mb-breadth-score">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 20 EMA</div><div class="stat-value-sm" id="mb-above20">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 50 EMA</div><div class="stat-value-sm" id="mb-above50">—</div></div>
+      <div class="card-sm"><div class="stat-label">Above 200 EMA</div><div class="stat-value-sm" id="mb-above200">—</div></div>
+      <div class="card-sm"><div class="stat-label">Market Strength</div><div class="stat-value-sm" id="mb-market-strength">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 3: Risk Monitor -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ Risk Monitor</div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -3329,6 +3344,24 @@ async function load(){
     const dd=parseFloat(ph.drawdown_pct||0);
     const ddEl2=document.getElementById('d-drawdown');
     ddEl2.textContent=dd.toFixed(2)+'%';ddEl2.className='stat-value-sm '+(dd<=1?'green':dd<=3?'yellow':'red');
+
+    // Market Breadth
+    const mb=d.market_breadth||{};
+    document.getElementById('mb-advance').textContent=mb.advance!=null?mb.advance:'—';
+    document.getElementById('mb-decline').textContent=mb.decline!=null?mb.decline:'—';
+    document.getElementById('mb-ad-ratio').textContent=mb.ad_ratio!=null?mb.ad_ratio.toFixed(2):'—';
+    document.getElementById('mb-above20').textContent=mb.above20!=null?mb.above20.toFixed(0)+'%':'—';
+    document.getElementById('mb-above50').textContent=mb.above50!=null?mb.above50.toFixed(0)+'%':'—';
+    document.getElementById('mb-above200').textContent=mb.above200!=null?mb.above200.toFixed(0)+'%':'—';
+    const bScoreEl=document.getElementById('mb-breadth-score');
+    const bScore=parseFloat(mb.breadth_score||0);
+    bScoreEl.textContent=bScore>0?bScore.toFixed(0):'—';
+    bScoreEl.className='stat-value-sm '+(bScore>=75?'green':bScore>=45?'yellow':'red');
+    const msEl=document.getElementById('mb-market-strength');
+    const ms=(mb.market_strength||'NEUTRAL').toUpperCase();
+    const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
+    msEl.textContent=msIcon+' '+ms;
+    msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
 
     // Heatmap
     const hm=document.getElementById('d-heatmap');
@@ -5716,7 +5749,29 @@ def api_data():
     except Exception:
         data['lifecycle_positions'] = []
 
+    # Market breadth snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['market_breadth'] = get_store().get_latest_market_breadth() or {}
+    except Exception:
+        data['market_breadth'] = {}
+
     return jsonify(data)
+
+
+@app.route('/api/market/breadth')
+def api_market_breadth():
+    """Latest market breadth snapshot."""
+    try:
+        if get_store is not None:
+            snap = get_store().get_latest_market_breadth()
+            if snap:
+                return jsonify({**snap, 'ok': True})
+    except Exception as e:
+        logger.error(f"Market breadth API error: {e}")
+    return jsonify({'ok': False, 'advance': 0, 'decline': 0, 'ad_ratio': 0.0,
+                    'above20': 0, 'above50': 0, 'above200': 0,
+                    'breadth_score': 0, 'market_strength': 'NEUTRAL'})
 
 
 @app.route('/api/start-token-server', methods=['POST'])
