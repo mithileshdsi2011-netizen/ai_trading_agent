@@ -333,6 +333,72 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_monte_carlo_results_timestamp
                     ON monte_carlo_results (timestamp);
+
+                CREATE TABLE IF NOT EXISTS ai_training_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    trade_id TEXT NOT NULL,
+                    entry_features_json TEXT NOT NULL DEFAULT '{}',
+                    technical_score REAL NOT NULL DEFAULT 0,
+                    market_intelligence_score REAL NOT NULL DEFAULT 0,
+                    sector_score REAL NOT NULL DEFAULT 0,
+                    breadth_score REAL NOT NULL DEFAULT 0,
+                    vix REAL NOT NULL DEFAULT 0,
+                    fii_dii_net REAL NOT NULL DEFAULT 0,
+                    options_pcr REAL NOT NULL DEFAULT 0,
+                    global_sentiment REAL NOT NULL DEFAULT 0,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    rsi REAL NOT NULL DEFAULT 0,
+                    macd REAL NOT NULL DEFAULT 0,
+                    ema REAL NOT NULL DEFAULT 0,
+                    vwap REAL NOT NULL DEFAULT 0,
+                    support REAL NOT NULL DEFAULT 0,
+                    resistance REAL NOT NULL DEFAULT 0,
+                    risk_atr_pct REAL NOT NULL DEFAULT 0,
+                    risk_beta REAL NOT NULL DEFAULT 0,
+                    holding_period INTEGER NOT NULL DEFAULT 0,
+                    exit_reason TEXT NOT NULL DEFAULT '',
+                    final_pnl REAL NOT NULL DEFAULT 0,
+                    mae_pct REAL NOT NULL DEFAULT 0,
+                    mfe_pct REAL NOT NULL DEFAULT 0,
+                    win INTEGER NOT NULL DEFAULT 0,
+                    risk_metrics_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ai_training_data_timestamp
+                    ON ai_training_data (timestamp);
+
+                CREATE TABLE IF NOT EXISTS feature_importance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    feature TEXT NOT NULL,
+                    correlation REAL NOT NULL DEFAULT 0,
+                    importance REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_feature_importance_timestamp
+                    ON feature_importance (timestamp);
+
+                CREATE TABLE IF NOT EXISTS model_weights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    weight REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_model_weights_timestamp
+                    ON model_weights (timestamp);
+
+                CREATE TABLE IF NOT EXISTS learning_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    accuracy REAL NOT NULL DEFAULT 0,
+                    win_rate REAL NOT NULL DEFAULT 0,
+                    trades_used INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_learning_metrics_timestamp
+                    ON learning_metrics (timestamp);
                 """
             )
 
@@ -1436,6 +1502,204 @@ class TradingStore:
                 if not row:
                     return None
                 return {"timestamp": row["timestamp"], "result_json": row["result_json"]}
+
+    # ── ai learning ───────────────────────────────────────────────────────
+
+    def save_ai_training_data(self, sample: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO ai_training_data
+                    (timestamp, trade_id, entry_features_json, technical_score, market_intelligence_score,
+                    sector_score, breadth_score, vix, fii_dii_net, options_pcr, global_sentiment,
+                    confidence, rsi, macd, ema, vwap, support, resistance, risk_atr_pct, risk_beta,
+                    holding_period, exit_reason, final_pnl, mae_pct, mfe_pct, win, risk_metrics_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sample.get("timestamp") or datetime.now().isoformat(),
+                        sample.get("trade_id", ""),
+                        sample.get("entry_features_json", "{}"),
+                        float(sample.get("technical_score", 0)),
+                        float(sample.get("market_intelligence_score", 0)),
+                        float(sample.get("sector_score", 0)),
+                        float(sample.get("breadth_score", 0)),
+                        float(sample.get("vix", 0)),
+                        float(sample.get("fii_dii_net", 0)),
+                        float(sample.get("options_pcr", 0)),
+                        float(sample.get("global_sentiment", 0)),
+                        float(sample.get("confidence", 0)),
+                        float(sample.get("rsi", 0)),
+                        float(sample.get("macd", 0)),
+                        float(sample.get("ema", 0)),
+                        float(sample.get("vwap", 0)),
+                        float(sample.get("support", 0)),
+                        float(sample.get("resistance", 0)),
+                        float(sample.get("risk_atr_pct", 0)),
+                        float(sample.get("risk_beta", 0)),
+                        int(sample.get("holding_period", 0)),
+                        sample.get("exit_reason", ""),
+                        float(sample.get("final_pnl", 0)),
+                        float(sample.get("mae_pct", 0)),
+                        float(sample.get("mfe_pct", 0)),
+                        int(sample.get("win", 0)),
+                        sample.get("risk_metrics_json", "{}"),
+                    ),
+                )
+
+    def count_ai_training_data(self) -> int:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute("SELECT COUNT(*) FROM ai_training_data").fetchone()
+                return row[0] if row else 0
+
+    def prune_ai_training_data(self, keep: int) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    DELETE FROM ai_training_data WHERE id <=
+                    (SELECT id FROM ai_training_data ORDER BY id DESC LIMIT 1 OFFSET ?)
+                    """,
+                    (keep,),
+                )
+
+    def get_ai_training_data(self, limit: int = 5000) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT * FROM ai_training_data ORDER BY id DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                cols = [c[0] for c in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def save_feature_importance(self, sample: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO feature_importance (timestamp, feature, correlation, importance)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        sample.get("timestamp") or datetime.now().isoformat(),
+                        sample.get("feature", ""),
+                        float(sample.get("correlation", 0)),
+                        float(sample.get("importance", 0)),
+                    ),
+                )
+
+    def get_latest_feature_importance(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, feature, correlation, importance
+                    FROM feature_importance ORDER BY timestamp DESC, id DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "feature": r["feature"],
+                        "correlation": r["correlation"],
+                        "importance": r["importance"],
+                    }
+                    for r in cur.fetchall()
+                ]
+
+    def save_model_weights(self, sample: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO model_weights (timestamp, category, weight)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        sample.get("timestamp") or datetime.now().isoformat(),
+                        sample.get("category", ""),
+                        float(sample.get("weight", 0)),
+                    ),
+                )
+
+    def get_latest_model_weights(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, category, weight
+                    FROM model_weights ORDER BY timestamp DESC, id DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "category": r["category"],
+                        "weight": r["weight"],
+                    }
+                    for r in cur.fetchall()
+                ]
+
+    def save_learning_metrics(self, sample: Dict[str, Any]) -> None:
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO learning_metrics (timestamp, accuracy, win_rate, trades_used)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        sample.get("timestamp") or datetime.now().isoformat(),
+                        float(sample.get("accuracy", 0)),
+                        float(sample.get("win_rate", 0)),
+                        int(sample.get("trades_used", 0)),
+                    ),
+                )
+
+    def get_latest_learning_metrics(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, accuracy, win_rate, trades_used
+                    FROM learning_metrics ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "accuracy": row["accuracy"],
+                    "win_rate": row["win_rate"],
+                    "trades_used": row["trades_used"],
+                }
+
+    def get_learning_curve(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, accuracy, win_rate, trades_used
+                    FROM learning_metrics ORDER BY timestamp DESC LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [
+                    {
+                        "timestamp": r["timestamp"],
+                        "accuracy": r["accuracy"],
+                        "win_rate": r["win_rate"],
+                        "trades_used": r["trades_used"],
+                    }
+                    for r in cur.fetchall()
+                ]
 
 
 # Singleton instance for the process

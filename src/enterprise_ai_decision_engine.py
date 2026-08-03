@@ -287,6 +287,23 @@ class EnterpriseAIDecisionEngine:
         except Exception as e:
             logger.warning(f"Adaptive weight update failed: {e}")
 
+    def update_weights(self, new_weights: Dict[str, float]) -> None:
+        """Public setter used by the Enterprise Learning Engine."""
+        if not new_weights:
+            return
+        try:
+            # Only keep known categories and re-normalize to sum 1.0
+            valid = {k: v for k, v in new_weights.items() if k in self.DEFAULT_WEIGHTS}
+            if not valid:
+                return
+            total = sum(valid.values())
+            if total <= 0:
+                return
+            self.weights = {k: round(valid[k] / total, 3) for k in self.DEFAULT_WEIGHTS}
+            logger.info(f"Learning engine updated weights: {self.weights}")
+        except Exception as e:
+            logger.warning(f"Weight update failed: {e}")
+
     # ── Sub-scoring engines ──────────────────────────────────────────────────
 
     def _technical_score(self, symbol, current_price, hist, research) -> tuple:

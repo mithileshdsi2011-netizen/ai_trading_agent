@@ -1338,6 +1338,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('portfolio-optimizer',this)">📊 Portfolio Optimizer</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
   <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
+  <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -2967,6 +2968,46 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-backtesting -->
 
+<!-- ===== TAB: AI LEARNING ===== -->
+<div id="tab-ai-learning" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🧠 AI Learning Engine</h3>
+      <div id="ai-last-retrain" style="font-size:12px;color:#9ca3af">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="ai-metrics">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Top Predictive Indicators</div>
+      <div id="ai-top" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Worst Indicators</div>
+      <div id="ai-worst" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Feature Importance</div>
+      <div id="ai-importance" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Model Weights</div>
+      <div id="ai-weights" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Learning Curve</div>
+    <div id="ai-curve" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
+  </div>
+</div><!-- /tab-ai-learning -->
+
 </div><!-- /main container -->
 
 <script>
@@ -3017,6 +3058,7 @@ function switchTab(id,btn){
   if(id==='market-intelligence') loadMarketIntelligence();
   if(id==='portfolio-optimizer') loadPortfolioOptimizer();
   if(id==='backtesting') loadBacktesting();
+  if(id==='ai-learning') loadAiLearning();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -5329,6 +5371,74 @@ async function loadBacktesting(){
 async function refreshBacktesting(){
   await loadBacktesting();
 }
+
+// ─── AI Learning Loader ───────────────────────────────────────────────────────
+async function loadAiLearning(){
+  try{
+    const r=await fetch('/api/ai-learning');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    const m=d.metrics||{};
+    const feats=d.feature_importance||[];
+    const weights=d.model_weights||[];
+    const curve=d.learning_curve||[];
+    const top=d.top_indicators||[];
+    const worst=d.worst_indicators||[];
+
+    const retrain=document.getElementById('ai-last-retrain');
+    if(retrain)retrain.textContent=m.timestamp?'Last retrain: '+fmtDateTime(m.timestamp,true):'No retrain yet';
+
+    const met=document.getElementById('ai-metrics');
+    if(met){
+      const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      met.innerHTML=[
+        add('Model Accuracy', m.accuracy!=null?pct(m.accuracy*100,1):'—'),
+        add('Win Rate', m.win_rate!=null?pct(m.win_rate):'—'),
+        add('Trades Used', m.trades_used!=null?m.trades_used:'—'),
+        add('Learning Progress', m.trades_used!=null?Math.min(100,(m.trades_used/5000)*100).toFixed(1)+'%':'—')
+      ].join('');
+    }
+
+    const fmtList=(list)=>list.map(x=>`<div style="margin:2px 0"><span style="color:#9ca3af;width:120px;display:inline-block">${x.feature}</span><span class="stat-value-sm ${x.importance>=0?'green':'red'}">${x.importance.toFixed(4)}</span></div>`).join('')||'No data';
+    const tEl=document.getElementById('ai-top');
+    if(tEl)tEl.innerHTML=fmtList(top);
+    const wEl=document.getElementById('ai-worst');
+    if(wEl)wEl.innerHTML=fmtList(worst);
+
+    const imp=document.getElementById('ai-importance');
+    if(imp){
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Feature</th><th style="padding:4px;text-align:right;color:#f9fafb">Correlation</th></tr></thead><tbody>';
+      feats.slice(0,20).forEach(f=>{
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${f.feature}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${(f.correlation||0).toFixed(4)}</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      imp.innerHTML=rows||'No data';
+    }
+
+    const wgt=document.getElementById('ai-weights');
+    if(wgt){
+      let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Category</th><th style="padding:4px;text-align:right;color:#f9fafb">Weight</th></tr></thead><tbody>';
+      weights.forEach(w=>{
+        rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${w.category}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${(w.weight*100).toFixed(1)}%</td></tr>`;
+      });
+      rows+='</tbody></table>';
+      wgt.innerHTML=rows||'No data';
+    }
+
+    const cur=document.getElementById('ai-curve');
+    if(cur){
+      if(!curve.length){cur.innerHTML='No data';}
+      else{
+        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Date</th><th style="padding:4px;text-align:right;color:#f9fafb">Accuracy</th><th style="padding:4px;text-align:right;color:#f9fafb">Win Rate</th></tr></thead><tbody>';
+        curve.forEach(c=>{
+          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(c.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${c.accuracy!=null?pct(c.accuracy*100,1):'—'}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${c.win_rate!=null?pct(c.win_rate):'—'}</td></tr>`;
+        });
+        rows+='</tbody></table>';
+        cur.innerHTML=rows;
+      }
+    }
+  }catch(e){console.error('AI Learning load error:',e);}
+}
 </script>
 </body></html>"""
 
@@ -6903,6 +7013,18 @@ def api_backtest_results():
             'walk_forward': [{'name': r.get('name'), 'result': json.loads(r.get('result_json', '{}'))} for r in wf],
             'monte_carlo': monte,
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-learning')
+def api_ai_learning():
+    """Latest AI learning metrics, feature importance and weights."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from ai_learning_engine import EnterpriseLearningEngine
+        engine = EnterpriseLearningEngine()
+        return jsonify(engine.get_dashboard_data())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
