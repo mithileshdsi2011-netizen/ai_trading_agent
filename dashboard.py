@@ -1332,6 +1332,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
   <button class="tab-btn" onclick="switchTab('explain',this)">🔍 AI Explain</button>
   <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
+  <button class="tab-btn" onclick="switchTab('market-intelligence',this)">🌐 Market Intelligence</button>
   <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
   <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
@@ -2392,6 +2393,7 @@ tr:last-child td{border:none}
             <th style="padding:8px;text-align:left;color:#f9fafb">Action</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Reason</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">MIS</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Conf.</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">P&L</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Price</th>
@@ -2400,7 +2402,7 @@ tr:last-child td{border:none}
           </tr>
         </thead>
         <tbody id="explain-table">
-          <tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
+          <tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">Loading AI explanations...</td></tr>
         </tbody>
       </table>
     </div>
@@ -2454,6 +2456,20 @@ tr:last-child td{border:none}
 
   </div>
 </div><!-- /tab-askai -->
+
+
+<!-- ===== TAB: MARKET INTELLIGENCE ===== -->
+<div id="tab-market-intelligence" class="tab-content">
+  <div class="card mb-4">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="color:#f9fafb;font-size:16px;margin:0">🌐 Unified Market Intelligence</h3>
+      <div id="mi-score" style="font-size:22px;font-weight:800;color:#60a5fa">—</div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3" id="mi-grid">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+</div><!-- /tab-market-intelligence -->
 
 
 <!-- ===== TAB: BOT STATUS ===== -->
@@ -2930,6 +2946,7 @@ function switchTab(id,btn){
   if(id==='morning') loadMorningReport();
   if(id==='skipped') loadSkippedOpportunities();
   if(id==='explain') loadExplainability();
+  if(id==='market-intelligence') loadMarketIntelligence();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -4494,6 +4511,36 @@ function showDetailedDecision(symbol){
   `;
 }
 
+// ─── Market Intelligence Loader ──────────────────────────────────────────────
+async function loadMarketIntelligence(){
+  try{
+    const r=await fetch('/api/data');
+    const d=await r.json();
+    const miScore=d.market_intelligence_score;
+    const scoreEl=document.getElementById('mi-score');
+    if(miScore!=null){
+      scoreEl.textContent=parseFloat(miScore).toFixed(1);
+      scoreEl.style.color=(miScore>=70?'#4ade80':miScore>=45?'#facc15':'#f87171');
+    }else{
+      scoreEl.textContent='—';
+    }
+
+    const rows=[];
+    const add=(label, value, colorClass='')=>{
+      rows.push(`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${colorClass}">${value}</div></div>`);
+    };
+    add('Technical','—');
+    add('Market Breadth',d.market_breadth?d.market_breadth.breadth_score:'—');
+    add('Sector Momentum',d.sector_rotation?d.sector_rotation.momentum_score:'—');
+    add('India VIX',d.vix_risk?d.vix_risk.vix:'—');
+    add('FII/DII Net',d.fii_dii?d.fii_dii.net_flow:'—');
+    add('Options PCR',d.options_intelligence?d.options_intelligence.pcr:'—');
+    add('Global Sentiment',d.global_markets?d.global_markets.sentiment_score:'—');
+    add('Event Risk',d.economic_event_risk?d.economic_event_risk.reason:'—');
+    document.getElementById('mi-grid').innerHTML=rows.join('');
+  }catch(e){console.error('Market Intelligence load error:',e);}
+}
+
 // ─── AI Explainability ───────────────────────────────────────────────────────
 async function loadExplainability(){
   try{
@@ -4502,44 +4549,34 @@ async function loadExplainability(){
     const actions=d.actions||[];
     const tbody=document.getElementById('explain-table');
     if(actions.length===0){
-      tbody.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
+      tbody.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">No decisions recorded yet.</td></tr>';
       return;
     }
-    const rupee=(n)=>{n=parseFloat(n)||0; return '₹'+n.toFixed(2);};
-    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return ts||'—';}};
-    const scoreBar=(k,v)=>{
-      const pct=Math.max(0,Math.min(100,parseFloat(v)||0));
-      const c=pct>=70?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
-      return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0"><span style="width:90px;color:#9ca3af;font-size:11px">${k}</span><div style="flex:1;background:#1f2937;height:6px;border-radius:3px"><div style="width:${pct}%;background:${c};height:6px;border-radius:3px"></div></div><span style="width:32px;text-align:right;color:#f9fafb;font-size:11px">${pct.toFixed(0)}</span></div>`;
-    };
+    const fmtTime=(ts)=>{try{return new Date(ts).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit'})}catch(e){return ts||'—';}};
     tbody.innerHTML=actions.map(a=>{
-      const isBuy=a.action==='BUY';
-      const isSell=(typeof a.action==='string') && a.action.startsWith('SELL');
-      const actionColor=isBuy?'#16a34a':isSell?'#dc2626':'#9ca3af';
-      const pnl=parseFloat(a.pnl||0);
-      const pnlColor=pnl>0?'#16a34a':pnl<0?'#dc2626':'#9ca3af';
-      const subScores=a.sub_scores||{};
-      const scoreRows=Object.entries(subScores)
-        .filter(([_,v])=>typeof v==='number' && v>=0 && v<=100)
-        .map(([k,v])=>scoreBar(k.replace(/_/g,' ').toLowerCase(),v))
-        .join('');
-      const reasonBlock=`<div style="color:#d1d5db;font-size:12px;max-width:300px;white-space:normal">${a.reason||'—'}</div>${scoreRows?`<div style="margin-top:6px">${scoreRows}</div>`:''}`;
-      return `<tr style="border-bottom:1px solid #1f2937">
-        <td style="padding:8px;color:#9ca3af;font-family:monospace;font-size:11px">${fmtTime(a.timestamp)}</td>
-        <td style="padding:8px;font-weight:700;color:#f9fafb">${a.symbol||'—'}</td>
-        <td style="padding:8px;color:${actionColor};font-weight:600">${a.action||'—'}</td>
-        <td style="padding:8px">${reasonBlock}</td>
-        <td style="padding:8px;color:#60a5fa">${a.score!=null?a.score.toFixed(1):'—'}</td>
-        <td style="padding:8px;color:#f59e0b">${a.confidence!=null?(a.confidence*100).toFixed(0)+'%':'—'}</td>
-        <td style="padding:8px;color:${pnlColor}">${pnl!==0?rupee(pnl):'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.price?rupee(a.price):'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.quantity||'—'}</td>
-        <td style="padding:8px;color:#9ca3af">${a.sector||'Unknown'}</td>
+      const ts=fmtTime(a.timestamp);
+      const sc=parseFloat(a.score||0).toFixed(1);
+      const conf=parseFloat(a.confidence||0).toFixed(1);
+      const pnl=a.net_pnl!==undefined?parseFloat(a.net_pnl).toFixed(2):'—';
+      const mis=(a.score_components&&a.score_components.market_intelligence_score!=null)?parseFloat(a.score_components.market_intelligence_score).toFixed(1):'—';
+      const color=a.action==='BUY'?'green':(a.action||'').startsWith('SELL')?'red':'yellow';
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #374151">${ts}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.symbol||'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151"><span class="stat-value-sm ${color}">${a.action||'—'}</span></td>
+        <td style="padding:8px;border-bottom:1px solid #374151;max-width:250px;white-space:pre-wrap">${a.reason||'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${sc}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${mis}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${conf}%</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${pnl}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.price!=null?a.price.toFixed(2):'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.quantity!=null?a.quantity:'—'}</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${a.sector||'—'}</td>
       </tr>`;
     }).join('');
   }catch(e){
     console.error('Explainability load error:',e);
-    document.getElementById('explain-table').innerHTML='<tr><td colspan="10" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
+    document.getElementById('explain-table').innerHTML='<tr><td colspan="11" style="text-align:center;color:#dc2626;padding:20px">Error loading explanations</td></tr>';
   }
 }
 

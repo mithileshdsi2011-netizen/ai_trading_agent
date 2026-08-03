@@ -14,6 +14,8 @@ from sector_rotation import SectorRotationEngine
 from fii_dii import FII_DII_Engine
 from options_intelligence import OptionsIntelligenceEngine
 from global_markets import GlobalMarketMonitor
+from vix_risk_engine import IndiaVIXRiskEngine
+from economic_events import EconomicEventRiskEngine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -68,6 +70,8 @@ class EnterpriseAIDecisionEngine:
         self.fii_dii_engine = FII_DII_Engine(market_data=self.market_data)
         self.options_intelligence = OptionsIntelligenceEngine(market_data=self.market_data)
         self.global_markets = GlobalMarketMonitor(market_data=self.market_data)
+        self.vix_engine = IndiaVIXRiskEngine(market_data=self.market_data)
+        self.economic_events = EconomicEventRiskEngine()
         self.weights = dict(self.DEFAULT_WEIGHTS)
         self.feature_success = {}
         self._load_adaptive_weights()
@@ -140,16 +144,33 @@ class EnterpriseAIDecisionEngine:
         global_adj = self.global_markets.adjust_confidence(final_confidence)
         final_confidence = round(global_adj['adjusted_confidence'], 2)
 
-        # 7. Dynamic threshold
+        # 7. VIX risk and economic event inputs for market intelligence context
+        vix = self.vix_engine.compute()
+        event_risk = self.economic_events.risk_status()
+
+        # 8. Unified Market Intelligence Score
+        market_intelligence_score = round(
+            (
+                final_score
+                + float(breadth.get('breadth_score', 0))
+                + float(sector_adj.get('momentum_score', 0))
+                + float(vix.get('volatility_score', vix.get('vix', 0)))
+                + float(options_adj.get('adjusted_confidence', final_confidence))
+                + float(global_adj.get('adjusted_confidence', final_confidence))
+            ) / 6.0,
+            2,
+        )
+
+        # 9. Dynamic threshold
         threshold = self._dynamic_threshold(market_regime)
 
-        # 8. Decision
+        # 10. Decision
         action = self._determine_action(final_score, threshold, final_confidence)
 
-        # 9. Explain
+        # 11. Explain
         explain = self._build_explain(
             symbol, sub_scores, confidences, final_score, final_confidence,
-            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii, options_adj, global_adj
+            threshold, action, self.weights, tech_factors, breadth, sector_adj, fii_dii, options_adj, global_adj, vix, event_risk, market_intelligence_score
         )
 
         score_components = dict(sub_scores)
@@ -171,6 +192,14 @@ class EnterpriseAIDecisionEngine:
         score_components['options_confidence_boost'] = options_adj['confidence_boost']
         score_components['global_sentiment_score'] = global_adj['sentiment_score']
         score_components['global_sentiment_adjustment'] = global_adj['adjustment']
+        score_components['vix'] = vix.get('vix', 0)
+        score_components['vix_volatility_score'] = vix.get('volatility_score', 0)
+        score_components['vix_risk_factor'] = vix.get('risk_factor', 1)
+        score_components['vix_risk_level'] = vix.get('risk_level', 'UNKNOWN')
+        score_components['economic_event_risk'] = event_risk.get('reason', 'No upcoming events')
+        score_components['economic_event_size_factor'] = event_risk.get('size_factor', 1.0)
+        score_components['economic_event_no_new_buy'] = event_risk.get('no_new_buy', False)
+        score_components['market_intelligence_score'] = market_intelligence_score
 
         return {
             'symbol': symbol,
@@ -469,6 +498,9 @@ class EnterpriseAIDecisionEngine:
         fii_dii: Optional[Dict] = None,
         options: Optional[Dict] = None,
         global_markets: Optional[Dict] = None,
+        vix: Optional[Dict] = None,
+        event_risk: Optional[Dict] = None,
+        market_intelligence_score: float = 0.0,
     ) -> Dict:
         """Build a human-readable AI explain."""
         lines = [f"{symbol}: {action} | Final {final_score} (threshold {threshold}) | Confidence {final_confidence}%"]
@@ -523,6 +555,22 @@ class EnterpriseAIDecisionEngine:
                 f"  {'Global Sentiment':20s} {g['sentiment_score']:6.2f}  ("
                 f"{sign}{g['adjustment']}% confidence)"
             )
+
+        if vix:
+            v = vix
+            lines.append(
+                f"  {'VIX Risk':20s} {v.get('vix', 0):6.2f}  ("
+                f"score {v.get('volatility_score', 0):.1f}, factor {v.get('risk_factor', 1):.2f}, {v.get('risk_level', 'UNKNOWN')})"
+            )
+
+        if event_risk:
+            e = event_risk
+            msg = e.get('reason', 'No upcoming events')
+            lines.append(f"  {'Event Risk':20s} {msg}")
+
+        lines.append(
+            f"  {'Market Intelligence':20s} {market_intelligence_score:6.2f}"
+        )
 
         if tech_factors:
             lines.append("  Technical factors:")
