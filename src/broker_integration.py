@@ -252,13 +252,24 @@ class BrokerIntegration:
         # Execute paper order
         if action == 'BUY':
             self.paper_portfolio['cash'] -= required_amount
-            self.paper_portfolio['positions'][symbol] = {
-                'quantity': quantity,
-                'entry_price': price,
-                'stop_loss': signal['stop_loss'],
-                'target': signal['target'],
-                'entry_time': datetime.now().isoformat()
-            }
+            if symbol in self.paper_portfolio['positions']:
+                pos = self.paper_portfolio['positions'][symbol]
+                old_qty = pos['quantity']
+                old_avg = pos['entry_price']
+                new_qty = old_qty + quantity
+                new_avg = (old_avg * old_qty + price * quantity) / new_qty if new_qty > 0 else price
+                pos['quantity'] = new_qty
+                pos['entry_price'] = new_avg
+                pos['stop_loss'] = signal['stop_loss']
+                pos['target'] = signal['target']
+            else:
+                self.paper_portfolio['positions'][symbol] = {
+                    'quantity': quantity,
+                    'entry_price': price,
+                    'stop_loss': signal['stop_loss'],
+                    'target': signal['target'],
+                    'entry_time': datetime.now().isoformat()
+                }
         elif action == 'SELL':
             # Check if we have enough position to sell
             if symbol not in self.paper_portfolio['positions']:

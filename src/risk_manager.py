@@ -83,8 +83,11 @@ class Position:
     highest_price: float = 0.0
     trailing_stop: Optional[float] = None
     atr_at_entry: float = 0.0   # ATR used for SL calculation
-    partial_booked: bool = False # True once 50% sold at first target
-    partial_qty: int = 0         # qty of the partial exit
+    partial_booked: bool = False # True once partial profit booked
+    partial_qty: int = 0         # cumulative partial exited quantity
+    initial_quantity: int = 0    # original entry quantity (for scale-out)
+    partial_count: int = 0       # number of partial exits taken
+    scale_in_qty: int = 0        # cumulative quantity added via scale-in
     sector: str = "Unknown"      # sector for correlation guard
 
 
@@ -132,6 +135,9 @@ class RiskManager:
                     atr_at_entry=p.get('atr_at_entry', 0.0),
                     partial_booked=p.get('partial_booked', False),
                     partial_qty=p.get('partial_qty', 0),
+                    initial_quantity=p.get('initial_quantity', p.get('quantity', 0)),
+                    partial_count=p.get('partial_count', 0),
+                    scale_in_qty=p.get('scale_in_qty', 0),
                     sector=p.get('sector', 'Unknown'),
                     pnl=p.get('pnl', 0.0),
                     pnl_percentage=p.get('pnl_percentage', 0.0),
@@ -193,6 +199,9 @@ class RiskManager:
                     'atr_at_entry': p.atr_at_entry,
                     'partial_booked': p.partial_booked,
                     'partial_qty': p.partial_qty,
+                    'initial_quantity': p.initial_quantity or p.quantity,
+                    'partial_count': p.partial_count,
+                    'scale_in_qty': p.scale_in_qty,
                     'sector': p.sector,
                     'status': p.status.value,
                     'pnl': p.pnl,
@@ -443,6 +452,7 @@ class RiskManager:
             highest_price=entry_price,
             trailing_stop=round(stop_loss, 2) if config.TRAILING_STOP_ENABLED else None,
             atr_at_entry=atr,
+            initial_quantity=quantity,
             sector=(signal.get('_research') or {}).get('sector', 'Unknown'),
         )
         # store partial target on the object for check_positions
@@ -457,6 +467,32 @@ class RiskManager:
             f"Qty:{quantity} SL:{position.stop_loss:.2f} Target:{target:.2f} "
             f"ATR:{atr:.2f} PartialAt:{partial_target:.2f}"
         )
+        return position
+
+    def add_to_position(self, symbol: str, qty: int, price: float,
+                        stop_loss: float, target: float, atr: float) -> Optional[Position]:
+        """Scale into an existing position and update average cost / SL."""
+        position = next(
+            (p for p in self.positions if p.symbol == symbol and p.status in (PositionStatus.OPEN, PositionStatus.PARTIAL)),
+            None
+        )
+        if not position or qty <= 0:
+            return None
+        old_qty = position.quantity
+        old_entry = position.entry_price
+        total_cost = (old_entry * old_qty) + (price * qty)
+        new_qty = old_qty + qty
+        new_entry = total_cost / new_qty if new_qty > 0 else price
+        position.entry_price = round(new_entry, 2)
+        position.quantity = new_qty
+        position.initial_quantity = position.initial_quantity + qty
+        position.scale_in_qty += qty
+        position.atr_at_entry = atr if atr > 0 else position.atr_at_entry
+        position.stop_loss = round(max(position.stop_loss, stop_loss), 2)
+        position.target = round(max(position.target, target), 2)
+        position.highest_price = max(position.highest_price, price)
+        self.save_positions()
+        logger.info(f"Scaled in {symbol}: +{qty} @ ₹{price:.2f} -> avg ₹{new_entry:.2f} Qty:{new_qty}")
         return position
     
     def check_positions(self, current_prices: Dict[str, float]) -> List[Dict]:
@@ -578,7 +614,8 @@ class RiskManager:
         if remaining > 0:
             position.status = PositionStatus.PARTIAL
             position.partial_booked = True
-            position.partial_qty = close_qty
+            position.partial_qty += close_qty
+            position.partial_count += 1
             # Tighten stop to break-even after a partial exit
             position.stop_loss = max(position.stop_loss, position.entry_price)
         else:

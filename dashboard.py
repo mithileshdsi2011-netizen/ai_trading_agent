@@ -1324,6 +1324,7 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('morning',this)" id="morning-tab-btn">🌅 Morning Intel</button>
   <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
   <button class="tab-btn" onclick="switchTab('positions',this)">📋 Positions</button>
+  <button class="tab-btn" onclick="switchTab('lifecycle',this)">🔄 Trade Lifecycle</button>
   <button class="tab-btn" onclick="switchTab('history',this)">🕒 History</button>
   <button class="tab-btn" onclick="switchTab('signals',this)">🤖 AI Signals</button>
   <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
@@ -1941,6 +1942,35 @@ tr:last-child td{border:none}
   </div>
 
 </div><!-- /tab-history -->
+
+
+<!-- ===== TAB: TRADE LIFECYCLE ===== -->
+<div id="tab-lifecycle" class="tab-content">
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Trade Lifecycle Monitor</div>
+    <div class="overflow-x-auto">
+      <table class="w-full" style="font-size:12px;border-collapse:collapse">
+        <thead>
+          <tr style="color:#94a3b8;text-align:left;border-bottom:1px solid #334155">
+            <th style="padding:8px">Symbol</th>
+            <th style="padding:8px;text-align:right">Entry</th>
+            <th style="padding:8px;text-align:right">LTP</th>
+            <th style="padding:8px;text-align:right">Qty</th>
+            <th style="padding:8px;text-align:right">RR</th>
+            <th style="padding:8px;text-align:right">ATR</th>
+            <th style="padding:8px;text-align:right">Trail SL</th>
+            <th style="padding:8px;text-align:right">Target</th>
+            <th style="padding:8px;text-align:center">Break-Even</th>
+            <th style="padding:8px;text-align:center">Partial</th>
+            <th style="padding:8px;text-align:center">Days</th>
+            <th style="padding:8px">Next Action</th>
+          </tr>
+        </thead>
+        <tbody id="lifecycle-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /tab-lifecycle -->
 
 
 <!-- ===== TAB: AI SIGNALS ===== -->
@@ -3784,6 +3814,37 @@ async function load(){
       chartPnl=new Chart(pnlCtx,{type:'bar',data:{labels:days,datasets:[{data:vals,backgroundColor:vals.map(v=>v>=0?'#16a34a88':'#dc262688'),borderRadius:4}]},options:{scales:{x:{ticks:{color:'#4b5563'}},y:{ticks:{color:'#4b5563',callback:v=>'₹'+v}}},plugins:{legend:{display:false}},maintainAspectRatio:false}});
     }
     } // end Chart guard
+
+    // ── TAB: TRADE LIFECYCLE ─────────────────────────────────────────────────
+    const lcTbl = document.getElementById('lifecycle-table-body');
+    const lcPositions = d.lifecycle_positions || [];
+    if(lcPositions.length && lcTbl){
+      lcTbl.innerHTML = lcPositions.map(lp=>{
+        const ltp = lp.current_price || lp.entry || 0;
+        const rrColor = lp.current_rr > 2 ? 'green' : lp.current_rr > 1 ? 'yellow' : 'red';
+        const beHit = lp.break_even_hit ? '✅' : '⏳';
+        const partialText = lp.partial_count ? `${lp.partial_count}/3` : '—';
+        const nextAction = lp.current_rr > 0
+          ? (lp.scale_in_qty ? 'Trailing' : (lp.current_rr > 1.5 ? 'Scale-out ready' : 'Trailing'))
+          : 'Hold';
+        return `<tr style="border-bottom:1px solid #1f2937">
+          <td style="padding:8px;color:#f9fafb;font-weight:700">${lp.symbol}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.entry)}</td>
+          <td style="padding:8px;text-align:right">${rupee(ltp)}</td>
+          <td style="padding:8px;text-align:right">${lp.quantity}</td>
+          <td style="padding:8px;text-align:right" class="${rrColor}">${lp.current_rr.toFixed(2)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.atr_at_entry)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.trailing_sl)}</td>
+          <td style="padding:8px;text-align:right">${rupee(lp.next_target_level)}</td>
+          <td style="padding:8px;text-align:center">${beHit}</td>
+          <td style="padding:8px;text-align:center">${partialText}</td>
+          <td style="padding:8px;text-align:center">${lp.days_held}</td>
+          <td style="padding:8px;color:#22c55e;font-size:11px">${nextAction}</td>
+        </tr>`;
+      }).join('');
+    } else if(lcTbl){
+      lcTbl.innerHTML='<tr><td colspan="12" style="text-align:center;color:#4b5563;padding:20px">No open positions to manage</td></tr>';
+    }
 
     // ── TAB: AI SIGNALS ───────────────────────────────────────────────────────
     if (typeof renderAiSignals === 'function') renderAiSignals(d);
@@ -5632,6 +5693,17 @@ def api_data():
             'regime_limits': {},
             'max_sector_exposure_pct': 0.3
         }
+
+    # Trade Lifecycle summary
+    try:
+        from risk_manager import RiskManager
+        from trade_lifecycle_manager import TradeLifecycleManager
+        _prices = {p.get('tradingsymbol'): p.get('last_price', 0) for p in all_positions}
+        _rm = RiskManager()
+        _ltm = TradeLifecycleManager()
+        data['lifecycle_positions'] = _ltm.get_lifecycle_summary(_rm.positions, _prices)
+    except Exception:
+        data['lifecycle_positions'] = []
 
     return jsonify(data)
 
