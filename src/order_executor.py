@@ -15,6 +15,7 @@ from risk_manager import RiskManager, Position, PositionStatus
 from market_data import MarketDataFetcher
 from telegram_alerts import TelegramAlerter
 from trade_journal import TradeJournal
+from persistence import get_store
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -30,38 +31,52 @@ class OrderExecutor:
         self.market_data = MarketDataFetcher()
         self.telegram = TelegramAlerter()
         self.journal = TradeJournal()
+        self._store = get_store()
         self.executed_orders = []
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
         self._pending_order_symbols: set = set()
         # Tracks SELL attempts that failed at the broker so they can be retried and surfaced in the dashboard.
-        self._pending_sells_file = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'data', 'pending_sells.json'
-        )
         self._pending_sells: Dict[str, Dict] = self._load_pending_sells()
         self.email = EmailReporter()
         self._load_existing_positions()
 
     def _load_pending_sells(self) -> Dict[str, Dict]:
-        """Load persisted pending SELL state so the dashboard can survive restarts."""
+        """Load persisted pending SELL state from SQLite so the dashboard survives restarts."""
         try:
-            if os.path.exists(self._pending_sells_file):
-                with open(self._pending_sells_file) as _f:
-                    _items = json.load(_f)
-                    if isinstance(_items, dict):
-                        return _items
-                    if isinstance(_items, list):
-                        return {p['symbol']: p for p in _items if p.get('symbol')}
+            state = self._store.load_daily_state()
+            _items = state.get('pending_sells', {})
+            if isinstance(_items, dict):
+                for _v in _items.values():
+                    if isinstance(_v.get('next_retry'), str):
+                        try:
+                            _v['next_retry'] = datetime.fromisoformat(_v['next_retry'])
+                        except Exception:
+                            _v['next_retry'] = None
+                    if isinstance(_v.get('sell_time'), str):
+                        try:
+                            _v['sell_time'] = datetime.fromisoformat(_v['sell_time'])
+                        except Exception:
+                            pass
+                return _items
+            if isinstance(_items, list):
+                return {p['symbol']: p for p in _items if p.get('symbol')}
         except Exception as _e:
             logger.warning(f"Could not load pending sells: {_e}")
         return {}
 
     def _save_pending_sells(self):
         try:
-            os.makedirs(os.path.dirname(self._pending_sells_file), exist_ok=True)
-            with open(self._pending_sells_file, 'w') as _f:
-                json.dump(self.get_pending_sells(), _f, default=str)
+            today = datetime.now().strftime('%Y-%m-%d')
+            state = self._store.load_daily_state(today)
+            self._store.save_daily_state(
+                state_date=today,
+                daily_pnl=state.get('daily_pnl', 0.0),
+                daily_blacklist=state.get('daily_blacklist', []),
+                last_exit_by_symbol=state.get('last_exit_by_symbol', {}),
+                daily_trades=state.get('daily_trades', 0),
+                pending_sells=dict(self._pending_sells)
+            )
         except Exception as _e:
             logger.warning(f"Could not save pending sells: {_e}")
 

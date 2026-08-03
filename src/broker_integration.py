@@ -11,6 +11,7 @@ from enum import Enum
 
 from config import config
 from token_manager import TokenManager
+from persistence import get_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -192,21 +193,21 @@ class BrokerIntegration:
         logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
 
     def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
-        """Persist broker mode and startup status for the dashboard."""
+        """Persist broker mode and startup status to the SQLite store."""
         try:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            status_path = os.path.join(root, 'data', 'broker_status.json')
-            os.makedirs(os.path.dirname(status_path), exist_ok=True)
-            with open(status_path, 'w') as f:
-                json.dump({
+            store = get_store()
+            store.save_broker_state(
+                'status',
+                {
                     'mode': mode,
                     'live_ready': live_ready,
                     'startup_timestamp': getattr(self, 'startup_timestamp', datetime.now().isoformat()),
                     'error': error,
                     'updated_at': datetime.now().isoformat()
-                }, f)
+                }
+            )
         except Exception as e:
-            logger.warning(f"Could not write broker_status.json: {e}")
+            logger.warning(f"Could not write broker status: {e}")
     
     def place_order(self, signal: Dict) -> Dict:
         """

@@ -6,11 +6,12 @@ daily blacklist, correlation guard, slippage/brokerage tracking, JSON persistenc
 """
 from typing import Dict, List, Optional, Set
 import logging
-import json
 import os
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 from enum import Enum
+
+from persistence import get_store
 
 import pandas as pd
 import numpy as np
@@ -90,6 +91,7 @@ class RiskManager:
     """Manages trading risk and positions"""
     
     def __init__(self):
+        self._store = get_store()
         self.positions: List[Position] = []
         self.daily_pnl = 0.0
         self.daily_trades = 0
@@ -98,6 +100,7 @@ class RiskManager:
         self._blacklist_date: date = date.today()
         # Track last full exit time per symbol for REENTRY_COOLDOWN_HOURS
         self._last_exit_by_symbol: Dict[str, datetime] = {}
+        self._load_daily_state()
         self._load_positions()
 
     # ------------------------------------------------------------------
@@ -105,85 +108,110 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def _load_positions(self):
-        """Restore positions from JSON on restart."""
+        """Restore positions from SQLite store on restart."""
         loaded = []
         try:
-            os.makedirs(os.path.dirname(PERSISTENCE_FILE), exist_ok=True)
-            if not os.path.exists(PERSISTENCE_FILE):
-                self.positions = []
-                return self.positions
-            with open(PERSISTENCE_FILE) as f:
-                data = json.load(f)
-            today = date.today().isoformat()
-            if data.get('date') != today:
-                logger.info("Persistence file is from a previous day — skipping position reload")
-                self.positions = []
-                return self.positions
-            for p in data.get('positions', []):
-                if p.get('status') == 'OPEN':
-                    pos = Position(
-                        symbol=p['symbol'],
-                        entry_price=p['entry_price'],
-                        quantity=p['quantity'],
-                        stop_loss=p['stop_loss'],
-                        target=p['target'],
-                        entry_time=datetime.fromisoformat(p['entry_time']),
-                        status=PositionStatus.OPEN,
-                        planned_exit_date=datetime.fromisoformat(p['planned_exit_date']) if p.get('planned_exit_date') else None,
-                        product_type=p.get('product_type', 'CNC'),
-                        highest_price=p.get('highest_price', p['entry_price']),
-                        trailing_stop=p.get('trailing_stop'),
-                        atr_at_entry=p.get('atr_at_entry', 0.0),
-                        partial_booked=p.get('partial_booked', False),
-                        partial_qty=p.get('partial_qty', 0),
-                        sector=p.get('sector', 'Unknown'),
-                    )
-                    loaded.append(pos)
-                    logger.info(f"Restored position from file: {pos.symbol} {pos.quantity} @ {pos.entry_price}")
-            self.daily_pnl = data.get('daily_pnl', 0.0)
-            self._daily_blacklist = set(data.get('daily_blacklist', []))
+            rows = self._store.load_positions()
+            for p in rows:
+                if p.get('status') not in ('OPEN', 'PARTIAL'):
+                    continue
+                pos = Position(
+                    symbol=p['symbol'],
+                    entry_price=p['entry_price'],
+                    quantity=p['quantity'],
+                    stop_loss=p['stop_loss'],
+                    target=p['target'],
+                    entry_time=datetime.fromisoformat(p['entry_time']),
+                    status=PositionStatus(p.get('status', 'OPEN')),
+                    planned_exit_date=datetime.fromisoformat(p['planned_exit_date']) if p.get('planned_exit_date') else None,
+                    product_type=p.get('product_type', 'CNC'),
+                    highest_price=p.get('highest_price', p['entry_price']),
+                    trailing_stop=p.get('trailing_stop'),
+                    atr_at_entry=p.get('atr_at_entry', 0.0),
+                    partial_booked=p.get('partial_booked', False),
+                    partial_qty=p.get('partial_qty', 0),
+                    sector=p.get('sector', 'Unknown'),
+                    pnl=p.get('pnl', 0.0),
+                    pnl_percentage=p.get('pnl_percentage', 0.0),
+                    charges=p.get('charges', 0.0),
+                    net_pnl=p.get('net_pnl', 0.0),
+                    slippage=p.get('slippage', 0.0),
+                    exit_price=p.get('exit_price'),
+                    exit_time=datetime.fromisoformat(p['exit_time']) if p.get('exit_time') else None,
+                )
+                if '_partial_target' in p:
+                    pos._partial_target = p['_partial_target']
+                loaded.append(pos)
+                logger.info(f"Restored position from SQLite: {pos.symbol} {pos.quantity} @ {pos.entry_price}")
             self.positions = loaded
-            logger.info(f"Loaded {len(self.positions)} positions from persistence file")
+            logger.info(f"Loaded {len(self.positions)} positions from SQLite store")
             return self.positions
         except Exception as e:
-            logger.warning(f"Could not load positions from file: {e}")
+            logger.warning(f"Could not load positions from store: {e}")
             self.positions = []
             return self.positions
 
-    def save_positions(self):
-        """Persist current positions + daily state to JSON."""
+    def _load_daily_state(self):
+        """Restore daily P&L, blacklist and last-exit map from SQLite."""
         try:
-            os.makedirs(os.path.dirname(PERSISTENCE_FILE), exist_ok=True)
-            data = {
-                'date': date.today().isoformat(),
-                'daily_pnl': self.daily_pnl,
-                'daily_blacklist': list(self._daily_blacklist),
-                'positions': [
-                    {
-                        'symbol': p.symbol,
-                        'entry_price': p.entry_price,
-                        'quantity': p.quantity,
-                        'stop_loss': p.stop_loss,
-                        'target': p.target,
-                        'entry_time': p.entry_time.isoformat(),
-                        'planned_exit_date': p.planned_exit_date.isoformat() if p.planned_exit_date else None,
-                        'product_type': p.product_type,
-                        'highest_price': p.highest_price,
-                        'trailing_stop': p.trailing_stop,
-                        'atr_at_entry': p.atr_at_entry,
-                        'partial_booked': p.partial_booked,
-                        'partial_qty': p.partial_qty,
-                        'sector': p.sector,
-                        'status': p.status.value,
-                        'pnl': p.pnl,
-                        'charges': p.charges,
-                        'net_pnl': p.net_pnl,
-                    }
-                    for p in self.positions
-                ]
+            state = self._store.load_daily_state()
+            self.daily_pnl = float(state.get('daily_pnl', 0.0))
+            self.daily_trades = int(state.get('daily_trades', 0))
+            self._daily_blacklist = set(state.get('daily_blacklist', []))
+            self._blacklist_date = date.fromisoformat(state.get('date'))
+            last_exits = state.get('last_exit_by_symbol', {})
+            self._last_exit_by_symbol = {
+                k: datetime.fromisoformat(v) if isinstance(v, str) else v
+                for k, v in last_exits.items()
             }
-            with open(PERSISTENCE_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not load daily state: {e}")
+            self.daily_pnl = 0.0
+            self.daily_trades = 0
+            self._daily_blacklist = set()
+            self._blacklist_date = date.today()
+            self._last_exit_by_symbol = {}
+
+    def save_positions(self):
+        """Persist current positions + daily state to SQLite."""
+        try:
+            pos_list = []
+            for p in self.positions:
+                d = {
+                    'symbol': p.symbol,
+                    'entry_price': p.entry_price,
+                    'quantity': p.quantity,
+                    'stop_loss': p.stop_loss,
+                    'target': p.target,
+                    'entry_time': p.entry_time.isoformat(),
+                    'planned_exit_date': p.planned_exit_date.isoformat() if p.planned_exit_date else None,
+                    'product_type': p.product_type,
+                    'highest_price': p.highest_price,
+                    'trailing_stop': p.trailing_stop,
+                    'atr_at_entry': p.atr_at_entry,
+                    'partial_booked': p.partial_booked,
+                    'partial_qty': p.partial_qty,
+                    'sector': p.sector,
+                    'status': p.status.value,
+                    'pnl': p.pnl,
+                    'pnl_percentage': p.pnl_percentage,
+                    'charges': p.charges,
+                    'net_pnl': p.net_pnl,
+                    'slippage': p.slippage,
+                    'exit_price': p.exit_price,
+                    'exit_time': p.exit_time.isoformat() if p.exit_time else None,
+                }
+                if hasattr(p, '_partial_target'):
+                    d['_partial_target'] = p._partial_target
+                pos_list.append(d)
+            self._store.save_positions(pos_list, clear=True)
+            self._store.save_daily_state(
+                state_date=date.today().isoformat(),
+                daily_pnl=self.daily_pnl,
+                daily_blacklist=list(self._daily_blacklist),
+                last_exit_by_symbol=self._last_exit_by_symbol,
+                daily_trades=self.daily_trades
+            )
         except Exception as e:
             logger.error(f"Could not save positions: {e}")
 
@@ -651,30 +679,19 @@ class RiskManager:
             logger.warning("Daily loss limit exceeded - stopping trading")
             return True
         
-        # Stop if too many consecutive losses (reads today's journal so it survives restarts)
+        # Stop if too many consecutive losses (reads today's SQLite journal so it survives restarts)
         max_consec = config.MAX_CONSECUTIVE_LOSSES
         consecutive_losses = 0
         try:
-            _jpath = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'data', 'trade_journal.json'
-            )
-            if os.path.exists(_jpath):
-                with open(_jpath) as _jf:
-                    _all = json.load(_jf)
-                _today = date.today().isoformat()
-                _today_sells = [
-                    e for e in _all
-                    if e.get('action') == 'SELL'
-                    and (e.get('timestamp', '') or '')[:10] == _today
-                ]
-                # Walk backwards through today's closed trades
-                for _e in reversed(_today_sells):
-                    _pnl = float(_e.get('net_pnl') or _e.get('pnl') or 0)
-                    if _pnl < 0:
-                        consecutive_losses += 1
-                    else:
-                        break
+            _today = date.today().isoformat()
+            _today_sells = self._store.get_trades(action='SELL', date_from=_today)
+            # Walk backwards through today's closed trades
+            for _e in reversed(_today_sells):
+                _pnl = float(_e.get('net_pnl') or _e.get('pnl') or 0)
+                if _pnl < 0:
+                    consecutive_losses += 1
+                else:
+                    break
         except Exception:
             # Fallback: check in-memory positions
             recent = [p for p in self.positions if p.status != PositionStatus.OPEN][-5:]

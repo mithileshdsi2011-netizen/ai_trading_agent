@@ -22,6 +22,11 @@ try:
 except ImportError:
     _SCORE_SKIP_THRESHOLD = 60
 
+try:
+    from persistence import get_store
+except ImportError:
+    get_store = None
+
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 IST = pytz.timezone("Asia/Kolkata")
@@ -4802,10 +4807,11 @@ def api_data():
 
     # Load broker mode status (written by broker_integration.py at startup)
     try:
-        _bs_path = os.path.join(os.path.dirname(__file__), 'data', 'broker_status.json')
-        if os.path.exists(_bs_path):
-            with open(_bs_path) as _bf:
-                _bs = json.load(_bf)
+        if get_store is not None:
+            _bs = get_store().get_broker_state('status') or {}
+        else:
+            _bs = {}
+        if _bs:
             data['broker_mode'] = _bs.get('mode', 'UNKNOWN')
             data['broker_live_ready'] = _bs.get('live_ready', False)
             data['broker_startup_timestamp'] = _bs.get('startup_timestamp', '—')
@@ -4949,14 +4955,11 @@ def api_data():
         data['invested'] = sum(p.get('average_price', 0) * p.get('quantity', 0) for p in all_positions)
 
         # Enrich positions with re-entry metadata from trade journal
-        # ── Enrich with SL / Target from risk_manager positions.json ─────
+        # ── Enrich with SL / Target from risk_manager SQLite positions ─────
         try:
-            _pos_file = os.path.join(os.path.dirname(__file__), 'data', 'positions.json')
             _rm_map = {}
-            if os.path.exists(_pos_file):
-                with open(_pos_file) as _pf:
-                    _pd = json.load(_pf)
-                for _rp in _pd.get('positions', []):
+            if get_store is not None:
+                for _rp in get_store().load_positions():
                     _rm_map[_rp['symbol']] = _rp
         except Exception:
             _rm_map = {}
@@ -4968,7 +4971,7 @@ def api_data():
             sym = pos.get('tradingsymbol')
             avg = pos.get('average_price', 0) or 0
             _rm = _rm_map.get(sym, {})
-            # SL / Target: prefer risk_manager file, fall back to config %
+            # SL / Target: prefer risk_manager store, fall back to config %
             sl  = _rm.get('stop_loss')   or (round(avg * (1 - _sl_pct),  2) if avg else None)
             tgt = _rm.get('target')      or (round(avg * (1 + _tgt_pct), 2) if avg else None)
             tsl = _rm.get('trailing_stop') or sl
@@ -4980,10 +4983,9 @@ def api_data():
 
         # ── Enrich with journal metadata (first entry, days held, re-entry) ──
         try:
-            _jpath = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
-            with open(_jpath) as _jf:
-                _jentries = json.load(_jf)
-            _buy_entries = [e for e in _jentries if e.get('action') == 'BUY']
+            _buy_entries = []
+            if get_store is not None:
+                _buy_entries = get_store().get_trades(action='BUY')
             for pos in all_positions:
                 sym = pos.get('tradingsymbol')
                 sym_buys = [e for e in _buy_entries if e.get('symbol') == sym]
@@ -5061,11 +5063,10 @@ def api_data():
             return order_pnl
         
         # Load journal for buy-price lookup (needed for sells from past sessions)
-        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
         journal_entries = []
         try:
-            with open(journal_path) as _jf:
-                journal_entries = json.load(_jf)
+            if get_store is not None:
+                journal_entries = get_store().all_trades()
         except Exception:
             pass
 
@@ -5164,14 +5165,12 @@ def api_data():
 
         # Pending SELL actions surfaced by the order executor
         try:
-            _ps_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'pending_sells.json')
-            if os.path.exists(_ps_path):
-                with open(_ps_path) as _psf:
-                    _ps_items = json.load(_psf)
-                    if isinstance(_ps_items, list):
-                        data['pending_sells'] = _ps_items
-                    else:
-                        data['pending_sells'] = sorted(list(_ps_items.values()), key=lambda x: x.get('last_attempt', ''), reverse=True)
+            if get_store is not None:
+                _ps_items = get_store().load_daily_state().get('pending_sells', {})
+                if isinstance(_ps_items, list):
+                    data['pending_sells'] = _ps_items
+                else:
+                    data['pending_sells'] = sorted(list(_ps_items.values()), key=lambda x: x.get('last_attempt', ''), reverse=True)
             else:
                 data['pending_sells'] = []
         except Exception as _ps_err:
@@ -5251,8 +5250,6 @@ def api_data():
         }
     except Exception:
         pass
-
-    # Delivery holdings
     try:
         holdings_raw = kite.holdings()
         holdings = []
@@ -5460,16 +5457,15 @@ def api_data():
     last_api_call = _last_hb[:19].replace('T', ' ') if _last_hb else '—'
 
     # Last successful order time (from trade journal — newest BUY or SELL)
-    _journal_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'trade_journal.json')
     last_order_time = '—'
     try:
-        if os.path.exists(_journal_file):
-            _jdata = json.load(open(_journal_file))
-            if _jdata:
-                _newest = max(_jdata, key=lambda e: e.get('timestamp', ''))
+        if get_store is not None:
+            _journal_file = get_store().all_trades()
+            if _journal_file:
+                _newest = max(_journal_file, key=lambda e: e.get('timestamp', ''))
                 last_order_time = _newest.get('timestamp', '—')[:16].replace('T', ' ')
     except Exception:
-        pass
+        last_order_time = '—'
 
     # Known (whitelisted) IP
     try:
@@ -5957,10 +5953,13 @@ def api_explain():
         actions = []
 
         # Executed trades from the journal
-        journal_path = os.path.join(os.path.dirname(__file__), 'data', 'trade_journal.json')
-        if os.path.exists(journal_path):
-            with open(journal_path, 'r') as f:
-                journal = json.load(f)
+        journal = []
+        try:
+            if get_store is not None:
+                journal = get_store().all_trades()
+        except Exception:
+            pass
+        if journal:
             for t in journal:
                 if t.get('status') == 'CLOSED':
                     actions.append({
