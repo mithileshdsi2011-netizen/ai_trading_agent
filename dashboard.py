@@ -1537,7 +1537,18 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: Options Chain Intelligence -->
+  <!-- Row 3: Economic Events -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🗓️ Economic Events</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">Next Event</div><div class="stat-value-sm" id="evt-name">—</div></div>
+      <div class="card-sm"><div class="stat-label">Hours Away</div><div class="stat-value-sm" id="evt-hours">—</div></div>
+      <div class="card-sm"><div class="stat-label">Size Factor</div><div class="stat-value-sm" id="evt-factor">—</div></div>
+      <div class="card-sm"><div class="stat-label">New BUYs</div><div class="stat-value-sm" id="evt-buy">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Options Chain Intelligence -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Options Intelligence</div>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -3418,6 +3429,20 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // Economic Events
+    const ev=d.economic_event_risk||{};
+    const next=ev.next_event||{};
+    document.getElementById('evt-name').textContent=next.event_type||'—';
+    document.getElementById('evt-hours').textContent=ev.hours_to_event!=null?ev.hours_to_event.toFixed(1):'—';
+    const evtFactor=parseFloat(ev.size_factor||1);
+    const evtFactorEl=document.getElementById('evt-factor');
+    evtFactorEl.textContent=evtFactor.toFixed(2);
+    evtFactorEl.className='stat-value-sm '+(evtFactor>=1?'green':evtFactor>=0.5?'yellow':'red');
+    const evtBuyEl=document.getElementById('evt-buy');
+    const canBuy=ev.no_new_buy?false:true;
+    evtBuyEl.textContent=canBuy?'Allowed':'Blocked';
+    evtBuyEl.className='stat-value-sm '+(canBuy?'green':'red');
 
     // Options Intelligence
     const oi=d.options_intelligence||{};
@@ -5902,6 +5927,13 @@ def api_data():
             data['options_intelligence'] = get_store().get_latest_options_intelligence() or {}
     except Exception:
         data['options_intelligence'] = {}
+
+    # Economic event risk (computed at runtime from the event calendar)
+    try:
+        from economic_events import EconomicEventRiskEngine
+        data['economic_event_risk'] = EconomicEventRiskEngine().risk_status()
+    except Exception:
+        data['economic_event_risk'] = {}
 
     return jsonify(data)
 

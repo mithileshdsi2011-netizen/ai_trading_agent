@@ -211,6 +211,20 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_options_intelligence_timestamp
                     ON options_intelligence (timestamp);
+
+                CREATE TABLE IF NOT EXISTS event_calendar (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    event_date TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    impact TEXT NOT NULL DEFAULT 'HIGH',
+                    description TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_event_calendar_timestamp
+                    ON event_calendar (timestamp);
+                CREATE INDEX IF NOT EXISTS idx_event_calendar_date
+                    ON event_calendar (event_date);
                 """
             )
 
@@ -919,6 +933,51 @@ class TradingStore:
                     "total_call_oi": row["total_call_oi"],
                     "total_put_oi": row["total_put_oi"],
                 }
+
+    # ── economic event calendar ──────────────────────────────────────────
+
+    def save_economic_event(self, event: Dict[str, Any]) -> None:
+        """Persist an economic event."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO event_calendar
+                    (timestamp, event_date, event_type, impact, description)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.get("timestamp") or datetime.now().isoformat(),
+                        event.get("event_date") or datetime.now().strftime("%Y-%m-%d"),
+                        str(event.get("event_type", "")),
+                        str(event.get("impact", "HIGH")),
+                        str(event.get("description", "")),
+                    ),
+                )
+
+    def get_upcoming_economic_events(self, after_timestamp: str) -> List[Dict[str, Any]]:
+        """Return high-impact events scheduled after the given timestamp."""
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    SELECT timestamp, event_date, event_type, impact, description
+                    FROM event_calendar
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (after_timestamp,),
+                )
+                rows = []
+                for r in cur.fetchall():
+                    rows.append({
+                        "timestamp": r["timestamp"],
+                        "event_date": r["event_date"],
+                        "event_type": r["event_type"],
+                        "impact": r["impact"],
+                        "description": r["description"],
+                    })
+                return rows
 
 
 # Singleton instance for the process

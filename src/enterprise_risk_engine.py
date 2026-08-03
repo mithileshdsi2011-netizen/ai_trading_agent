@@ -14,6 +14,7 @@ import pandas as pd
 from config import config
 from market_data import MarketDataFetcher
 from vix_risk_engine import IndiaVIXRiskEngine
+from economic_events import EconomicEventRiskEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class EnterpriseRiskEngine:
         self._risk = risk_manager
         self._market_data: Optional[MarketDataFetcher] = None
         self._vix_engine = IndiaVIXRiskEngine(market_data=self.market_data)
+        self._event_engine = EconomicEventRiskEngine()
 
     @property
     def market_data(self) -> MarketDataFetcher:
@@ -268,6 +270,18 @@ class EnterpriseRiskEngine:
         qty = max(1, min(qty, max_qty_by_capital)) if max_qty_by_capital > 0 else max(1, qty)
         return qty
 
+    def _event_risk_gate(self, signal: Dict) -> Tuple[bool, str, float]:
+        """Economic event risk: block new BUYs within 6h, halve size within 24h."""
+        try:
+            status = self._event_engine.risk_status()
+            if status.get("no_new_buy"):
+                return False, status.get("reason", "High-impact event within 6h"), 0.0
+            if status.get("reduce_size"):
+                return True, status.get("reason", "High-impact event within 24h"), 0.5
+        except Exception:
+            pass
+        return True, "ok", 1.0
+
     # ── master pre-BUY gate ─────────────────────────────────────────────
 
     def pre_buy_risk_check(self, signal: Dict) -> bool:
@@ -280,12 +294,19 @@ class EnterpriseRiskEngine:
         reason = "ok"
         allow = True
 
-        # 1. Regime allocation
-        ok, msg = self._regime_allow(signal)
-        if not ok:
-            allow, reason = False, msg
+        # 1. Economic event risk (6h no-buy / 24h size reduction)
+        if allow:
+            ok, msg, event_factor = self._event_risk_gate(signal)
+            if not ok:
+                allow, reason = False, msg
 
-        # 2. Drawdown governor
+        # 2. Regime allocation
+        if allow:
+            ok, msg = self._regime_allow(signal)
+            if not ok:
+                allow, reason = False, msg
+
+        # 3. Drawdown governor
         if allow:
             ok, msg = self._drawdown_governor()
             if not ok:
@@ -309,6 +330,8 @@ class EnterpriseRiskEngine:
         kelly_factor = 1.0
         if allow:
             vol_factor, vol_metrics = self._volatility_metrics(signal)
+            # Apply economic event size factor (24h rule)
+            vol_factor *= event_factor
             kelly_factor = self._kelly_size_factor(float(signal.get("confidence", 0.0)))
             quantity = self._dynamic_position_size(signal, vol_factor)
             signal["position_size"] = quantity
