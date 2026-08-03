@@ -1235,7 +1235,7 @@ tr:last-child td{border:none}
 .stat-label{color:#9ca3af;font-size:12px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em}
 .stat-value{font-size:22px;font-weight:700;line-height:1.1}
 .stat-value-sm{font-size:16px;font-weight:700}
-.tab-btn{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .2s;color:#6b7280;background:transparent}
+.tab-btn{padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .2s;color:#6b7280;background:transparent;white-space:nowrap}
 .tab-btn.active{background:#1d4ed8;color:#fff}
 .tab-btn:hover:not(.active){background:#1f2937;color:#e2e8f0}
 .tab-content{display:none}
@@ -1323,7 +1323,7 @@ tr:last-child td{border:none}
 </div>
 
 <!-- TAB NAV -->
-<div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px" class="flex gap-2">
+<div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px;flex-wrap:wrap;" class="flex gap-2">
   <button class="tab-btn active" onclick="switchTab('dashboard',this)">🏠 Dashboard</button>
   <button class="tab-btn" onclick="switchTab('morning',this)" id="morning-tab-btn">🌅 Morning Intel</button>
   <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
