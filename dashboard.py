@@ -1537,7 +1537,18 @@ tr:last-child td{border:none}
     </div>
   </div>
 
-  <!-- Row 3: Sector Rotation -->
+  <!-- Row 3: VIX Risk -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚡ India VIX Risk</div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card-sm"><div class="stat-label">VIX</div><div class="stat-value-sm" id="vix-value">—</div></div>
+      <div class="card-sm"><div class="stat-label">Volatility Score</div><div class="stat-value-sm" id="vix-score">—</div></div>
+      <div class="card-sm"><div class="stat-label">Risk Factor</div><div class="stat-value-sm" id="vix-factor">—</div></div>
+      <div class="card-sm"><div class="stat-label">Risk Level</div><div class="stat-value-sm" id="vix-level">—</div></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Sector Rotation -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🔄 Sector Rotation</div>
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -3381,6 +3392,19 @@ async function load(){
     const msIcon=ms==='BULLISH'?'🟢':ms==='BEARISH'?'🔴':'🟡';
     msEl.textContent=msIcon+' '+ms;
     msEl.className='stat-value-sm '+(ms==='BULLISH'?'green':ms==='BEARISH'?'red':'yellow');
+
+    // VIX Risk
+    const vix=d.vix_risk||{};
+    document.getElementById('vix-value').textContent=vix.vix!=null?vix.vix.toFixed(2):'—';
+    document.getElementById('vix-score').textContent=vix.volatility_score!=null?vix.volatility_score.toFixed(1):'—';
+    const vixFactorEl=document.getElementById('vix-factor');
+    const vixFactor=parseFloat(vix.risk_factor||1);
+    vixFactorEl.textContent=vixFactor.toFixed(2);
+    vixFactorEl.className='stat-value-sm '+(vixFactor>=0.8?'green':vixFactor>=0.5?'yellow':'red');
+    const vixLevelEl=document.getElementById('vix-level');
+    const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
+    vixLevelEl.textContent=vixLevel;
+    vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':'red');
 
     // Sector Rotation
     const sr=d.sector_rotation||{};
@@ -5791,6 +5815,13 @@ def api_data():
             data['sector_rotation'] = get_store().get_latest_sector_rotation() or {}
     except Exception:
         data['sector_rotation'] = {}
+
+    # India VIX risk snapshot (from store; computed separately)
+    try:
+        if get_store is not None:
+            data['vix_risk'] = get_store().get_latest_vix_risk() or {}
+    except Exception:
+        data['vix_risk'] = {}
 
     return jsonify(data)
 

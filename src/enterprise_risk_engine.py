@@ -13,6 +13,7 @@ import pandas as pd
 
 from config import config
 from market_data import MarketDataFetcher
+from vix_risk_engine import IndiaVIXRiskEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class EnterpriseRiskEngine:
     def __init__(self, risk_manager=None):
         self._risk = risk_manager
         self._market_data: Optional[MarketDataFetcher] = None
+        self._vix_engine = IndiaVIXRiskEngine(market_data=self.market_data)
 
     @property
     def market_data(self) -> MarketDataFetcher:
@@ -179,13 +181,16 @@ class EnterpriseRiskEngine:
 
         # VIX high
         try:
-            vix_hist = self.market_data.get_stock_data("INDIAVIX", period="5d", interval="1d")
-            if not vix_hist.empty:
-                vix = float(vix_hist["Close"].iloc[-1])
-                metrics["vix"] = round(vix, 2)
-                if vix > _VIX_HIGH_THRESHOLD:
-                    factor *= 0.7
-                    logger.info(f"High VIX {vix:.1f} — reducing size")
+            vix_data = self._vix_engine.compute()
+            vix = vix_data.get("vix")
+            risk_factor = vix_data.get("risk_factor", 1.0)
+            volatility_score = vix_data.get("volatility_score", 0.0)
+            metrics["vix"] = round(vix, 2) if vix is not None else None
+            metrics["volatility_score"] = volatility_score
+            metrics["risk_level"] = vix_data.get("risk_level", "UNKNOWN")
+            factor *= risk_factor
+            if risk_factor < 1.0:
+                logger.info(f"VIX {vix:.1f} ({vix_data.get('risk_level')}) — risk factor {risk_factor}")
         except Exception:
             pass
 

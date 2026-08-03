@@ -159,6 +159,18 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_sector_rotation_timestamp
                     ON sector_rotation (timestamp);
+
+                CREATE TABLE IF NOT EXISTS vix_risk (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    vix REAL NOT NULL DEFAULT 0,
+                    volatility_score REAL NOT NULL DEFAULT 0,
+                    risk_factor REAL NOT NULL DEFAULT 1.0,
+                    risk_level TEXT NOT NULL DEFAULT 'UNKNOWN'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_vix_risk_timestamp
+                    ON vix_risk (timestamp);
                 """
             )
 
@@ -709,6 +721,47 @@ class TradingStore:
                     "top5_strong": self._loads(row["top5_strong"]),
                     "top5_weak": self._loads(row["top5_weak"]),
                     "all_sectors": self._loads(row["all_sectors"]),
+                }
+
+    # ── vix risk ──────────────────────────────────────────────────────────
+
+    def save_vix_risk(self, snapshot: Dict[str, Any]) -> None:
+        """Persist a VIX risk snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO vix_risk
+                    (timestamp, vix, volatility_score, risk_factor, risk_level)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot.get("timestamp") or datetime.now().isoformat(),
+                        float(snapshot.get("vix", 0.0)),
+                        float(snapshot.get("volatility_score", 0.0)),
+                        float(snapshot.get("risk_factor", 1.0)),
+                        str(snapshot.get("risk_level", "UNKNOWN")),
+                    ),
+                )
+
+    def get_latest_vix_risk(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent VIX risk snapshot."""
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """
+                    SELECT timestamp, vix, volatility_score, risk_factor, risk_level
+                    FROM vix_risk ORDER BY timestamp DESC LIMIT 1
+                    """
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "timestamp": row["timestamp"],
+                    "vix": row["vix"],
+                    "volatility_score": row["volatility_score"],
+                    "risk_factor": row["risk_factor"],
+                    "risk_level": row["risk_level"],
                 }
 
 
