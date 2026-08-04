@@ -73,6 +73,7 @@ class Position:
     status: PositionStatus = PositionStatus.OPEN
     exit_price: Optional[float] = None
     exit_time: Optional[datetime] = None
+    exit_reason: Optional[str] = None
     pnl: float = 0.0
     pnl_percentage: float = 0.0
     charges: float = 0.0        # brokerage + STT + exchange
@@ -146,6 +147,7 @@ class RiskManager:
                     slippage=p.get('slippage', 0.0),
                     exit_price=p.get('exit_price'),
                     exit_time=datetime.fromisoformat(p['exit_time']) if p.get('exit_time') else None,
+                    exit_reason=p.get('exit_reason'),
                 )
                 if '_partial_target' in p:
                     pos._partial_target = p['_partial_target']
@@ -626,6 +628,7 @@ class RiskManager:
             position.slippage = exit_price - position.exit_price  # 0 here; broker fills in real mode
             self._last_exit_by_symbol[position.symbol] = position.exit_time
 
+        position.exit_reason = reason_override or self._get_exit_reason(status)
         self.daily_pnl += gross_pnl
         self.save_positions()
 
@@ -639,7 +642,7 @@ class RiskManager:
             'charges': position.charges,
             'net_pnl': position.net_pnl,
             'status': position.status.value,
-            'reason': reason_override or self._get_exit_reason(status),
+            'reason': position.exit_reason,
             'timestamp': datetime.now().isoformat()
         }
 

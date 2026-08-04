@@ -503,6 +503,11 @@ class ReconciliationEngine:
             return mismatches
 
         # Ensure every completed Kite order is in the journal
+        closed_positions = {
+            p.get('symbol'): p
+            for p in self._store.load_positions()
+            if p.get('status') == 'CLOSED'
+        }
         kite_orders = _kite_orders(self.broker)
         for ko in kite_orders:
             if ko.get('status') == 'COMPLETE':
@@ -510,6 +515,9 @@ class ReconciliationEngine:
                 sym = ko.get('tradingsymbol', ko.get('symbol'))
                 action = ko.get('transaction_type', 'BUY')
                 if (oid, sym) not in [(t.get('order_id'), t.get('symbol')) for t in sqlite_trades]:
+                    reason = None
+                    if action == 'SELL' and sym in closed_positions:
+                        reason = closed_positions[sym].get('exit_reason')
                     trade = {
                         'order_id': oid,
                         'symbol': sym,
@@ -518,7 +526,8 @@ class ReconciliationEngine:
                         'entry_price': _safe_float(ko.get('average_price', ko.get('price', 0))),
                         'timestamp': ko.get('order_timestamp') or _now(),
                         'status': 'OPEN' if action == 'BUY' else 'CLOSED',
-                        'source': 'reconciliation'
+                        'source': 'reconciliation',
+                        'exit_reason': reason or 'reconciliation: missing journal',
                     }
                     self._store.add_trade(trade)
                     self._add_mismatch(mismatches, f'trade_missing:{oid}', None, trade, True)

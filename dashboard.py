@@ -1897,9 +1897,9 @@ tr:last-child td{border:none}
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
         <th style="text-align:left">Date</th><th style="text-align:left">Symbol</th>
-        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>P&amp;L</th><th>P&amp;L %</th>
+        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>P&amp;L</th><th>P&amp;L %</th><th>Exit Reason</th>
       </tr></thead>
-      <tbody id="p-trade-history"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr></tbody>
+      <tbody id="p-trade-history"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -4130,16 +4130,19 @@ async function load(){
         const pnlPctCell=isSell
           ?`<td class="${pnlClass(pnlPct)}" style="font-size:12px">${pct(pnlPct,1)}</td>`
           :`<td style="color:#4b5563">—</td>`;
+        const exitReasonCell=isSell
+          ?`<td style="font-size:12px;color:#9ca3af;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${o.exit_reason||''}">${o.exit_reason||'—'}</td>`
+          :`<td style="color:#4b5563">—</td>`;
         return `<tr style="border-bottom:1px solid #1f2937">
           <td style="font-size:12px;color:#9ca3af;padding:8px 6px">${ts}</td>
           <td style="font-weight:700;color:#f9fafb;padding:8px 6px">${o.tradingsymbol}</td>
           <td style="padding:8px 4px"><span class="badge ${isBuy?'badge-buy':'badge-sell'}" style="font-size:11px">${o.transaction_type}</span></td>
           <td style="text-align:center;padding:8px 4px">${qty}</td>
-          ${buyCell}${sellCell}${pnlCell}${pnlPctCell}
+          ${buyCell}${sellCell}${pnlCell}${pnlPctCell}${exitReasonCell}
         </tr>`;
       }).join('');
     } else {
-      thEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr>';
+      thEl.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No recent trades</td></tr>';
     }
 
     // ── TAB: POSITIONS ───────────────────────────────────────────
@@ -6068,7 +6071,16 @@ def api_data():
                     'sell_price':je.get('exit_price'),   # set when position closed
                     'net_pnl':   je.get('net_pnl'),
                     'date':      je.get('date', ''),
+                    'exit_reason': je.get('exit_reason', ''),  # Add exit reason to journal entry
                 })
+
+        # Match Kite orders to journal entries by order_id or symbol+price+qty
+        jnl_by_order_id = {je.get('order_id'): je for je in journal_entries if je.get('order_id')}
+        jnl_sell_map = {}
+        for je in journal_entries:
+            if je.get('action') == 'SELL' and not je.get('order_id'):
+                key = (je.get('symbol'), round(float(je.get('exit_price') or 0), 2), int(je.get('quantity') or 0))
+                jnl_sell_map[key] = je
 
         # Attach P&L to all orders via FIFO; fall back to journal for cross-session sells
         all_order_pnl = calculate_pnl(orders)
@@ -6097,6 +6109,12 @@ def api_data():
                 # If FIFO matched an in-session buy, derive blended buy price for display
                 if not o.get('buy_price') and sell_price > 0 and int(o.get('quantity', 1)) > 0:
                     o['buy_price'] = round(sell_price - (fifo_pnl / int(o.get('quantity', 1))), 2)
+                # Attach exit reason from journal
+                reason = (jnl_by_order_id.get(oid) or {}).get('exit_reason')
+                if not reason:
+                    key = (sym, round(sell_price, 2), int(o.get('quantity', 1)))
+                    reason = (jnl_sell_map.get(key) or {}).get('exit_reason')
+                o['exit_reason'] = reason
 
         # All completed orders (for trade history tab) + today's orders
         all_completed = [o for o in orders if o.get('status') == 'COMPLETE']
