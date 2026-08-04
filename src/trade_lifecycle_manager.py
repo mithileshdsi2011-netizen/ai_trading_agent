@@ -314,6 +314,11 @@ class TradeLifecycleManager:
             if action:
                 action['lifecycle_state'] = self._lifecycle_state(position, current_price)
                 actions.append(action)
+                if action.get('action') != 'HOLD':
+                    logger.info(
+                        f"{position.symbol}: lifecycle {action['action']} "
+                        f"@ ₹{current_price:.2f} - {action.get('reason', 'unknown reason')}"
+                    )
             else:
                 actions.append({
                     'symbol': position.symbol,
