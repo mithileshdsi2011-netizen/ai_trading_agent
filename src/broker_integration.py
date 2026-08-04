@@ -11,6 +11,7 @@ from enum import Enum
 
 from config import config
 from token_manager import TokenManager
+from persistence import get_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,11 +25,13 @@ class BrokerErrorCategory(Enum):
     SUCCESS = "success"
     CDSL_AUTH = "cdsl_auth"
     INSUFFICIENT_QUANTITY = "insufficient_quantity"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
     EXCHANGE_CLOSED = "exchange_closed"
     RMS_REJECTION = "rms_rejection"
     NETWORK_FAILURE = "network_failure"
     RATE_LIMIT = "rate_limit"
     INVALID_TOKEN = "invalid_token"
+    INVALID_ORDER = "invalid_order"
     ORDER_FROZEN = "order_frozen"
     IP_WHITELIST = "ip_whitelist"
     OTHER = "other"
@@ -85,12 +88,26 @@ BROKER_ERROR_POLICY = {
         'retry_policy': 'manual',
         'recovery_path': 'Verify holdings/positions; bot will retry once available quantity is corrected.',
     },
-    BrokerErrorCategory.RMS_REJECTION: {
-        'retry': True,
+    BrokerErrorCategory.INSUFFICIENT_FUNDS: {
+        'retry': False,
         'notify': True,
         'continue_trading': True,
-        'retry_policy': 'exponential_backoff',
-        'recovery_path': 'Review RMS/margin reason in Kite; bot will retry transient rejections after a short backoff.',
+        'retry_policy': 'manual',
+        'recovery_path': 'Add funds or reduce position size; this is a permanent rejection.',
+    },
+    BrokerErrorCategory.RMS_REJECTION: {
+        'retry': False,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'manual',
+        'recovery_path': 'Review RMS/margin reason in Kite; this is a permanent rejection.',
+    },
+    BrokerErrorCategory.INVALID_ORDER: {
+        'retry': False,
+        'notify': True,
+        'continue_trading': True,
+        'retry_policy': 'manual',
+        'recovery_path': 'Order payload is malformed (e.g., float where int expected). This is a code-level issue; no automatic retry.',
     },
     BrokerErrorCategory.ORDER_FROZEN: {
         'retry': True,
@@ -100,11 +117,11 @@ BROKER_ERROR_POLICY = {
         'recovery_path': 'Order frozen by exchange; bot will retry after a short backoff.',
     },
     BrokerErrorCategory.OTHER: {
-        'retry': True,
+        'retry': False,
         'notify': True,
         'continue_trading': True,
-        'retry_policy': 'every_cycle',
-        'recovery_path': 'Unknown broker error; bot will retry next cycle.',
+        'retry_policy': 'manual',
+        'recovery_path': 'Unknown broker error; operator review required before retry.',
     },
 }
 
@@ -192,21 +209,21 @@ class BrokerIntegration:
         logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
 
     def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
-        """Persist broker mode and startup status for the dashboard."""
+        """Persist broker mode and startup status to the SQLite store."""
         try:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            status_path = os.path.join(root, 'data', 'broker_status.json')
-            os.makedirs(os.path.dirname(status_path), exist_ok=True)
-            with open(status_path, 'w') as f:
-                json.dump({
+            store = get_store()
+            store.save_broker_state(
+                'status',
+                {
                     'mode': mode,
                     'live_ready': live_ready,
                     'startup_timestamp': getattr(self, 'startup_timestamp', datetime.now().isoformat()),
                     'error': error,
                     'updated_at': datetime.now().isoformat()
-                }, f)
+                }
+            )
         except Exception as e:
-            logger.warning(f"Could not write broker_status.json: {e}")
+            logger.warning(f"Could not write broker status: {e}")
     
     def place_order(self, signal: Dict) -> Dict:
         """
@@ -235,8 +252,8 @@ class BrokerIntegration:
         """
         symbol = signal['symbol']
         action = signal['action']
-        price = signal['current_price']
-        quantity = signal['position_size']
+        price = float(signal.get('current_price', 0) or 0)
+        quantity = int(signal.get('position_size', 0) or 0)
         
         # Check if we have enough cash
         required_amount = price * quantity
@@ -251,13 +268,24 @@ class BrokerIntegration:
         # Execute paper order
         if action == 'BUY':
             self.paper_portfolio['cash'] -= required_amount
-            self.paper_portfolio['positions'][symbol] = {
-                'quantity': quantity,
-                'entry_price': price,
-                'stop_loss': signal['stop_loss'],
-                'target': signal['target'],
-                'entry_time': datetime.now().isoformat()
-            }
+            if symbol in self.paper_portfolio['positions']:
+                pos = self.paper_portfolio['positions'][symbol]
+                old_qty = pos['quantity']
+                old_avg = pos['entry_price']
+                new_qty = old_qty + quantity
+                new_avg = (old_avg * old_qty + price * quantity) / new_qty if new_qty > 0 else price
+                pos['quantity'] = new_qty
+                pos['entry_price'] = new_avg
+                pos['stop_loss'] = signal['stop_loss']
+                pos['target'] = signal['target']
+            else:
+                self.paper_portfolio['positions'][symbol] = {
+                    'quantity': quantity,
+                    'entry_price': price,
+                    'stop_loss': signal['stop_loss'],
+                    'target': signal['target'],
+                    'entry_time': datetime.now().isoformat()
+                }
         elif action == 'SELL':
             # Check if we have enough position to sell
             if symbol not in self.paper_portfolio['positions']:
@@ -322,6 +350,10 @@ class BrokerIntegration:
             return BrokerErrorCategory.CDSL_AUTH
         if any(k in err for k in ('insufficient quantity', 'insufficient qty', 'quantity not enough')):
             return BrokerErrorCategory.INSUFFICIENT_QUANTITY
+        if any(k in err for k in ('insufficient fund', 'not enough fund', 'margin shortfall', 'insufficient margin')):
+            return BrokerErrorCategory.INSUFFICIENT_FUNDS
+        if any(k in err for k in ('failed to decode', 'expected int', 'invalid request')):
+            return BrokerErrorCategory.INVALID_ORDER
         if any(k in err for k in ('exchange closed', 'market closed', 'not a trading day', 'holiday')):
             return BrokerErrorCategory.EXCHANGE_CLOSED
         if any(k in err for k in ('rms', 'risk management', 'margin', 'exposure', 'limit exceeded')):
@@ -362,8 +394,8 @@ class BrokerIntegration:
         try:
             symbol = signal['symbol']
             action = signal['action']
-            price = signal['current_price']
-            quantity = signal['position_size']
+            price = float(signal.get('current_price', 0) or 0)
+            quantity = int(signal.get('position_size', 0) or 0)
             
             # Kite Connect uses plain NSE symbols (e.g., RELIANCE not RELIANCE.NS)
             kite_symbol = symbol.replace(".NS", "")  # strip suffix if accidentally present

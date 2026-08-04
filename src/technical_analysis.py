@@ -223,7 +223,7 @@ class TechnicalAnalyzer:
         signals = 0
         
         # RSI score (weight: 0.25)
-        if pd.notna(latest['RSI']):
+        if pd.notna(latest.get('RSI')):
             signals += 1
             rsi = latest['RSI']
             if rsi < 30:
@@ -240,13 +240,13 @@ class TechnicalAnalyzer:
                 score -= 0.08
         
         # MACD score (weight: 0.20)
-        if pd.notna(latest['MACD']) and pd.notna(latest['MACD_Signal']):
+        if pd.notna(latest.get('MACD')) and pd.notna(latest.get('MACD_Signal')):
             signals += 1
             macd_diff = latest['MACD'] - latest['MACD_Signal']
             if macd_diff > 0:
                 # Positive histogram increasing = stronger signal
                 if len(data) >= 2:
-                    prev_diff = data.iloc[-2]['MACD'] - data.iloc[-2]['MACD_Signal']
+                    prev_diff = data.iloc[-2].get('MACD', 0) - data.iloc[-2].get('MACD_Signal', 0)
                     if macd_diff > prev_diff:
                         score += 0.20  # MACD diverging upward
                     else:
@@ -255,7 +255,7 @@ class TechnicalAnalyzer:
                     score += 0.15
             else:
                 if len(data) >= 2:
-                    prev_diff = data.iloc[-2]['MACD'] - data.iloc[-2]['MACD_Signal']
+                    prev_diff = data.iloc[-2].get('MACD', 0) - data.iloc[-2].get('MACD_Signal', 0)
                     if macd_diff < prev_diff:
                         score -= 0.20
                     else:
@@ -264,25 +264,31 @@ class TechnicalAnalyzer:
                     score -= 0.15
         
         # Moving average trend (weight: 0.20)
-        if pd.notna(latest['SMA_20']) and pd.notna(latest['SMA_50']):
+        sma20 = latest.get('SMA_20')
+        sma50 = latest.get('SMA_50')
+        if pd.notna(sma20) and pd.notna(sma50):
             signals += 1
-            if latest['SMA_20'] > latest['SMA_50']:
+            if sma20 > sma50:
                 score += 0.12   # Golden cross condition
             else:
                 score -= 0.12
         # Price above/below SMA20 (weight: 0.10)
-        if pd.notna(latest['SMA_20']):
-            if latest['Close'] > latest['SMA_20']:
+        if pd.notna(sma20):
+            if latest.get('Close', 0) > sma20:
                 score += 0.10
             else:
                 score -= 0.10
-        
+
         # Bollinger Band position (weight: 0.15)
-        if pd.notna(latest['BB_Upper']) and pd.notna(latest['BB_Lower']) and pd.notna(latest['BB_Middle']):
+        bb_upper = latest.get('BB_Upper')
+        bb_lower = latest.get('BB_Lower')
+        bb_middle = latest.get('BB_Middle')
+        close = latest.get('Close')
+        if pd.notna(bb_upper) and pd.notna(bb_lower) and pd.notna(bb_middle):
             signals += 1
-            bb_width = latest['BB_Upper'] - latest['BB_Lower']
-            if bb_width > 0:
-                bb_pos = (latest['Close'] - latest['BB_Lower']) / bb_width
+            bb_width = bb_upper - bb_lower
+            if bb_width > 0 and pd.notna(close):
+                bb_pos = (close - bb_lower) / bb_width
                 if bb_pos < 0.15:        # Near lower band - oversold bounce opportunity
                     score += 0.20
                 elif bb_pos < 0.35:      # Lower half but not extreme
@@ -291,11 +297,13 @@ class TechnicalAnalyzer:
                     score -= 0.15
                 elif bb_pos > 0.65:
                     score -= 0.05
-        
+
         # Stochastic score (weight: 0.10)
-        if pd.notna(latest['SlowK']) and pd.notna(latest['SlowD']):
+        slowk = latest.get('SlowK')
+        slowd = latest.get('SlowD')
+        if pd.notna(slowk) and pd.notna(slowd):
             signals += 1
-            k, d = latest['SlowK'], latest['SlowD']
+            k, d = slowk, slowd
             if k < 20 and d < 20:
                 score += 0.10   # Oversold
             elif k > 80 and d > 80:
@@ -306,10 +314,10 @@ class TechnicalAnalyzer:
                 score -= 0.05
         
         # Volume surge (weight: 0.10)
-        if pd.notna(latest['Volume_SMA']) and latest['Volume_SMA'] > 0:
+        if pd.notna(latest.get('Volume_SMA')) and latest.get('Volume_SMA', 0) > 0:
             signals += 1
-            vol_ratio = latest['Volume'] / latest['Volume_SMA']
-            if vol_ratio > 2.0 and latest['Close'] > latest.get('SMA_20', latest['Close']):
+            vol_ratio = latest.get('Volume', 0) / latest.get('Volume_SMA', 1)
+            if vol_ratio > 2.0 and close > latest.get('SMA_20', close):
                 score += 0.10   # High volume breakout
             elif vol_ratio > 1.5:
                 score += 0.05

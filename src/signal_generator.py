@@ -10,6 +10,7 @@ import time
 
 from ai_research_agent import AIResearchAgent
 from risk_manager import RiskManager
+from enterprise_ai_decision_engine import EnterpriseAIDecisionEngine
 from config import config
 from decision_logger import DecisionLogger, create_decision_record
 
@@ -24,6 +25,7 @@ class SignalGenerator:
         self.research_agent = AIResearchAgent()
         self._market_data = self.research_agent.market_data
         self.decision_logger = DecisionLogger()
+        self.decision_engine = EnterpriseAIDecisionEngine(self._market_data)
     
     def generate_signal(self, symbol: str, risk_data: Dict = None) -> Dict:
         """
@@ -63,7 +65,7 @@ class SignalGenerator:
         
         # Get current price (reuse shared MarketDataFetcher)
         current_price = self._market_data.get_realtime_price(symbol)
-        
+
         if not current_price:
             return {
                 'symbol': symbol,
@@ -72,28 +74,37 @@ class SignalGenerator:
                 'timestamp': datetime.now().isoformat()
             }
 
-        # Fetch ATR for dynamic SL and volatility-based position sizing
+        # Fetch historical data once for ATR, decision engine and scoring
+        hist = None
+        try:
+            hist = self._market_data.get_stock_data(symbol, period="3mo", interval="1d")
+        except Exception:
+            hist = None
+
+        # ATR for dynamic SL and volatility-based position sizing
         atr = 0.0
         try:
-            hist = self._market_data.get_stock_data(symbol, period="1mo", interval="1d")
-            if not hist.empty:
+            if hist is not None and not hist.empty:
                 atr = RiskManager.calculate_atr(hist)
         except Exception:
             pass
-        
+
+        # ── Enterprise AI Decision Engine ─────────────────────────────────────
+        ai_scores = self.decision_engine.compute_scores(symbol, current_price, hist, research)
+
         # Calculate position size based on risk
         position_size = self._calculate_position_size(current_price)
-        
+
         # Calculate stop loss and target
         stop_loss, target = self._calculate_risk_parameters(
             current_price,
             research['technical_analysis'].get('support', 0),
             research['technical_analysis'].get('resistance', 0),
-            research['recommendation']
+            ai_scores['recommendation']
         )
-        
-        # Determine action
-        action = self._determine_action(research['recommendation'])
+
+        # Determine action from the master decision engine
+        action = ai_scores['action'] if ai_scores['action'] in ('BUY', 'SELL') else 'HOLD'
         
         signal = {
             'symbol': symbol,
@@ -105,15 +116,30 @@ class SignalGenerator:
             'target': target,
             'atr': atr,
             'risk_reward_ratio': self._calculate_risk_reward(current_price, stop_loss, target),
-            'confidence': research['confidence'],
-            'overall_score': research['overall_score'],
-            'reasoning': research['reasoning'],
+            'confidence': ai_scores['final_confidence'],
+            'overall_score': ai_scores['final_score'],
+            'threshold': ai_scores['threshold'],
+            'reasoning': ai_scores['explain_text'],
+            'ai_explain': ai_scores['explain'],
+            'sub_scores': ai_scores['sub_scores'],
+            'score_components': ai_scores['score_components'],
+            'regime': ai_scores.get('regime_threshold'),
             'trend': research.get('technical_analysis', {}).get('trend', 'NEUTRAL'),
             'timestamp': datetime.now().isoformat(),
             '_research': research,  # full research for TradeScorer + news filter
         }
         
         # Log decision for transparency
+        decision_data['research'].update({
+            'overall_score': ai_scores['final_score'],
+            'confidence': ai_scores['final_confidence'],
+            'technical_score': ai_scores['sub_scores'].get('technical', 0),
+            'news_sentiment_score': research.get('news_sentiment_score', 0),
+            'sector_momentum': ai_scores['sub_scores'].get('sector', 0),
+            'market_regime': research.get('market_regime', 'UNKNOWN'),
+            'detailed_factors': {**ai_scores['sub_scores'], 'threshold': ai_scores['threshold']},
+            'sector': research.get('sector', 'Unknown')
+        })
         decision_data.update({
             'final_decision': action if action in ['BUY', 'SELL'] else 'SKIP',
             'signal': signal
@@ -171,8 +197,10 @@ class SignalGenerator:
         
         if recommendation in ['BUY', 'STRONG_BUY']:
             # For long positions - use percentage-based SL for consistent R:R
-            # Support levels are often too tight for intraday, causing poor R:R
+            # but never place the stop below the identified support level.
             stop_loss = current_price * (1 - sl_pct)
+            if support > 0:
+                stop_loss = max(stop_loss, support)
 
             # Use resistance if it provides better upside than percentage target
             pct_target = current_price * (1 + tgt_pct)

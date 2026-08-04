@@ -26,6 +26,7 @@ from smart_exit import SmartExitAI
 from sell_decision_ai import SellDecisionAI
 from risk_manager import PositionStatus
 from decision_explainer import DecisionExplainer
+from reconciliation_engine import ReconciliationEngine
 
 import os as _os
 _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'logs')
@@ -68,6 +69,15 @@ class TradingOrchestrator:
         broker = self.order_executor.broker
         mode_str = 'PAPER' if broker.paper_trading else ('LIVE' if broker.live_ready else 'UNKNOWN')
         logger.info(f"TradingOrchestrator initialized — broker mode: {mode_str}, startup: {broker.startup_timestamp}")
+
+        # Reconciliation engine: full reconcile before trading, then schedule every 60s
+        self.reconciliation_engine = ReconciliationEngine(broker=broker, market_data_fetcher=self.market_data)
+        recon_status = self.reconciliation_engine.reconcile_all()
+        if not recon_status.get('healthy'):
+            raise RuntimeError(f"Startup reconciliation failed — not starting trading. {recon_status}")
+        self.reconciliation_engine.start_scheduler()
+        logger.info(f"Reconciliation engine started: {recon_status}")
+
         self.is_running = False
         self.trade_log: List[Dict] = []   # capped at 500 entries (in-memory only)
         self._TRADE_LOG_MAX = 500
@@ -96,6 +106,18 @@ class TradingOrchestrator:
         """
         logger.info("=" * 50)
         logger.info(f"Starting trading cycle at {datetime.now()}")
+        
+        # Reload token if a newer one was saved since startup
+        try:
+            from token_manager import TokenManager
+            fresh = TokenManager().get_access_token()
+            if self.market_data and getattr(self.market_data, 'kite', None):
+                self.market_data.kite.set_access_token(fresh)
+            if self.order_executor and hasattr(self.order_executor, 'broker') and getattr(self.order_executor.broker, 'kite', None):
+                self.order_executor.broker.kite.set_access_token(fresh)
+            logger.info("Kite token re-synced from disk")
+        except Exception:
+            pass
         
         # Reset per-cycle market data metrics and warm the rate limiter
         self.market_data.new_cycle()
@@ -372,6 +394,7 @@ class TradingOrchestrator:
                                     'risk_reward_ratio': 0, 'confidence': 1.0,
                                     'overall_score': 0, 'reasoning': se['reason'],
                                     'timestamp': datetime.now().isoformat(),
+                                    '_origin': 'trading_orchestrator.bear_regime',
                                 })
                     except Exception as be:
                         logger.error(f"Bear regime smart exit error: {be}")
@@ -659,21 +682,7 @@ class TradingOrchestrator:
                             ))
                             continue
 
-                    # ── 7. Multi-timeframe confirmation ────────────────────────
-                    if not mtf_result['aligned']:
-                        logger.warning(self.explainer.format_skip(
-                            symbol=sym,
-                            reason=f"MTF not aligned — {mtf_result['reason']}",
-                            score_result=score_result,
-                            mtf_result=mtf_result,
-                            confidence=best_signal.get('confidence', 0.0),
-                            overall_score=best_signal.get('overall_score', 0.0),
-                            rr=rr,
-                            regime=regime,
-                        ))
-                        continue
-
-                    # ── 8. Re-entry gate (all conditions) ─────────────────────
+                    # ── 7. Re-entry gate (all conditions) ─────────────────────
                     reentry_result = self._check_reentry_eligibility(
                         sym,
                         current_price=best_signal.get('current_price', 0),
@@ -766,6 +775,12 @@ class TradingOrchestrator:
                     logger.info(f"Skipping SELL {sym}: not in open positions")
                     continue
                 logger.info(f"Sell signal: {sym} confidence {sell_signal.get('confidence', 0):.0%}")
+                sell_signal['_origin'] = sell_signal.get('_origin', 'signal_generator')
+                logger.info(
+                    f"SELL_PIPELINE | origin={sell_signal.get('_origin')} "
+                    f"| symbol={sym} | proposed_price={sell_signal.get('current_price')} "
+                    f"| reason='{sell_signal.get('reasoning', '')}'"
+                )
                 execution_result = self.order_executor.execute_signal(sell_signal)
                 cycle_result['orders_executed'].append(execution_result)
                 if execution_result['success']:
@@ -859,6 +874,11 @@ class TradingOrchestrator:
                         quantity = position.quantity
                         reason_suffix = " (full exit)"
                     
+                    logger.info(
+                        f"SELL_PIPELINE | origin=trading_orchestrator.ai_sell_decision "
+                        f"| symbol={position.symbol} | proposed_price={price} "
+                        f"| reason='AI Sell Decision: {decision.reason}{reason_suffix}'"
+                    )
                     exec_r = self.order_executor.execute_signal({
                         'symbol': position.symbol, 'action': 'SELL',
                         'current_price': price,
@@ -871,6 +891,7 @@ class TradingOrchestrator:
                         'allow_loss_exit': True,
                         'timestamp': datetime.now().isoformat(),
                         '_ai_sell_decision': True, '_exit_price': price,
+                        '_origin': 'trading_orchestrator.ai_sell_decision',
                     })
                     if exec_r['success']:
                         cycle_result['orders_executed'].append(exec_r)
@@ -897,6 +918,11 @@ class TradingOrchestrator:
                     smart_exits = self.smart_exit.check_all(remaining_positions, remaining_prices, regime)
                     for se in smart_exits:
                         logger.info(f"SmartExit: {se['symbol']} — {se['reason']}")
+                        logger.info(
+                            f"SELL_PIPELINE | origin=trading_orchestrator.smart_exit "
+                            f"| symbol={se['symbol']} | proposed_price={se['price']} "
+                            f"| reason='{se['reason']}'"
+                        )
                         exec_r = self.order_executor.execute_signal({
                             'symbol': se['symbol'], 'action': 'SELL',
                             'current_price': se['price'],
@@ -907,6 +933,7 @@ class TradingOrchestrator:
                             'overall_score': 0, 'reasoning': se['reason'],
                             'timestamp': datetime.now().isoformat(),
                             '_smart_exit': True, '_exit_price': se['price'],
+                            '_origin': 'trading_orchestrator.smart_exit',
                         })
                         if exec_r['success']:
                             cycle_result['orders_executed'].append(exec_r)
@@ -929,7 +956,7 @@ class TradingOrchestrator:
                 logger.error(f"Weekly rebalance error: {re}")
             
         except Exception as e:
-            logger.error(f"Error in trading cycle: {e}")
+            logger.exception(f"Error in trading cycle: {e}")
             cycle_result['errors'].append(str(e))
         
         # Log per-cycle market data metrics for dashboard / diagnostics
@@ -969,6 +996,10 @@ class TradingOrchestrator:
         Args:
             interval_minutes: Interval between trading cycles in minutes
         """
+        if getattr(self, '_scheduler_started', False):
+            logger.warning("Scheduler already running — not starting a second instance")
+            return
+        self._scheduler_started = True
         logger.info(f"Starting scheduled trading with {interval_minutes} minute intervals")
         self.is_running = True
 
@@ -1465,6 +1496,11 @@ class TradingOrchestrator:
 
         logger.info(f"Rebalance: exiting weakest position {weakest.symbol} ({wpct*100:.1f}%)")
         exit_price = prices.get(weakest.symbol, weakest.entry_price)
+        logger.info(
+            f"SELL_PIPELINE | origin=trading_orchestrator.weekly_rebalance "
+            f"| symbol={weakest.symbol} | proposed_price={exit_price} "
+            f"| reason='Weekly rebalance — underperforming ({wpct*100:.1f}%)'"
+        )
         exec_r = self.order_executor.execute_signal({
             'symbol': weakest.symbol, 'action': 'SELL',
             'current_price': exit_price,
@@ -1475,6 +1511,7 @@ class TradingOrchestrator:
             'overall_score': 0,
             'reasoning': f'Weekly rebalance — underperforming ({wpct*100:.1f}%)',
             'timestamp': datetime.now().isoformat(),
+            '_origin': 'trading_orchestrator.weekly_rebalance',
         })
         if exec_r['success']:
             logger.info(f"Rebalance exit executed: {weakest.symbol}")

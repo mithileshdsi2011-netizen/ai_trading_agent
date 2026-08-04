@@ -28,13 +28,15 @@ class TestRiskManager:
             'symbol': 'RELIANCE',
             'action': 'BUY',
             'current_price': 2500.0,
-            'position_size': 2,
-            'investment_amount': 5000.0,
+            'position_size': 1,
+            'investment_amount': 2500.0,
             'stop_loss': 2450.0,
             'target': 2600.0,
             'risk_reward_ratio': 2.0,
             'confidence': 0.8,
-            'overall_score': 0.6
+            'overall_score': 0.6,
+            '_research': {'sector': 'Energy'},
+            'market_regime': 'BULL'
         }
     
     def test_initialization(self, risk_manager):

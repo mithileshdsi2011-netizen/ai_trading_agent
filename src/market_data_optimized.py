@@ -489,7 +489,11 @@ class MarketDataFetcher:
 
     def get_realtime_price(self, symbol: str) -> Optional[float]:
         prices = self.get_batch_realtime_prices([symbol])
-        return prices.get(symbol)
+        price = prices.get(symbol)
+        if price is None and self.kite:
+            info = self.get_batch_stock_info([symbol])
+            price = info.get(symbol, {}).get('current_price')
+        return price
 
     def get_stock_info(self, symbol: str) -> Dict:
         info = self.get_batch_stock_info([symbol])

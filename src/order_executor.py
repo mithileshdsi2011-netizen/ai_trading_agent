@@ -2,7 +2,7 @@
 Order Execution Engine Module
 Executes orders and manages order lifecycle
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 import json
 import os
@@ -12,9 +12,12 @@ import time
 from broker_integration import BrokerIntegration, get_error_policy
 from email_reports import EmailReporter
 from risk_manager import RiskManager, Position, PositionStatus
+from trade_lifecycle_manager import TradeLifecycleManager
 from market_data import MarketDataFetcher
 from telegram_alerts import TelegramAlerter
 from trade_journal import TradeJournal
+from persistence import get_store
+from reconciliation_engine import ReconciliationEngine
 from config import config
 
 logging.basicConfig(level=logging.INFO)
@@ -28,40 +31,56 @@ class OrderExecutor:
         self.broker = BrokerIntegration()
         self.risk_manager = RiskManager()
         self.market_data = MarketDataFetcher()
+        self.lifecycle_manager = TradeLifecycleManager(self.market_data)
         self.telegram = TelegramAlerter()
         self.journal = TradeJournal()
+        self._store = get_store()
+        self.reconciliation_engine = ReconciliationEngine(broker=self.broker)
         self.executed_orders = []
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
         self._pending_order_symbols: set = set()
         # Tracks SELL attempts that failed at the broker so they can be retried and surfaced in the dashboard.
-        self._pending_sells_file = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'data', 'pending_sells.json'
-        )
         self._pending_sells: Dict[str, Dict] = self._load_pending_sells()
         self.email = EmailReporter()
         self._load_existing_positions()
 
     def _load_pending_sells(self) -> Dict[str, Dict]:
-        """Load persisted pending SELL state so the dashboard can survive restarts."""
+        """Load persisted pending SELL state from SQLite so the dashboard survives restarts."""
         try:
-            if os.path.exists(self._pending_sells_file):
-                with open(self._pending_sells_file) as _f:
-                    _items = json.load(_f)
-                    if isinstance(_items, dict):
-                        return _items
-                    if isinstance(_items, list):
-                        return {p['symbol']: p for p in _items if p.get('symbol')}
+            state = self._store.load_daily_state()
+            _items = state.get('pending_sells', {})
+            if isinstance(_items, dict):
+                for _v in _items.values():
+                    if isinstance(_v.get('next_retry'), str):
+                        try:
+                            _v['next_retry'] = datetime.fromisoformat(_v['next_retry'])
+                        except Exception:
+                            _v['next_retry'] = None
+                    if isinstance(_v.get('sell_time'), str):
+                        try:
+                            _v['sell_time'] = datetime.fromisoformat(_v['sell_time'])
+                        except Exception:
+                            pass
+                return _items
+            if isinstance(_items, list):
+                return {p['symbol']: p for p in _items if p.get('symbol')}
         except Exception as _e:
             logger.warning(f"Could not load pending sells: {_e}")
         return {}
 
     def _save_pending_sells(self):
         try:
-            os.makedirs(os.path.dirname(self._pending_sells_file), exist_ok=True)
-            with open(self._pending_sells_file, 'w') as _f:
-                json.dump(self.get_pending_sells(), _f, default=str)
+            today = datetime.now().strftime('%Y-%m-%d')
+            state = self._store.load_daily_state(today)
+            self._store.save_daily_state(
+                state_date=today,
+                daily_pnl=state.get('daily_pnl', 0.0),
+                daily_blacklist=state.get('daily_blacklist', []),
+                last_exit_by_symbol=state.get('last_exit_by_symbol', {}),
+                daily_trades=state.get('daily_trades', 0),
+                pending_sells=dict(self._pending_sells)
+            )
         except Exception as _e:
             logger.warning(f"Could not save pending sells: {_e}")
 
@@ -251,11 +270,14 @@ class OrderExecutor:
 
         try:
             pos_data = self.broker.kite.positions()
+            already_loaded = {p.symbol for p in self.risk_manager.positions}
             for p in pos_data.get('net', []):
                 qty = p.get('quantity', 0)
                 if qty <= 0:  # skip zero AND negative (settlement offsets from sold CNC)
                     continue
                 symbol = p.get('tradingsymbol')
+                if symbol in already_loaded:
+                    continue
                 avg_price = p.get('average_price', 0)
                 # Estimate SL and target from swing parameters
                 if config.TRADING_MODE == "swing":
@@ -287,6 +309,7 @@ class OrderExecutor:
                     trailing_stop=round(sl, 2) if config.TRAILING_STOP_ENABLED else None
                 )
                 self.risk_manager.positions.append(position)
+                already_loaded.add(symbol)
                 logger.info(
                     f"Loaded existing position: {symbol} {qty} @ {avg_price} "
                     f"entry={entry_time.date()} "
@@ -535,6 +558,9 @@ class OrderExecutor:
             self.executed_orders.append(execution_result)
             logger.info(f"Signal executed successfully: {signal['symbol']}")
 
+            # Trigger reconciliation for BUY
+            self.reconciliation_engine.trigger('BUY_executed')
+
             # Auto-log BUY to trade journal (only if order_id confirmed)
             if not order_result.get('order_id'):
                 return execution_result
@@ -551,16 +577,28 @@ class OrderExecutor:
                     'TATAMOTORS':'Auto','BHARTIARTL':'Telecom',
                 }
                 _rm = signal.get('_reentry_meta') or {}
+                _trade_score = float(signal.get('trade_score') or signal.get('overall_score') or 0)
+                _market_regime = signal.get('market_regime') or signal.get('regime')
+                if not isinstance(_market_regime, str) or not _market_regime:
+                    _market_regime = 'UNKNOWN'
+                _sector = _SECTOR_MAP.get(signal['symbol'], '')
+                if not _sector:
+                    _sector = research.get('sector', '')
+                if not _sector:
+                    _sector = 'Other'
+                _sector_momentum = float(research.get('sector_momentum', 0) or 0)
+                _sector_strength = 'Strong' if _sector_momentum > 0 else 'Weak' if _sector_momentum < 0 else 'Neutral'
                 self.journal.log_entry(
                     symbol=signal['symbol'],
                     action='BUY',
                     price=float(signal.get('current_price') or signal.get('entry_price') or 0),
                     quantity=signal.get('position_size', 1),
+                    order_id=order_result.get('order_id') or None,
                     buy_reason=signal.get('reasoning', ''),
-                    trade_score=signal.get('trade_score', 0),
+                    trade_score=_trade_score,
                     score_components=signal.get('score_components', {}),
-                    market_regime=signal.get('market_regime', 'UNKNOWN'),
-                    sector=_SECTOR_MAP.get(signal['symbol'], 'Other'),
+                    market_regime=_market_regime,
+                    sector=f"{_sector} ({_sector_strength})",
                     sentiment=senti.get('sentiment', 'NEUTRAL'),
                     sentiment_score=senti.get('score', 0.0),
                     news_count=senti.get('news_count', 0),
@@ -592,6 +630,91 @@ class OrderExecutor:
                 'signal': signal
             }
     
+    def _log_sell_decision(
+        self,
+        origin: str,
+        signal: Dict,
+        position: Position,
+        validated: bool,
+        validation_message: str,
+    ) -> None:
+        """Structured SELL decision audit log."""
+        hours_held = (
+            (datetime.now() - position.entry_time).total_seconds() / 3600
+            if position.entry_time else 0.0
+        )
+        effective_sl = max(
+            position.stop_loss or 0,
+            (position.trailing_stop or 0) if position.trailing_stop else 0,
+        )
+        logger.info(
+            f"SELL_PIPELINE | origin={origin} | symbol={signal.get('symbol')} "
+            f"| action=SELL | validated={validated} | reason='{signal.get('reasoning','')}' "
+            f"| validation_message='{validation_message}' "
+            f"| current_price={signal.get('current_price')} "
+            f"| entry={position.entry_price} | stop_loss={position.stop_loss} "
+            f"| trailing_stop={position.trailing_stop} | target={position.target} "
+            f"| effective_sl={effective_sl} | quantity={position.quantity} "
+            f"| hours_held={hours_held:.3f}"
+        )
+
+    def _validate_swing_sell(self, signal: Dict, position: Position) -> Tuple[bool, str]:
+        """Final swing-mode SELL validation: block unless a real exit trigger is met."""
+        if config.TRADING_MODE != "swing":
+            return True, "non-swing mode: validation skipped"
+
+        current_price = float(signal.get('current_price', 0) or 0)
+        reason = (signal.get('reasoning', '') or '').lower()
+        now = datetime.now()
+        hours_held = (
+            (now - position.entry_time).total_seconds() / 3600
+            if position.entry_time else 0.0
+        )
+
+        # 1. Manual / circuit breaker / EOD / rebalance / AI sell: trust the orchestrator tag
+        if any(k in reason for k in ('manual', 'rebalance', 'end of day', 'circuit breaker')):
+            return True, f"swing manual/administrative exit allowed: '{reason}'"
+        if signal.get('_ai_sell_decision'):
+            return True, f"swing AI sell decision allowed: '{reason}'"
+        if signal.get('_circuit_breaker'):
+            return True, "swing circuit breaker exit allowed"
+
+        # 2. Target hit
+        if position.target and current_price >= position.target:
+            return True, f"target hit: {current_price} >= {position.target}"
+
+        # 3. Stop loss / trailing stop
+        effective_sl = max(
+            position.stop_loss or 0,
+            (position.trailing_stop or 0) if position.trailing_stop else 0,
+        )
+        if current_price <= effective_sl:
+            if position.trailing_stop and current_price <= position.trailing_stop:
+                return True, f"trailing stop hit: {current_price} <= {position.trailing_stop}"
+            return True, f"stop loss hit: {current_price} <= {position.stop_loss}"
+
+        # 4. Max hold days
+        if position.planned_exit_date and now >= position.planned_exit_date:
+            return True, f"max holding days reached: {now} >= {position.planned_exit_date}"
+
+        # 5. Smart exit
+        if signal.get('_smart_exit'):
+            return True, f"smart exit allowed: '{reason}'"
+
+        # 6. Minimum holding period for any other SELL in swing mode
+        if hours_held < config.MIN_HOLD_HOURS:
+            return False, (
+                f"swing SELL blocked: held {hours_held:.2f}h < minimum {config.MIN_HOLD_HOURS}h "
+                f"and no real exit trigger (target/SL/trail/smart/AI/manual/rebalance/EOD/circuit)"
+            )
+
+        # If it reached the minimum hold but has no valid reason, still block in swing mode
+        return False, (
+            f"swing SELL blocked: no valid swing exit trigger for reason='{reason}' "
+            f"(price {current_price} above SL {position.stop_loss}, trail {position.trailing_stop}, "
+            f"target {position.target})"
+        )
+
     def _execute_sell(self, signal: Dict) -> Dict:
         """Execute a SELL signal for an open/partial position with minimum-profit guard."""
         sym = signal['symbol']
@@ -607,14 +730,16 @@ class OrderExecutor:
             logger.warning(f"SELL {sym}: no open/partial position found")
             return {'success': False, 'reason': 'No open position', 'signal': signal}
 
-        # Minimum holding period guard (configurable via MIN_HOLD_HOURS)
-        if not any(k in reason.lower() for k in ('stop', 'target', 'max hold', 'end of day', 'circuit breaker')):
-            hours_held = (datetime.now() - position.entry_time).total_seconds() / 3600
-            if hours_held < config.MIN_HOLD_HOURS:
-                logger.warning(
-                    f"SELL {sym} blocked: held {hours_held:.2f}h < minimum {config.MIN_HOLD_HOURS}h"
-                )
-                return {'success': False, 'reason': 'Minimum holding period not met', 'signal': signal}
+        # Ensure the signal always carries the intended quantity (defensive for downstream code)
+        signal.setdefault('position_size', position.quantity)
+
+        # Final swing-mode SELL validation: hard last-line-of-defense
+        origin = signal.get('_origin', 'unknown')
+        validated, validation_message = self._validate_swing_sell(signal, position)
+        self._log_sell_decision(origin, signal, position, validated, validation_message)
+        if not validated:
+            logger.warning(f"SELL {sym} REJECTED by swing validation: {validation_message}")
+            return {'success': False, 'reason': validation_message, 'signal': signal}
 
         # Minimum Profit Rule: sell below entry only when AI explicitly allows it or it is a stop-loss
         price_below_entry = current_price < position.entry_price
@@ -639,17 +764,23 @@ class OrderExecutor:
             return {'success': False, 'error': order_result.get('error'), 'signal': signal}
 
         self._clear_sell_pending(sym)
-        exit_signal = self.risk_manager.close_position(sym, current_price, reason, position_size)
+        sell_qty = int(signal.get('position_size', position.quantity) or 0)
+        try:
+            exit_signal = self.risk_manager.close_position(sym, current_price, reason, sell_qty)
+        except Exception as ce:
+            logger.exception(f"Risk manager close_position failed for {sym} (order already placed): {ce}")
+            exit_signal = None
         try:
             self.journal.log_entry(
                 symbol=sym,
                 action='SELL',
                 price=current_price,
-                quantity=signal.get('position_size', position.quantity),
+                quantity=sell_qty,
+                order_id=order_result.get('order_id') or None,
                 exit_reason=reason,
                 entry_price=position.entry_price,
                 entry_date=position.entry_time.isoformat() if position.entry_time else '',
-                gross_pnl=(current_price - position.entry_price) * signal.get('position_size', position.quantity),
+                gross_pnl=(current_price - position.entry_price) * sell_qty,
                 net_pnl=exit_signal['net_pnl'] if exit_signal else 0,
                 charges=exit_signal['charges'] if exit_signal else 0,
             )
@@ -657,6 +788,10 @@ class OrderExecutor:
             logger.warning(f"Journal SELL log failed: {je}")
 
         logger.info(f"SELL executed: {sym} @ ₹{current_price:.2f} Reason: {reason}")
+
+        # Trigger reconciliation for SELL
+        self.reconciliation_engine.trigger('SELL_executed')
+
         return {
             'success': True,
             'order_id': order_result.get('order_id'),
@@ -666,15 +801,14 @@ class OrderExecutor:
 
     def monitor_positions(self) -> List[Dict]:
         """
-        Monitor open positions and execute stop loss / target exits
-        
-        Returns:
-            List of exit signals executed
+        Monitor open positions using the enterprise trade lifecycle manager.
+        Executes trailing stops, partial scale-outs, time/volatility/gap exits
+        and scale-in opportunities.
         """
         positions = self.risk_manager.positions
         if not positions:
             return []
-        
+
         # Get current prices — batch LTP (1 API call) instead of N sequential calls
         symbols = [p.symbol for p in positions if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}]
         current_prices = {}
@@ -700,54 +834,147 @@ class OrderExecutor:
                 price = self.market_data.get_realtime_price(symbol)
                 if price:
                     current_prices[symbol] = price
-        
-        # Check positions for exit signals
-        exit_signals = self.risk_manager.check_positions(current_prices)
-        
-        # Execute exit signals
-        executed_exits = []
-        for exit_signal in exit_signals:
-            # Create sell signal
-            sell_signal = {
-                'symbol': exit_signal['symbol'],
-                'action': exit_signal['action'],
-                'current_price': exit_signal['price'],
-                'position_size': exit_signal['quantity'],
-                'investment_amount': exit_signal['price'] * exit_signal['quantity'],
-                'stop_loss': 0,
-                'target': 0,
-                'risk_reward_ratio': 0,
-                'confidence': 1.0,
-                'overall_score': 0,
-                'reasoning': exit_signal['reason'],
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            if not self._should_attempt_sell(exit_signal['symbol']):
-                queued = self._pending_sells[exit_signal['symbol']].get('next_retry') or 'manual'
-                logger.info(f"SELL for {exit_signal['symbol']} queued until {queued}")
-                continue
 
-            # Execute sell order through the canonical signal pipeline
-            order_result = self.execute_signal(sell_signal)
+        # Lifecycle manager produces all actions (HOLD, SELL, SCALE_IN)
+        actions = self.lifecycle_manager.process_positions(positions, current_prices)
 
-            if order_result['success']:
-                executed_exits.append({
-                    'success': True,
-                    'order_id': order_result.get('order_id'),
-                    'exit_signal': order_result.get('exit_signal', exit_signal),
+        executed = []
+        for action in actions:
+            if action.get('action') == 'SELL':
+                sym = action['symbol']
+                if not self._should_attempt_sell(sym):
+                    queued = self._pending_sells.get(sym, {}).get('next_retry') or 'manual'
+                    logger.info(f"SELL for {sym} queued until {queued}")
+                    continue
+
+                sell_signal = {
+                    'symbol': sym,
+                    'action': 'SELL',
+                    'current_price': action['price'],
+                    'position_size': action['quantity'],
+                    'investment_amount': action['price'] * action['quantity'],
+                    'stop_loss': 0,
+                    'target': 0,
+                    'risk_reward_ratio': 0,
+                    'confidence': 1.0,
+                    'overall_score': 0,
+                    'reasoning': action['reason'],
+                    '_lifecycle': True,
+                    '_origin': 'order_executor.monitor_positions',
                     'timestamp': datetime.now().isoformat()
-                })
-                logger.info(f"Exit executed for {exit_signal['symbol']}: {exit_signal['reason']}")
-                try:
-                    self.telegram.exit(exit_signal, order_result.get('order_id', ''))
-                except Exception as te:
-                    logger.error(f"Telegram exit alert error: {te}")
+                }
+                logger.info(
+                    f"SELL_PIPELINE | origin=order_executor.monitor_positions "
+                    f"| symbol={sym} | proposed_price={action['price']} | reason='{action['reason']}'"
+                )
+                order_result = self.execute_signal(sell_signal)
+                if order_result['success']:
+                    executed.append({
+                        'success': True,
+                        'order_id': order_result.get('order_id'),
+                        'exit_signal': order_result.get('exit_signal', action),
+                        'lifecycle_state': action.get('lifecycle_state'),
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    logger.info(f"Lifecycle exit executed for {sym}: {action['reason']}")
+                    try:
+                        self.telegram.exit(action, order_result.get('order_id', ''))
+                    except Exception as te:
+                        logger.error(f"Telegram exit alert error: {te}")
+                else:
+                    self._record_sell_failure(sym, order_result, action['reason'])
+                    logger.error(f"Lifecycle exit failed for {sym}: {order_result}")
+            elif action.get('action') == 'SCALE_IN':
+                order_result = self.execute_scale_in(action)
+                if order_result['success']:
+                    executed.append({
+                        'success': True,
+                        'order_id': order_result.get('order_id'),
+                        'scale_in': action,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    logger.info(f"Scale-in executed for {action['symbol']}: +{action['quantity']}")
+                else:
+                    logger.warning(f"Scale-in failed for {action['symbol']}: {order_result}")
             else:
-                self._record_sell_failure(exit_signal['symbol'], order_result, exit_signal['reason'])
-                logger.error(f"Exit execution failed for {exit_signal['symbol']}")
-        
-        return executed_exits
+                # HOLD action with lifecycle metadata for dashboard
+                executed.append(action)
+
+        # Persist updated stops / targets
+        self.risk_manager.save_positions()
+        return executed
+
+    def execute_scale_in(self, action: Dict) -> Dict:
+        """Place a scale-in BUY for an existing position."""
+        sym = action['symbol']
+        qty = action.get('quantity', 0)
+        price = action.get('price', 0.0)
+        if qty <= 0 or price <= 0:
+            return {'success': False, 'reason': 'Invalid scale-in qty/price'}
+
+        buy_signal = {
+            'symbol': sym,
+            'action': 'BUY',
+            'current_price': price,
+            'position_size': qty,
+            'investment_amount': price * qty,
+            'stop_loss': action.get('stop_loss', price * 0.95),
+            'target': action.get('target', price * 1.05),
+            'atr': action.get('atr', 0.0),
+            'risk_reward_ratio': 0,
+            'confidence': 1.0,
+            'overall_score': 0,
+            'reasoning': action.get('reason', 'Scale-in'),
+            '_scale_in': True,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        order_result = self.broker.place_order(buy_signal)
+        if not order_result['success']:
+            return {'success': False, 'error': order_result.get('error')}
+
+        # Update position with new capital
+        self.risk_manager.add_to_position(
+            sym,
+            qty,
+            price,
+            buy_signal['stop_loss'],
+            buy_signal['target'],
+            buy_signal['atr']
+        )
+
+        # Log in journal
+        try:
+            position = next(
+                (p for p in self.risk_manager.positions if p.symbol == sym and p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}),
+                None
+            )
+            self.journal.log_entry(
+                symbol=sym,
+                action='BUY',
+                price=price,
+                quantity=qty,
+                order_id=order_result.get('order_id') or None,
+                exit_reason='Scale-in',
+                entry_price=position.entry_price if position else price,
+                entry_date=position.entry_time.isoformat() if position and position.entry_time else '',
+                gross_pnl=0,
+                net_pnl=0,
+                charges=0,
+            )
+        except Exception as je:
+            logger.warning(f"Journal scale-in log failed: {je}")
+
+        try:
+            self.reconciliation_engine.trigger('BUY_executed')
+        except Exception:
+            pass
+
+        return {
+            'success': True,
+            'order_id': order_result.get('order_id'),
+            'paper_trading': order_result.get('paper_trading', True)
+        }
     
     def close_all_positions(self, reason: str = 'End of day close') -> List[Dict]:
         """

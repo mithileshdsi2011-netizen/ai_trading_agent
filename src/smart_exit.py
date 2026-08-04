@@ -159,6 +159,12 @@ class SmartExitAI:
             f"SmartExit triggered for {symbol}: {reason} "
             f"Price=₹{current_price:.2f} P&L=₹{pnl:.2f} ({pnl_pct:+.2f}%)"
         )
+        logger.info(
+            f"SELL_PIPELINE | origin=smart_exit.check_position "
+            f"| symbol={symbol} | current_price={current_price} "
+            f"| entry={position.entry_price} | pnl_pct={pnl_pct:+.2f}% "
+            f"| reason='{reason}'"
+        )
 
         return {
             'symbol':          symbol,

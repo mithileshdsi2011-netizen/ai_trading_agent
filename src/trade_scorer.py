@@ -46,16 +46,16 @@ TREND_POINTS = {
 }
 
 # ── Score thresholds ───────────────────────────────────────────────────────────
-SCORE_FULL     = 80   # 100% position
-SCORE_75PCT    = 75   # 75% position
-SCORE_50PCT    = 70   # 50% position
-SCORE_25PCT    = 65   # 20–25% position
-SCORE_SKIP     = 60   # Below 60 → skip
+SCORE_FULL     = 75   # 100% position
+SCORE_75PCT    = 70   # 75% position
+SCORE_50PCT    = 65   # 50% position
+SCORE_25PCT    = 60   # 20–25% position
+SCORE_SKIP     = 45   # Below 45 → skip
 
-# Regime-adjusted skip thresholds — conservative: quality over quantity
-SCORE_SKIP_BULL      = 62   # Bull: still require solid setup
-SCORE_SKIP_SIDEWAYS  = 58   # Sideways: only clear breakouts
-SCORE_SKIP_BEAR      = 80   # Bear: almost never buy
+# Regime-adjusted skip thresholds — calibrated for swing (more opportunities)
+SCORE_SKIP_BULL      = 50   # Bull: solid setup
+SCORE_SKIP_SIDEWAYS  = 45   # Sideways: clear breakouts
+SCORE_SKIP_BEAR      = 60   # Bear: only exceptional setups
 
 
 class TradeScorer:

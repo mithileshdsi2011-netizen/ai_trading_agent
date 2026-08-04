@@ -31,3 +31,4 @@ responses==0.25.3
 # Utilities
 pytz==2024.1
 schedule==1.2.1
+nsepython
