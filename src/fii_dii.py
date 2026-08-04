@@ -109,7 +109,7 @@ class FII_DII_Engine:
 
         return {
             "timestamp": as_of or datetime.now().isoformat(),
-            "date": (as_of or date.today().isoformat())[:10],
+            "date": date.today().isoformat(),
             "fii_buy": round(fii_buy, 2),
             "fii_sell": round(fii_sell, 2),
             "dii_buy": round(dii_buy, 2),

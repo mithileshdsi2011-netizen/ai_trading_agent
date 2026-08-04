@@ -98,28 +98,22 @@ class MultiTimeframeConfirmer:
             result['aligned'] = True   # fail-open: don't block on data issues
             return result
 
-        trends = [daily_trend, hourly_trend, m15_trend]
-
-        # Strict: all three UPTREND
-        if all(t == 'UPTREND' for t in trends):
+        # Relaxed MTF: only Daily and Hourly are gating. 15m is informational.
+        # Aligned if no DOWNTREND on Daily or Hourly.
+        if daily_trend == 'UPTREND' and hourly_trend == 'UPTREND':
             result['strict']  = True
             result['aligned'] = True
-            result['reason']  = 'All 3 timeframes UPTREND ✓'
-
-        # Relaxed: no DOWNTREND in any timeframe
-        elif 'DOWNTREND' not in trends:
+            result['reason']  = f'Daily & Hourly UPTREND, 15m:{m15_trend} ✓'
+        elif 'DOWNTREND' not in [daily_trend, hourly_trend]:
             result['aligned'] = True
-            result['reason']  = f'No counter-trend (D:{daily_trend} H:{hourly_trend} 15m:{m15_trend}) ✓'
-
-        # Higher-TF daily is up but lower TFs are mixed — still allow (with warning)
+            result['reason']  = f'No DOWNTREND on D/H (D:{daily_trend} H:{hourly_trend} 15m:{m15_trend}) ✓'
         elif daily_trend == 'UPTREND' and hourly_trend != 'DOWNTREND':
             result['aligned'] = True
-            result['reason']  = f'Daily UPTREND; 15m={m15_trend} (caution) ✓'
-
+            result['reason']  = f'Daily UPTREND, H:{hourly_trend}, 15m:{m15_trend} (caution) ✓'
         else:
             result['aligned'] = False
             result['reason']  = (
-                f'Counter-trend detected: D:{daily_trend} '
+                f'Counter-trend on Daily/Hourly: D:{daily_trend} '
                 f'H:{hourly_trend} 15m:{m15_trend} ✗'
             )
 

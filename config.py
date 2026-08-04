@@ -81,7 +81,7 @@ class Config:
     # ── Capital management ────────────────────────────────────────────────────
     MAX_CAPITAL_USAGE:      float = float(_require("MAX_CAPITAL_USAGE",      "0.87"))  # 87%
     REENTRY_COOLDOWN_HOURS: float = float(_require("REENTRY_COOLDOWN_HOURS", "4.0"))
-    MIN_HOLD_HOURS:         float = float(_require("MIN_HOLD_HOURS",         "0.0"))
+    MIN_HOLD_HOURS:         float = float(_require("MIN_HOLD_HOURS",         "12.0"))
 
     # ── Trailing stop loss ────────────────────────────────────────────────────
     TRAILING_STOP_ENABLED:        bool  = _require("TRAILING_STOP_ENABLED",        "True").lower() == "true"

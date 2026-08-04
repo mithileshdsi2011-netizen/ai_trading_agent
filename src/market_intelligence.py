@@ -53,19 +53,8 @@ class MarketBreadthEngine:
         if self.universe:
             return self.universe[: self.max_symbols]
 
-        # Prefer a live dynamic universe if available
-        if self.market_data is not None:
-            try:
-                from dynamic_universe import DynamicUniverse
-
-                du = DynamicUniverse(self.market_data.kite)
-                syms = du.get_universe(top_n=self.max_symbols)
-                if syms:
-                    return syms
-            except Exception:
-                pass
-
-        # Static fallback
+        # Breadth needs a broad, stable benchmark universe — not the intraday
+        # momentum-scored candidates used for signal generation.
         try:
             from dynamic_universe import _NIFTY500_PRIORITY
 

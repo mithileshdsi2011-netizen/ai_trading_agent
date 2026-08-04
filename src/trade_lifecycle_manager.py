@@ -185,6 +185,12 @@ class TradeLifecycleManager:
             qty = position.quantity  # final leg: sell rest
         qty = min(qty, position.quantity)
 
+        reason = f"Partial profit (+{((current_price / position.entry_price) - 1) * 100:.1f}%)"
+        logger.info(
+            f"SELL_PIPELINE | origin=trade_lifecycle_manager.scale_out "
+            f"| symbol={position.symbol} | current_price={current_price} | quantity={qty} "
+            f"| reason='{reason}'"
+        )
         return {
             'symbol': position.symbol,
             'action': 'SELL',
@@ -192,8 +198,8 @@ class TradeLifecycleManager:
             'quantity': qty,
             'position_size': qty,
             'partial': True,
-            'reason': f"Scale-out {position.partial_count + 1}/3 (+{((current_price / position.entry_price) - 1) * 100:.1f}%)",
-            'status': PositionStatus.PARTIAL.value if qty < position.quantity else PositionStatus.CLOSED.value,
+            'reason': reason,
+            'status': PositionStatus.PARTIAL.value,
             'timestamp': datetime.now().isoformat()
         }
 
@@ -205,6 +211,11 @@ class TradeLifecycleManager:
             return None
         gap = (prev_close - current_price) / prev_close
         if gap > _TRAIL_PCT:
+            logger.info(
+                f"SELL_PIPELINE | origin=trade_lifecycle_manager.gap_exit "
+                f"| symbol={position.symbol} | current_price={current_price} "
+                f"| gap={gap:.3%} | reason='Gap down {gap:.1%} below prior close'"
+            )
             return {
                 'symbol': position.symbol,
                 'action': 'SELL',
@@ -222,6 +233,12 @@ class TradeLifecycleManager:
         vol_20 = ind.get('vol_20', 0)
         ema20 = ind.get('ema20', 0)
         if vol_20 > 0 and vol_5 < vol_20 * 0.6 and current_price < ema20:
+            logger.info(
+                f"SELL_PIPELINE | origin=trade_lifecycle_manager.volatility_exit "
+                f"| symbol={position.symbol} | current_price={current_price} "
+                f"| ema20={ind.get('ema20')} | vol_5={ind.get('vol_5')} | vol_20={ind.get('vol_20')} "
+                f"| reason='Volatility collapse + below EMA'"
+            )
             return {
                 'symbol': position.symbol,
                 'action': 'SELL',
@@ -242,6 +259,12 @@ class TradeLifecycleManager:
         # Only exit if momentum has vanished (no longer near high)
         if current_price >= position.highest_price * 0.97:
             return None  # still running, let trail take over
+        logger.info(
+            f"SELL_PIPELINE | origin=trade_lifecycle_manager.time_exit "
+            f"| symbol={position.symbol} | current_price={current_price} "
+            f"| planned_exit_date={position.planned_exit_date} "
+            f"| reason='Time exit (max hold {config.SWING_MAX_HOLD_DAYS}d)'"
+        )
         return {
             'symbol': position.symbol,
             'action': 'SELL',
@@ -259,6 +282,12 @@ class TradeLifecycleManager:
             reason = 'Stop loss hit'
             if position.trailing_stop and current_price <= position.trailing_stop and current_price > position.stop_loss:
                 reason = f"ATR trailing stop (₹{position.trailing_stop:.2f})"
+            logger.info(
+                f"SELL_PIPELINE | origin=trade_lifecycle_manager.stop_loss_exit "
+                f"| symbol={position.symbol} | current_price={current_price} "
+                f"| stop_loss={position.stop_loss} | trailing_stop={position.trailing_stop} "
+                f"| reason='{reason}'"
+            )
             return {
                 'symbol': position.symbol,
                 'action': 'SELL',
@@ -330,33 +359,133 @@ class TradeLifecycleManager:
 
         return actions
 
-    def _lifecycle_state(self, position, current_price: float) -> Dict:
-        """Expose current lifecycle metrics for one position."""
+    def _lifecycle_state(self, position, current_price: float, ind: Dict = None) -> Dict:
+        """Expose current lifecycle metrics + active triggers for one position."""
+        ind = ind or {}
         entry = position.entry_price
-        sl = max(position.stop_loss, position.trailing_stop or 0)
-        risk = entry - position.stop_loss if entry > position.stop_loss else 0.001
+        first = position.first_entry_price or entry
+        sl_initial = position.stop_loss
+        sl_trail = position.trailing_stop or 0
+        effective_sl = max(sl_initial, sl_trail)
+        risk = max(entry - sl_initial, 0.001)
         rr = (current_price - entry) / risk if current_price > 0 else 0.0
         days = (datetime.now() - position.entry_time).days
+        highest = position.highest_price or current_price
+        drawdown = (highest - current_price) / highest * 100 if highest > 0 else 0.0
+
+        # Recommendations in priority order
+        recommendation = 'HOLD'
+        reason = f'Price ₹{current_price:.2f} is between effective SL ₹{effective_sl:.2f} and target ₹{position.target:.2f}.'
+        if current_price <= effective_sl:
+            recommendation = 'SELL'
+            reason = f'Stop-loss hit/approached at ₹{effective_sl:.2f}. Exit the position.'
+        elif sl_initial < entry and current_price >= (2 * entry - sl_initial):
+            if not (position.stop_loss >= entry):
+                recommendation = 'MOVE SL TO BREAK-EVEN'
+                reason = f'Price reached ₹{current_price:.2f}. Move SL from ₹{sl_initial:.2f} up to cost ₹{entry:.2f}.'
+        elif (position.partial_count < 3 and position.atr_at_entry > 0
+              and (current_price - entry) >= _SCALE_OUT_ATR_MULTIPLES[position.partial_count] * position.atr_at_entry):
+            recommendation = 'PARTIAL EXIT'
+            pidx = position.partial_count
+            reason = f'Scale-out {pidx + 1} triggered at ₹{current_price:.2f} (+{_SCALE_OUT_ATR_MULTIPLES[pidx]}x ATR).'
+
+        # Time / planned exit
+        planned_days = None
+        if position.planned_exit_date:
+            planned_days = max(0, (position.planned_exit_date - datetime.now()).days)
+
+        # Active triggers grid
+        atr_now = ind.get('atr', position.atr_at_entry or 0)
+        ema20 = ind.get('ema20', 0)
+        swing_low = ind.get('swing_low', 0)
+        prev_close = ind.get('prev_close', 0)
+
+        triggers = []
+        # Stop loss
+        triggers.append({'name': 'STOP', 'level': effective_sl,
+                         'status': 'TRIGGERED' if current_price <= effective_sl else 'monitoring'})
+        # Break-even
+        be_level = entry
+        if sl_initial >= entry:
+            be_status = 'locked'
+        elif current_price >= (2 * entry - sl_initial):
+            be_status = 'ready'
+        else:
+            be_status = 'pending'
+        triggers.append({'name': 'BREAK-EVEN', 'level': be_level, 'status': be_status})
+        # ATR trail
+        if atr_now > 0:
+            atr_level = round(highest - _TRAIL_ATR_MULTIPLIER * atr_now, 2)
+            triggers.append({'name': 'ATR', 'level': atr_level,
+                             'status': 'TRIGGERED' if current_price <= atr_level else 'monitoring'})
+        # 5% trail
+        pct_level = round(highest * (1 - _TRAIL_PCT), 2)
+        triggers.append({'name': 'PCT', 'level': pct_level,
+                         'status': 'TRIGGERED' if current_price <= pct_level else 'monitoring'})
+        # EMA20
+        if ema20 > 0:
+            triggers.append({'name': 'EMA', 'level': round(ema20, 2),
+                             'status': 'TRIGGERED' if current_price <= ema20 else 'monitoring'})
+        # Swing low
+        if swing_low > 0:
+            sl_level = round(swing_low * 0.99, 2)
+            triggers.append({'name': 'SWING LOW', 'level': sl_level,
+                             'status': 'TRIGGERED' if current_price <= sl_level else 'monitoring'})
+        # Gap
+        if prev_close > 0:
+            gap_pct = (current_price - prev_close) / prev_close * 100
+            gap_status = 'TRIGGERED' if gap_pct < -1.5 else ('watch' if gap_pct < -1.0 else 'monitoring')
+            triggers.append({'name': 'GAP', 'level': round(prev_close, 2), 'status': gap_status})
+        # Target
+        if position.target > 0:
+            triggers.append({'name': 'TARGET', 'level': round(position.target, 2),
+                             'status': 'REACHED' if current_price >= position.target * 0.98 else 'pending'})
+        # Time
+        if planned_days is not None:
+            t_status = 'due' if planned_days <= 1 else 'pending'
+            triggers.append({'name': 'TIME EXIT', 'level': planned_days, 'status': t_status})
+
+        # Lifecycle progress: Break-even, Partial 1, Partial 2, Final Exit
+        partial_progress = [
+            bool(sl_initial >= entry),
+            bool(position.partial_count >= 1),
+            bool(position.partial_count >= 2),
+            bool(position.partial_count >= 3 or (position.target > 0 and current_price >= position.target))
+        ]
+
         return {
             'symbol': position.symbol,
-            'entry': round(entry, 2),
+            'first_entry': round(first, 2),
+            'average_price': round(entry, 2),
             'current_price': round(current_price, 2),
             'quantity': position.quantity,
             'initial_quantity': position.initial_quantity,
+            'highest_price': round(highest, 2),
+            'drawdown_pct': round(drawdown, 2),
             'current_rr': round(rr, 2),
             'atr_at_entry': round(position.atr_at_entry, 2),
-            'trailing_sl': position.trailing_stop,
-            'effective_sl': round(sl, 2),
-            'break_even_hit': position.stop_loss >= position.entry_price,
+            'initial_sl': round(sl_initial, 2),
+            'trailing_sl': round(sl_trail, 2) if sl_trail > 0 else None,
+            'effective_sl': round(effective_sl, 2),
+            'target': round(position.target, 2),
+            'next_target_level': round(position.target, 2),
+            'break_even_hit': bool(sl_initial >= entry),
             'partial_count': position.partial_count,
+            'partial_progress': partial_progress,
             'scale_in_qty': position.scale_in_qty,
             'days_held': days,
-            'next_target_level': round(position.target, 2),
+            'planned_exit_days': planned_days,
+            'recommendation': recommendation,
+            'reason': reason,
+            'active_triggers': triggers,
         }
 
     def get_lifecycle_summary(self, positions, current_prices: Dict[str, float]) -> List[Dict]:
         """Return non-mutating lifecycle summary for every open position."""
-        return [
-            self._lifecycle_state(p, current_prices.get(p.symbol, p.entry_price))
-            for p in positions if p.status in (PositionStatus.OPEN, PositionStatus.PARTIAL)
-        ]
+        summary = []
+        for p in positions:
+            if p.status in (PositionStatus.OPEN, PositionStatus.PARTIAL):
+                current = current_prices.get(p.symbol, p.entry_price)
+                ind = self._get_indicators(p.symbol)
+                summary.append(self._lifecycle_state(p, current, ind))
+        return summary

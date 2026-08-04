@@ -32,7 +32,7 @@ class GlobalMarketMonitor:
         "NASDAQ": "^IXIC",
         "Dow Jones": "^DJI",
         "S&P500": "^GSPC",
-        "SGX Nifty": "NIFTY",
+        "SGX Nifty": "^NSEI",
         "Brent": "BZ=F",
         "Gold": "GC=F",
         "USDINR": "INR=X",
@@ -83,6 +83,25 @@ class GlobalMarketMonitor:
         except Exception:
             return None
 
+    def _close_series(self, df: pd.DataFrame) -> Optional[pd.Series]:
+        """Return a float close price series from a yfinance/market data DataFrame."""
+        for pattern in ("Close", "Adj Close", "adj close", "close"):
+            for col in df.columns:
+                if pattern.lower() in str(col).lower():
+                    s = df[col]
+                    if isinstance(s, pd.DataFrame):
+                        s = s.iloc[:, 0]
+                    if isinstance(s, pd.Series) and s.dtype.kind in "fi" and len(s) >= 2:
+                        return s.astype(float).dropna()
+        # Last resort: use the first numeric column
+        for col in df.columns:
+            s = df[col]
+            if isinstance(s, pd.DataFrame):
+                s = s.iloc[:, 0]
+            if isinstance(s, pd.Series) and s.dtype.kind in "fi" and len(s) >= 2:
+                return s.astype(float).dropna()
+        return None
+
     def _fetch_returns(self, name: str, symbol: str) -> Optional[Dict[str, float]]:
         """Return 1d and 5d (or period) returns for a symbol."""
         # Try market_data first if it exposes global data (do not yfinance-fallback if configured)
@@ -90,8 +109,9 @@ class GlobalMarketMonitor:
             try:
                 df = self.market_data.get_global_data(name, symbol)
                 if df is not None and not df.empty and len(df) >= 2:
-                    close = df["Close"].astype(float).dropna()
-                    return self._returns_from_series(close)
+                    close = self._close_series(df)
+                    if close is not None and len(close) >= 2:
+                        return self._returns_from_series(close)
             except Exception:
                 pass
             return None
@@ -99,8 +119,9 @@ class GlobalMarketMonitor:
         # Fallback to yfinance
         df = self.fetch_yf(symbol)
         if df is not None and not df.empty and len(df) >= 2:
-            close = df["Close"].astype(float).dropna()
-            return self._returns_from_series(close)
+            close = self._close_series(df)
+            if close is not None and len(close) >= 2:
+                return self._returns_from_series(close)
 
         return None
 

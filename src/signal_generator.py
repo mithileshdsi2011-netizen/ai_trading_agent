@@ -104,7 +104,7 @@ class SignalGenerator:
         )
 
         # Determine action from the master decision engine
-        action = 'BUY' if ai_scores['action'] == 'BUY' else 'HOLD'
+        action = ai_scores['action'] if ai_scores['action'] in ('BUY', 'SELL') else 'HOLD'
         
         signal = {
             'symbol': symbol,
@@ -197,8 +197,10 @@ class SignalGenerator:
         
         if recommendation in ['BUY', 'STRONG_BUY']:
             # For long positions - use percentage-based SL for consistent R:R
-            # Support levels are often too tight for intraday, causing poor R:R
+            # but never place the stop below the identified support level.
             stop_loss = current_price * (1 - sl_pct)
+            if support > 0:
+                stop_loss = max(stop_loss, support)
 
             # Use resistance if it provides better upside than percentage target
             pct_target = current_price * (1 + tgt_pct)

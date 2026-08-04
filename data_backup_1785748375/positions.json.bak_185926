@@ -1,0 +1,33 @@
+{
+  "date": "2026-07-27",
+  "daily_pnl": -869.71,
+  "daily_blacklist": [
+    "TEST_TRAIL",
+    "SIM_SL",
+    "TEST1",
+    "BPL",
+    "TEST_BLACKLIST",
+    "SIM_LARGE_LOSS"
+  ],
+  "positions": [
+    {
+      "symbol": "TEST_EXISTING",
+      "entry_price": 1000,
+      "quantity": 10,
+      "stop_loss": 950,
+      "target": 1200,
+      "entry_time": "2026-07-27T14:18:52.512418",
+      "planned_exit_date": null,
+      "product_type": "MIS",
+      "highest_price": 0.0,
+      "trailing_stop": null,
+      "atr_at_entry": 0.0,
+      "partial_booked": false,
+      "partial_qty": 0,
+      "status": "OPEN",
+      "pnl": 0.0,
+      "charges": 0.0,
+      "net_pnl": 0.0
+    }
+  ]
+}

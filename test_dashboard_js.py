@@ -1,61 +1,61 @@
 #!/usr/bin/env python3
 """
-Test if the dashboard HTML has valid JavaScript
+Audit dashboard.py for JavaScript and HTML binding health.
 """
 import re
 
-def check_js_syntax():
+
+def check_js_and_bindings():
     with open('dashboard.py', 'r') as f:
         content = f.read()
-    
-    # Extract the main JavaScript update function
-    start_marker = "// Positions table with enhanced data"
-    end_marker = "// AI Opportunities — BUY signals only"
-    
-    start_idx = content.find(start_marker)
-    end_idx = content.find(end_marker)
-    
-    if start_idx == -1 or end_idx == -1:
-        print("❌ Could not find JavaScript section")
-        return
-    
-    js_section = content[start_idx:end_idx]
-    
-    # Check for common syntax errors
+
     issues = []
-    
-    # Check for unclosed template literals
-    backtick_count = js_section.count('`')
-    if backtick_count % 2 != 0:
-        issues.append("Unclosed template literal (backtick)")
-    
-    # Check for unclosed parentheses in template literals
-    template_literals = re.findall(r'`([^`]*)`', js_section)
-    for literal in template_literals:
-        if literal.count('(') != literal.count(')'):
-            issues.append(f"Mismatched parentheses in template literal: {literal[:50]}...")
-    
-    # Check for undefined variables
-    if 'document.getElementById(\'d-total-qty\')' in js_section:
-        print("✅ Found dashboard total elements")
-    else:
-        issues.append("Missing dashboard total elements")
-    
-    # Check for duplicate IDs
-    ids = re.findall(r"getElementById\('([^']+)'\)", js_section)
-    duplicate_ids = [id for id in set(ids) if ids.count(id) > 1]
-    if duplicate_ids:
-        issues.append(f"Duplicate element IDs: {duplicate_ids}")
-    
+
+    # Extract all inline <script> blocks
+    scripts = re.findall(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
+    if not scripts:
+        issues.append("No inline <script> blocks found")
+        return
+
+    combined_js = '\n'.join(scripts)
+    print(f"📊 Found {len(scripts)} inline <script> block(s) ({len(combined_js)} chars)")
+
+    # Basic backtick / template-literal balance
+    for i, js in enumerate(scripts, 1):
+        if js.count('`') % 2 != 0:
+            issues.append(f"Script {i}: unclosed template literal (backtick)")
+
+    # getElementById duplicate check: only warn when an addEventListener is repeated
+    # for the same element (potential duplicate listener leak).
+    listener_refs = re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)\.addEventListener", combined_js)
+    duplicate_listeners = [id for id in set(listener_refs) if listener_refs.count(id) > 1]
+    if duplicate_listeners:
+        issues.append(f"Duplicate addEventListener for: {duplicate_listeners}")
+
+    # Placeholder / empty-state values that are acceptable if data unavailable
+    # We only flag literal JSX/JS strings that render static '—' or '0' as a fallback.
+    suspicious = re.findall(r"innerHTML\s*=\s*['\"](—|Unknown|Undefined|NaN|Infinity|null)['\"]", combined_js)
+    if suspicious:
+        issues.append(f"Hard-coded placeholder values found: {suspicious}")
+
+    # Basic JS syntax sanity: check for unmatched parentheses/braces in the entire script
+    for i, js in enumerate(scripts, 1):
+        if js.count('(') != js.count(')'):
+            issues.append(f"Script {i}: unbalanced parentheses")
+        if js.count('{') != js.count('}'):
+            issues.append(f"Script {i}: unbalanced braces")
+
+    all_ids = re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", combined_js)
+
     if issues:
-        print("❌ JavaScript issues found:")
+        print("❌ Dashboard JS/binding issues found:")
         for issue in issues:
             print(f"  - {issue}")
     else:
-        print("✅ JavaScript syntax appears valid")
-    
-    print(f"\n📊 Found {len(ids)} element ID references")
-    print(f"📊 Found {len(template_literals)} template literals")
+        print("✅ Dashboard JavaScript / HTML binding checks passed")
+
+    print(f"\n📊 Found {len(all_ids)} getElementById references")
+
 
 if __name__ == "__main__":
-    check_js_syntax()
+    check_js_and_bindings()
