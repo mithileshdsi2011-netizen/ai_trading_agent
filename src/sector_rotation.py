@@ -186,7 +186,9 @@ class SectorRotationEngine:
         sector_metrics.sort(key=lambda x: x["momentum_score"], reverse=True)
 
         top5_strong = sector_metrics[:5]
-        top5_weak = sector_metrics[-5:][::-1]  # weakest first
+        remaining = sector_metrics[5:]
+        remaining.sort(key=lambda x: x["momentum_score"])
+        top5_weak = remaining[:5]
 
         snapshot = {
             "timestamp": datetime.now().isoformat(),

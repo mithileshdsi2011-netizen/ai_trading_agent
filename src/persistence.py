@@ -629,8 +629,16 @@ class TradingStore:
             with self._conn() as conn:
                 if clear:
                     conn.execute("DELETE FROM positions")
+                # Keep the last entry per symbol to avoid duplicate open positions
+                seen = set()
+                deduped = []
+                for pos in reversed(positions):
+                    sym = pos.get("symbol")
+                    if sym not in seen:
+                        seen.add(sym)
+                        deduped.append(pos)
                 now = datetime.now().isoformat(timespec="seconds")
-                for pos in positions:
+                for pos in reversed(deduped):
                     pos = dict(pos)
                     pos.setdefault("updated_at", now)
                     pos.setdefault("created_at", now)
@@ -666,9 +674,10 @@ class TradingStore:
                 data = self._loads(row["data"])
                 data.update(updates)
                 data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                new_status = data.get("status", status)
                 conn.execute(
-                    "UPDATE positions SET data = ?, updated_at = ? WHERE id = ?",
-                    (self._dumps(data), data["updated_at"], row["id"])
+                    "UPDATE positions SET status = ?, data = ?, updated_at = ? WHERE id = ?",
+                    (new_status, self._dumps(data), data["updated_at"], row["id"])
                 )
                 return True
 
@@ -746,15 +755,26 @@ class TradingStore:
     def update_trade(self, trade_id: int, updates: Dict[str, Any]) -> bool:
         with self._lock:
             with self._conn() as conn:
-                row = conn.execute("SELECT data FROM trades WHERE id = ?", (trade_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT date, timestamp, symbol, action, status, data FROM trades WHERE id = ?",
+                    (trade_id,)
+                ).fetchone()
                 if not row:
                     return False
                 data = self._loads(row["data"])
                 data.update(updates)
                 data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                # Keep the indexed columns in sync with the JSON blob so get_trades filters are reliable
+                date_col     = data.get("date") or row["date"]
+                ts_col       = data.get("timestamp") or row["timestamp"]
+                symbol_col   = data.get("symbol") or row["symbol"]
+                action_col   = data.get("action") or row["action"]
+                status_col   = data.get("status") or row["status"]
                 conn.execute(
-                    "UPDATE trades SET data = ? WHERE id = ?",
-                    (self._dumps(data), trade_id)
+                    """UPDATE trades
+                       SET data = ?, date = ?, timestamp = ?, symbol = ?, action = ?, status = ?
+                       WHERE id = ?""",
+                    (self._dumps(data), date_col, ts_col, symbol_col, action_col, status_col, trade_id)
                 )
                 return True
 

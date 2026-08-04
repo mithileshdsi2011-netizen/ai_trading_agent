@@ -147,6 +147,7 @@ class TradeJournal:
         action: str,                        # 'BUY' | 'SELL'
         price: float,
         quantity: int,
+        order_id: str = '',
         # Context from signal / research
         buy_reason: str = '',
         trade_score: float = 0,
@@ -188,11 +189,32 @@ class TradeJournal:
 
         with TradeJournal._file_lock:
             if action == 'BUY':
+                # If an open position already exists for this symbol, merge the new buy
+                # into it (scale-in / duplicate guard) instead of creating another open row.
+                existing = self._store.get_trades(symbol=symbol, action='BUY', status='OPEN', limit=1)
+                existing = existing[0] if existing else None
+                if existing:
+                    old_qty = int(existing.get('quantity', 0) or 0)
+                    add_qty = int(quantity or 0)
+                    total_qty = old_qty + add_qty
+                    old_px = float(existing.get('entry_price', 0) or 0)
+                    new_px = float(price or 0)
+                    avg_px = round((old_px * old_qty + new_px * add_qty) / total_qty, 2) if total_qty else round(new_px, 2)
+                    updates = {
+                        'quantity': total_qty,
+                        'entry_price': avg_px,
+                        'invested': round(avg_px * total_qty, 2),
+                    }
+                    self._store.update_trade(existing['id'], updates)
+                    existing.update(updates)
+                    return existing
+
                 entry = {
                     'date':            today,
                     'timestamp':       now,
                     'symbol':          symbol,
                     'action':          'BUY',
+                    'order_id':        order_id or None,
                     'entry_price':     round(price, 2),
                     'quantity':        quantity,
                     'invested':        round(price * quantity, 2),
@@ -232,44 +254,92 @@ class TradeJournal:
                 }
                 self._store.add_trade(entry)
             else:
-                # Find the original BUY date from existing journal entries for accurate holding_days
+                # Find the original BUY timestamp for accurate holding time
                 _buy_entry = self._store.get_trades(symbol=symbol, action='BUY', status='OPEN', limit=1)
                 _buy_entry = _buy_entry[0] if _buy_entry else None
-                if _buy_entry and _buy_entry.get('date'):
+                _now = datetime.now()
+                if _buy_entry and _buy_entry.get('timestamp'):
+                    try:
+                        _buy_dt = datetime.fromisoformat(_buy_entry['timestamp'])
+                        _delta = _now - _buy_dt
+                        holding_hours = round(_delta.total_seconds() / 3600, 1)
+                        holding_days = round(_delta.total_seconds() / 86400, 2)
+                    except Exception:
+                        holding_hours = 0
+                        holding_days = 0
+                elif _buy_entry and _buy_entry.get('date'):
                     try:
                         _buy_dt = datetime.fromisoformat(_buy_entry['date'])
-                        holding_days = (datetime.now() - _buy_dt).days
+                        _delta = _now - _buy_dt
+                        holding_hours = round(_delta.total_seconds() / 3600, 1)
+                        holding_days = round(_delta.total_seconds() / 86400, 2)
                     except Exception:
+                        holding_hours = 0
                         holding_days = 0
                 elif entry_date:
                     try:
                         entry_date_dt = datetime.fromisoformat(entry_date)
-                        holding_days = (datetime.now() - entry_date_dt).days
+                        _delta = _now - entry_date_dt
+                        holding_hours = round(_delta.total_seconds() / 3600, 1)
+                        holding_days = round(_delta.total_seconds() / 86400, 2)
                     except Exception:
+                        holding_hours = 0
                         holding_days = 0
                 else:
+                    holding_hours = 0
                     holding_days = 0
+
+                # Preserve the snapshot from the BUY entry for post-trade analysis
+                _snap = _buy_entry or {}
+                _score = float(_snap.get('trade_score', 0) or trade_score)
+                _conf = float(_snap.get('confidence', 0) or confidence)
+                _regime = _snap.get('market_regime', 'UNKNOWN') or market_regime
+                _sector = _snap.get('sector', 'Unknown') or sector
+                _buy_reason_snap = _snap.get('buy_reason', '') or buy_reason
+                _sentiment = _snap.get('sentiment', 'NEUTRAL')
+                _sentiment_score = float(_snap.get('sentiment_score', 0) or 0)
+                _news_count = int(_snap.get('news_count', 0) or 0)
+                _rsi = float(_snap.get('rsi', 0) or 0)
+                _macd = float(_snap.get('macd_histogram', 0) or 0)
+                _vol = float(_snap.get('volume_ratio', 1) or 1)
+                _trend = _snap.get('trend', 'NEUTRAL')
+                _atr = float(_snap.get('atr', 0) or 0)
+                _mtf = bool(_snap.get('mtf_aligned', False))
+                _score_components = _snap.get('score_components', score_components or {})
+
                 entry = {
                     'date':           today,
                     'timestamp':      now,
                     'symbol':         symbol,
                     'action':         'SELL',
+                    'order_id':       order_id or None,
                     'entry_price':    round(entry_price, 2) if entry_price else 0,
                     'exit_price':     round(price, 2),
                     'quantity':       quantity,
                     'invested':       round(entry_price * quantity, 2) if entry_price else 0,
-                    'entry_date':     entry_date,
+                    'entry_date':     _snap.get('date', entry_date) or entry_date,
                     'exit_date':      today,
+                    'holding_hours':  holding_hours,
                     'holding_days':   holding_days,
                     'exit_reason':    exit_reason,
                     'gross_pnl':      round(gross_pnl, 2),
                     'net_pnl':        round(net_pnl, 2),
                     'charges':        round(charges, 2),
-                    'market_regime':  market_regime,
-                    'sector':         sector,
-                    'buy_reason':     buy_reason,
-                    'trade_score':    round(trade_score, 1),
-                    'confidence':     round(confidence, 3),
+                    'market_regime':  _regime,
+                    'sector':         _sector,
+                    'buy_reason':     _buy_reason_snap,
+                    'trade_score':    round(_score, 1),
+                    'score_components': _score_components,
+                    'sentiment':      _sentiment,
+                    'sentiment_score': _sentiment_score,
+                    'news_count':     _news_count,
+                    'rsi':            _rsi,
+                    'macd_histogram': _macd,
+                    'volume_ratio':   _vol,
+                    'trend':          _trend,
+                    'atr':            _atr,
+                    'mtf_aligned':    _mtf,
+                    'confidence':     round(_conf, 3),
                     'status':         'CLOSED',
                     'day_of_week':    _dow,
                     'week_number':    _week,
@@ -279,6 +349,7 @@ class TradeJournal:
                 buy_updates = {
                     'exit_price':   entry['exit_price'],
                     'exit_date':    today,
+                    'holding_hours': holding_hours,
                     'holding_days': holding_days,
                     'exit_reason':  exit_reason,
                     'gross_pnl':    entry['gross_pnl'],
@@ -339,7 +410,20 @@ class TradeJournal:
         pf          = sum(wins) / abs(sum(losses)) if losses else 0
         total_net   = sum(pnls)
         avg_score   = sum(scores) / len(scores) if scores else 0
-        avg_hold    = sum(float(t.get('holding_days') or 1) for t in trades) / total
+        avg_hold    = sum(float(t.get('holding_days') or 1) for t in trades) / total if total else 0
+
+        holds = [max(0.0, float(t.get('holding_days', 0) or 0)) for t in trades]
+        holds_h = [max(0.0, float(t.get('holding_hours', 0) or 0)) for t in trades]
+        wins_t = [t for t in trades if float(t.get('net_pnl', 0) or 0) > 0]
+        loss_t = [t for t in trades if float(t.get('net_pnl', 0) or 0) < 0]
+        holding_stats = {
+            'longest_trade_days': round(max(holds), 2) if holds else 0,
+            'longest_trade_hours': round(max(holds_h), 1) if holds_h else 0,
+            'shortest_trade_days': round(min(holds), 2) if holds else 0,
+            'shortest_trade_hours': round(min(holds_h), 1) if holds_h else 0,
+            'avg_winner_hold_days': round(sum(max(0.0, float(t.get('holding_days', 0) or 0)) for t in wins_t) / len(wins_t), 2) if wins_t else 0,
+            'avg_loser_hold_days': round(sum(max(0.0, float(t.get('holding_days', 0) or 0)) for t in loss_t) / len(loss_t), 2) if loss_t else 0,
+        }
 
         # By sector
         by_sector: Dict[str, List[float]] = {}
@@ -398,8 +482,10 @@ class TradeJournal:
         # By regime
         by_regime: Dict[str, List[float]] = {}
         for t in trades:
-            r = t.get('market_regime', 'UNKNOWN')
-            by_regime.setdefault(r, []).append(t.get('net_pnl', 0))
+            reg = t.get('market_regime', 'UNKNOWN')
+            if not isinstance(reg, str) or not reg or reg.replace('.', '', 1).isdigit():
+                reg = 'UNKNOWN'
+            by_regime.setdefault(reg, []).append(t.get('net_pnl', 0))
         regime_stats = {
             r: {
                 'trades': len(v),
@@ -450,4 +536,5 @@ class TradeJournal:
             'by_score_bucket': score_stats,
             'cumulative_pnl': cumulative,
             'recent_trades': trades[-20:][::-1],   # last 20 reversed (newest first)
+            'holding_stats': holding_stats,
         }

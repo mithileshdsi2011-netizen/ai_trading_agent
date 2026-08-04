@@ -54,9 +54,9 @@ class EnterpriseAIDecisionEngine:
 
     # Dynamic threshold defaults by regime
     DEFAULT_THRESHOLDS = {
-        'BULL': 65,
-        'SIDEWAYS': 75,
-        'BEAR': 90,
+        'BULL': 60,
+        'SIDEWAYS': 68,
+        'BEAR': 80,
     }
 
     # Sub-technical factors that can be learned
@@ -133,6 +133,11 @@ class EnterpriseAIDecisionEngine:
         fii_dii = self.fii_dii_engine.adjust_ai_score(final_score)
         final_score = round(fii_dii['adjusted_score'], 2)
 
+        # Guard: a 0 score breaks downstream sorting and should never be emitted
+        if final_score <= 0:
+            logger.warning(f"{symbol}: AI score clamped from {final_score} to 0.01")
+            final_score = 0.01
+
         # 6. Confidence
         final_confidence = self._compute_confidence(sub_scores, confidences)
 
@@ -162,6 +167,7 @@ class EnterpriseAIDecisionEngine:
         )
 
         # 9. Dynamic threshold
+        self._last_regime = market_regime
         threshold = self._dynamic_threshold(market_regime)
 
         # 10. Decision
@@ -491,9 +497,17 @@ class EnterpriseAIDecisionEngine:
         return float(self.DEFAULT_THRESHOLDS.get(regime, 70))
 
     def _determine_action(self, final_score: float, threshold: float, confidence: float) -> str:
-        if final_score >= threshold and confidence >= config.MIN_CONFIDENCE_BULL * 100:
+        # Use regime-aware confidence minimum instead of hard-coding BULL
+        regime = (str(self._last_regime).upper() if hasattr(self, '_last_regime') else 'UNKNOWN')
+        if regime == 'BULL':
+            min_conf = config.MIN_CONFIDENCE_BULL
+        elif regime == 'BEAR':
+            min_conf = config.MIN_CONFIDENCE_BEAR
+        else:
+            min_conf = config.MIN_CONFIDENCE_SIDEWAYS
+        if final_score >= threshold and confidence >= min_conf * 100:
             return 'BUY'
-        elif final_score >= threshold * 0.95 and confidence >= config.MIN_CONFIDENCE_BULL * 100:
+        elif final_score >= threshold * 0.95 and confidence >= min_conf * 100:
             return 'STRONG_HOLD'
         return 'HOLD'
 

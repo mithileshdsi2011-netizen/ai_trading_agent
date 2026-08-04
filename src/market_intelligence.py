@@ -53,19 +53,8 @@ class MarketBreadthEngine:
         if self.universe:
             return self.universe[: self.max_symbols]
 
-        # Prefer a live dynamic universe if available
-        if self.market_data is not None:
-            try:
-                from dynamic_universe import DynamicUniverse
-
-                du = DynamicUniverse(self.market_data.kite)
-                syms = du.get_universe(top_n=self.max_symbols)
-                if syms:
-                    return syms
-            except Exception:
-                pass
-
-        # Static fallback
+        # Breadth needs a broad, stable benchmark universe — not the intraday
+        # momentum-scored candidates used for signal generation.
         try:
             from dynamic_universe import _NIFTY500_PRIORITY
 
@@ -129,13 +118,55 @@ class MarketBreadthEngine:
             return self._latest
 
         results: List[Dict[str, Any]] = []
-        for sym in symbols[: self.max_symbols]:
-            m = self._fetch_symbol_metrics(sym)
-            if m is not None:
-                results.append(m)
+        symbol_list = symbols[: self.max_symbols]
+
+        # Live prices and prior close in one batch
+        live_info: Dict[str, Dict[str, Any]] = {}
+        if self.market_data:
+            try:
+                live_info = self.market_data.get_batch_stock_info(symbol_list) or {}
+            except Exception as e:
+                logger.warning(f"Batch stock info failed: {e}")
+
+        # Historical data for EMAs in one batch
+        hist_map: Dict[str, Any] = {}
+        if self.market_data:
+            try:
+                hist_map = self.market_data.get_batch_stock_data(symbol_list, period="6mo", interval="1d") or {}
+            except Exception as e:
+                logger.warning(f"Batch historical data failed: {e}")
+
+        for sym in symbol_list:
+            info = live_info.get(sym)
+            if not info:
+                continue
+            current = float(info.get("current_price", 0) or 0)
+            prev = float(info.get("day_close", 0) or 0)
+            if current <= 0 or prev <= 0:
+                continue
+
+            above20 = above50 = above200 = False
+            df = hist_map.get(sym)
+            if df is not None and not df.empty and "Close" in df.columns:
+                close = df["Close"].astype(float).dropna()
+                if len(close) >= 20:
+                    above20 = current > float(self._ema(close, 20).iloc[-1])
+                if len(close) >= 50:
+                    above50 = current > float(self._ema(close, 50).iloc[-1])
+                if len(close) >= 200:
+                    above200 = current > float(self._ema(close, 200).iloc[-1])
+
+            results.append({
+                "symbol": sym,
+                "last": current,
+                "prev": prev,
+                "above20": above20,
+                "above50": above50,
+                "above200": above200,
+            })
 
         if not results:
-            self._latest = self._empty_snapshot("No historical data returned")
+            self._latest = self._empty_snapshot("No live price data returned")
             return self._latest
 
         total = len(results)

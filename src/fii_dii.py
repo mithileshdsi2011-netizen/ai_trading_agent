@@ -45,31 +45,18 @@ class FII_DII_Engine:
 
     def fetch_nse(self) -> Optional[Dict[str, Any]]:
         """
-        Attempt to fetch FII/DII trade statistics from NSE.
+        Fetch live FII/DII trade statistics from NSE via nsepython.
         Returns None if the fetch fails or the format is unexpected.
         """
         try:
-            import requests
+            from nsepython import nse_fiidii
 
-            url = "https://www.nseindia.com/api/fiidiiTradeStatistics?segment=CM"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-                "Accept": "application/json",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-
-            session = requests.Session()
-            # Prime NSE cookies
-            session.get("https://www.nseindia.com", headers=headers, timeout=20)
-            r = session.get(url, headers=headers, timeout=20)
-            r.raise_for_status()
-            rows = r.json()
-
-            if not isinstance(rows, list):
+            df = nse_fiidii()
+            if df is None or df.empty:
                 return None
 
             fii_buy = fii_sell = dii_buy = dii_sell = 0.0
-            for row in rows:
+            for row in df.to_dict("records"):
                 cat = str(row.get("category", "")).upper().replace(" ", "")
                 buy = float(row.get("buyValue", 0) or 0)
                 sell = float(row.get("sellValue", 0) or 0)
@@ -80,10 +67,11 @@ class FII_DII_Engine:
                     dii_buy += buy
                     dii_sell += sell
 
-            return self._build_snapshot(fii_buy, fii_sell, dii_buy, dii_sell)
+            as_of = str(df.iloc[0].get("date", "")) if not df.empty else None
+            return self._build_snapshot(fii_buy, fii_sell, dii_buy, dii_sell, as_of)
 
         except Exception as e:
-            logger.debug(f"FII/DII NSE fetch failed: {e}")
+            logger.warning(f"FII/DII NSE fetch failed: {e}")
             return None
 
     def ingest(
@@ -121,7 +109,7 @@ class FII_DII_Engine:
 
         return {
             "timestamp": as_of or datetime.now().isoformat(),
-            "date": (as_of or date.today().isoformat())[:10],
+            "date": date.today().isoformat(),
             "fii_buy": round(fii_buy, 2),
             "fii_sell": round(fii_sell, 2),
             "dii_buy": round(dii_buy, 2),

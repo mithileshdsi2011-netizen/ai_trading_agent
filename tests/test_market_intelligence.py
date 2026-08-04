@@ -45,6 +45,20 @@ class FakeMarketData:
     def get_stock_data(self, symbol, period, interval):
         return self._hists.get(symbol, pd.DataFrame())
 
+    def get_batch_stock_data(self, symbols, period=None, interval=None):
+        return {s: self._hists.get(s, pd.DataFrame()).copy() for s in symbols}
+
+    def get_batch_stock_info(self, symbols):
+        info = {}
+        for s in symbols:
+            df = self._hists.get(s)
+            if df is not None and not df.empty and 'Close' in df.columns:
+                close = df['Close'].astype(float)
+                current = float(close.iloc[-1])
+                prev = float(close.iloc[-2]) if len(close) > 1 else current
+                info[s] = {'current_price': current, 'day_close': prev}
+        return info
+
 
 class TestMarketBreadthEngine(unittest.TestCase):
 

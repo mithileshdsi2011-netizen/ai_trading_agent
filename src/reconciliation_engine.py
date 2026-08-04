@@ -97,6 +97,10 @@ class Mismatch:
 class ReconciliationEngine:
     """Compare Kite API with SQLite and repair SQLite to match Kite."""
 
+    # How many reconciliation cycles a completed Kite order may be missing
+    # from the journal before we raise a CRITICAL alert.
+    MISSING_JOURNAL_RETRY_THRESHOLD = 3
+
     def __init__(self, broker=None, market_data_fetcher=None, store=None):
         self.broker = broker
         self.market_data_fetcher = market_data_fetcher
@@ -105,6 +109,8 @@ class ReconciliationEngine:
         self._stop_event = threading.Event()
         self._last_status: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
+        # Track completed Kite orders that are not yet reflected in the journal
+        self._missing_journal_retries: Dict[str, Dict[str, Any]] = {}
 
     # ── public status / health ─────────────────────────────────────────────
 
@@ -356,13 +362,53 @@ class ReconciliationEngine:
                     self._store.update_position(sym, 'OPEN', changes)
                     self._add_mismatch(mismatches, f'position_mismatch:{sym}', existing, changes, True)
 
-        # Close positions SQLite thinks are open but Kite doesn't have
+        # Do not close an open position just because it is absent from Kite
+        # positions (settlement delays can make a CNC position briefly disappear).
+        # Close only if we actually see a completed SELL order for the symbol.
+        kite_orders = _kite_orders(self.broker) if self.broker else []
+        completed_sell_symbols = {
+            ko.get('tradingsymbol', ko.get('symbol'))
+            for ko in kite_orders
+            if ko.get('transaction_type') == 'SELL' and ko.get('status') == 'COMPLETE'
+        }
+
         for sym, sp in sqlite_positions.items():
+            if sp.get('status') != 'OPEN':
+                continue
             if sym not in kite_by_sym:
-                # Verify not just in holdings (already handled in _reconcile_holdings)
-                if not sp.get('_seen_in_holdings'):
-                    self._store.update_position(sym, 'OPEN', {'status': 'CLOSED', 'exit_reason': 'reconciliation: missing in broker', 'updated_at': _now()})
-                    self._add_mismatch(mismatches, f'position_closed:{sym}', sp, {'status': 'CLOSED'}, True)
+                if sp.get('_seen_in_holdings'):
+                    logger.info(
+                        f"Position {sym}: not in Kite positions but present in holdings; "
+                        "keeping OPEN (T+1/settlement timing)"
+                    )
+                    continue
+                if sym in completed_sell_symbols:
+                    sell_order = next(
+                        (ko for ko in kite_orders
+                         if ko.get('tradingsymbol', ko.get('symbol')) == sym
+                         and ko.get('transaction_type') == 'SELL'
+                         and ko.get('status') == 'COMPLETE'),
+                        None
+                    )
+                    oid = sell_order.get('order_id') if sell_order else 'unknown'
+                    exit_reason = sp.get('exit_reason') or 'RECONCILIATION'
+                    logger.warning(
+                        f"Position {sym}: broker reports completed SELL order_id={oid}; "
+                        f"closing SQLite position with exit_reason={exit_reason}"
+                    )
+                    self._store.update_position(
+                        sym, 'OPEN',
+                        {'status': 'CLOSED', 'exit_reason': exit_reason, 'updated_at': _now()}
+                    )
+                    self._add_mismatch(
+                        mismatches, f'position_closed:{sym}', sp,
+                        {'status': 'CLOSED', 'exit_reason': exit_reason}, True
+                    )
+                else:
+                    logger.info(
+                        f"Position {sym}: not found in broker positions/holdings and "
+                        "no completed SELL order on record; keeping OPEN"
+                    )
 
         return mismatches
 
@@ -491,26 +537,78 @@ class ReconciliationEngine:
         if not self.broker:
             return mismatches
 
-        # Ensure every completed Kite order is in the journal
+        # Track completed Kite orders that are not yet reflected in the journal.
+        # We used to create synthetic SELL trades here, but that hides real
+        # order-execution / journaling bugs. Instead, we retry for several
+        # reconciliation cycles and raise a CRITICAL alert so the issue is
+        # surfaced and fixed at the source.
         kite_orders = _kite_orders(self.broker)
+        current_missing: set = set()
         for ko in kite_orders:
-            if ko.get('status') == 'COMPLETE':
-                oid = ko.get('order_id')
-                sym = ko.get('tradingsymbol', ko.get('symbol'))
-                action = ko.get('transaction_type', 'BUY')
-                if (oid, sym) not in [(t.get('order_id'), t.get('symbol')) for t in sqlite_trades]:
-                    trade = {
-                        'order_id': oid,
+            if ko.get('status') != 'COMPLETE':
+                continue
+            oid = ko.get('order_id')
+            sym = ko.get('tradingsymbol', ko.get('symbol'))
+            if not oid or not sym:
+                continue
+            # Match by (order_id, symbol). A journal row should have order_id
+            # written by order_executor after the broker confirms the fill.
+            if any(t.get('order_id') == oid and t.get('symbol') == sym for t in sqlite_trades):
+                continue
+
+            action = ko.get('transaction_type', 'BUY')
+            current_missing.add(oid)
+            self._missing_journal_retries.setdefault(oid, {
+                'symbol': sym,
+                'action': action,
+                'first_seen': _now(),
+                'count': 0,
+                'order': ko,
+            })
+            self._missing_journal_retries[oid]['count'] += 1
+            count = self._missing_journal_retries[oid]['count']
+            logger.warning(
+                f"{sym}: journal still missing for {action} order_id={oid} "
+                f"(reconciliation cycle {count}/{self.MISSING_JOURNAL_RETRY_THRESHOLD})"
+            )
+            if count >= self.MISSING_JOURNAL_RETRY_THRESHOLD:
+                logger.warning(
+                    f"{sym}: {action} order_id={oid} missing from journal for "
+                    f"{count} cycles — creating synthetic trade"
+                )
+                synthetic_trade = {
+                    'order_id': oid,
+                    'symbol': sym,
+                    'action': action,
+                    'quantity': float(ko.get('quantity', ko.get('filled_quantity', 0)) or 0),
+                    'price': float(ko.get('average_price', ko.get('price', 0)) or 0),
+                    'entry_price': float(ko.get('average_price', ko.get('price', 0)) or 0),
+                    'timestamp': ko.get('order_timestamp') or ko.get('exchange_timestamp') or _now(),
+                    'status': 'OPEN' if action == 'BUY' else 'CLOSED',
+                    'product': ko.get('product', 'CNC'),
+                    'exchange': ko.get('exchange', 'NSE'),
+                    'source': 'reconciliation',
+                }
+                self._store.add_trade(synthetic_trade)
+                self._add_mismatch(
+                    mismatches, f'journal_synthetic:{oid}',
+                    None,
+                    {
                         'symbol': sym,
                         'action': action,
-                        'quantity': _safe_float(ko.get('filled_quantity', ko.get('quantity', 0))),
-                        'entry_price': _safe_float(ko.get('average_price', ko.get('price', 0))),
-                        'timestamp': ko.get('order_timestamp') or _now(),
-                        'status': 'OPEN' if action == 'BUY' else 'CLOSED',
-                        'source': 'reconciliation'
-                    }
-                    self._store.add_trade(trade)
-                    self._add_mismatch(mismatches, f'trade_missing:{oid}', None, trade, True)
+                        'order_id': oid,
+                        'missing_for_cycles': count,
+                        'first_seen': self._missing_journal_retries[oid]['first_seen'],
+                    },
+                    True
+                )
+
+        # Clear any resolved missing-order entries
+        resolved = [oid for oid in self._missing_journal_retries if oid not in current_missing]
+        for oid in resolved:
+            sym = self._missing_journal_retries[oid]['symbol']
+            logger.info(f"{sym}: journal entry for order_id={oid} now present")
+            del self._missing_journal_retries[oid]
 
         return mismatches
 

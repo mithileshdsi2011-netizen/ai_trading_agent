@@ -4,6 +4,7 @@ Routes AI signals into sophisticated, market-aware order execution with
 slippage control, liquidity filtering, VWAP/TWAP/Iceberg slicing,
 retry logic, partial-fill management, fill verification and analytics.
 """
+import json
 import logging
 import math
 import time
@@ -38,6 +39,15 @@ STATUS_REJECTED = "REJECTED"
 STATUS_CANCELLED = "CANCELLED"
 STATUS_WAITING = "WAITING"
 
+# Permanent broker-side rejections: retrying these will not help
+PERMANENT_ERROR_CATEGORIES = {
+    'insufficient_funds',
+    'insufficient_quantity',
+    'rms_rejection',
+    'invalid_token',
+    'ip_whitelist',
+}
+
 
 class SmartExecutionEngine:
     """
@@ -69,6 +79,9 @@ class SmartExecutionEngine:
         self.retry_max = retry_max
         self.retry_backoff_seconds = retry_backoff_seconds
         self.slice_threshold = slice_threshold
+        # Symbols currently being executed; prevents duplicate BUY signals
+        # while an order (including retries and rejection handling) is in process
+        self._processing_symbols: set = set()
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -85,6 +98,11 @@ class SmartExecutionEngine:
         # 1. Validate inputs
         if quantity <= 0 or current_price <= 0:
             return self._reject(ts, symbol, side, "invalid signal")
+
+        # 1b. In-flight duplicate guard: one signal at a time per symbol
+        if symbol in self._processing_symbols:
+            return self._reject(ts, symbol, side, "duplicate signal: already processing")
+        self._processing_symbols.add(symbol)
 
         # 2. Slippage guard
         slip = self.slippage(signal_price, current_price, side)
@@ -167,6 +185,7 @@ class SmartExecutionEngine:
         self._record_slippage(symbol, current_price, order_record["avg_price"], filled_qty, side)
         self._record_metrics(order_record)
 
+        self._processing_symbols.discard(symbol)
         return {
             "ok": filled_qty == quantity,
             "order": order_record,
@@ -372,21 +391,64 @@ class SmartExecutionEngine:
         order: Dict[str, Any],
         signal: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], float, int]:
-        """Submit a slice to the broker with exponential-backoff retry."""
+        """Submit a slice to the broker.  Only retry transient failures."""
         for attempt in range(1, self.retry_max + 1):
             t0 = time.time()
             try:
                 result = self.broker_fn(order)
                 latency_ms = (time.time() - t0) * 1000
-                status = result.get("status", STATUS_REJECTED)
+                status = self._normalize_status(result, order.get("quantity", 1))
+
                 if status in (STATUS_FILLED, STATUS_PARTIAL, STATUS_CANCELLED):
                     return result, latency_ms, attempt - 1
+
+                # REJECTED / PENDING-like non-final state
+                error_category = result.get("error_category", "other") or "other"
+                broker_says_retry = result.get("retry", True)
+                is_permanent = (
+                    not broker_says_retry
+                    or error_category in PERMANENT_ERROR_CATEGORIES
+                )
+
+                if is_permanent:
+                    msg = (
+                        f"Permanent rejection for {order.get('symbol')} "
+                        f"(category={error_category}, attempt={attempt}): "
+                        f"{result.get('error', 'no details')}"
+                    )
+                    logger.warning(msg)
+                    self._record_rejection(order, result, attempt)
+                    return {
+                        "status": STATUS_REJECTED,
+                        "filled_qty": 0,
+                        "filled_value": 0.0,
+                        "error": result.get("error"),
+                        "error_category": error_category,
+                    }, latency_ms, attempt - 1
+
+                # Transient failure: record the retry, back off, and try again
+                self._record_retry(order, result, attempt)
+                logger.warning(
+                    "Transient rejection for %s (attempt %d/%d): category=%s error=%s",
+                    order.get("symbol"),
+                    attempt,
+                    self.retry_max,
+                    error_category,
+                    result.get("error"),
+                )
                 if attempt < self.retry_max:
                     time.sleep(self.retry_backoff_seconds * attempt)
+
             except Exception as e:
-                logger.warning("Broker submit error attempt %d: %s", attempt, e)
+                logger.warning("Broker submit exception attempt %d: %s", attempt, e)
+                self._record_retry(order, {"error": str(e)}, attempt)
                 if attempt < self.retry_max:
                     time.sleep(self.retry_backoff_seconds * attempt)
+
+        logger.warning(
+            "Exhausted all %d retry attempts for %s slice", self.retry_max, order.get("symbol")
+        )
+        self._record_rejection(order, {"error": "retry exhausted"}, self.retry_max)
         return {"status": STATUS_REJECTED, "filled_qty": 0, "filled_value": 0.0}, 0.0, self.retry_max
 
     def _default_broker(self, order: Dict[str, Any]) -> Dict[str, Any]:
@@ -408,6 +470,67 @@ class SmartExecutionEngine:
         if rejected_slices > 0:
             return STATUS_REJECTED
         return STATUS_PENDING
+
+    def _normalize_status(self, result: Dict[str, Any], expected_qty: int) -> str:
+        """Map a broker result dict into one of the engine status constants."""
+        explicit = result.get("status")
+        if explicit in (STATUS_FILLED, STATUS_PARTIAL, STATUS_CANCELLED, STATUS_REJECTED):
+            return explicit
+        if not result.get("success"):
+            return STATUS_REJECTED
+        filled_qty = int(result.get("filled_qty", expected_qty) or expected_qty)
+        if filled_qty <= 0:
+            return STATUS_REJECTED
+        if filled_qty < expected_qty:
+            return STATUS_PARTIAL
+        return STATUS_FILLED
+
+    def _record_rejection(self, order: Dict[str, Any], result: Dict[str, Any], attempt: int) -> None:
+        """Persist a permanent rejection to the execution queue and retry log."""
+        if self.store is None:
+            return
+        try:
+            now = datetime.now().isoformat()
+            self.store.save_execution_queue({
+                "timestamp": now,
+                "symbol": order.get("symbol", ""),
+                "side": order.get("side", ""),
+                "quantity": int(order.get("quantity", 0)),
+                "filled_qty": 0,
+                "status": STATUS_REJECTED,
+                "strategy": order.get("order_type", "MARKET"),
+                "data_json": json.dumps({
+                    "reason": "permanent broker rejection",
+                    "attempt": attempt,
+                    "error": result.get("error"),
+                    "error_category": result.get("error_category", "other"),
+                    "broker_retry": result.get("retry"),
+                }, default=str),
+            })
+            self.store.save_execution_retry({
+                "timestamp": now,
+                "order_id": result.get("order_id") or 0,
+                "attempt": attempt,
+                "status": "permanent_rejected",
+                "message": f"{result.get('error_category', 'other')}: {result.get('error')}",
+            })
+        except Exception as e:
+            logger.warning("Failed to record execution rejection: %s", e)
+
+    def _record_retry(self, order: Dict[str, Any], result: Dict[str, Any], attempt: int) -> None:
+        """Persist a transient retry attempt to the retry log."""
+        if self.store is None:
+            return
+        try:
+            self.store.save_execution_retry({
+                "timestamp": datetime.now().isoformat(),
+                "order_id": result.get("order_id") or 0,
+                "attempt": attempt,
+                "status": "transient_retry",
+                "message": f"{result.get('error_category', 'other')}: {result.get('error')}",
+            })
+        except Exception as e:
+            logger.warning("Failed to record execution retry: %s", e)
 
     def _new_order_record(
         self,
@@ -442,6 +565,7 @@ class SmartExecutionEngine:
             "remaining_qty": 0,
             "avg_price": 0.0,
         }
+        self._processing_symbols.discard(symbol)
         self._persist_order(rec)
         return {"ok": False, "order": rec, "status": STATUS_REJECTED, "reason": reason}
 
@@ -456,6 +580,7 @@ class SmartExecutionEngine:
             "remaining_qty": 0,
             "avg_price": 0.0,
         }
+        self._processing_symbols.discard(symbol)
         self._persist_order(rec)
         return {"ok": False, "order": rec, "status": STATUS_WAITING, "reason": reason}
 

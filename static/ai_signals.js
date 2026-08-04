@@ -28,32 +28,34 @@
   }
 
   function rejectionBucket(s){
-    const bd = (s.bot_decision || '').toLowerCase();
+    const rr = s.rejection_reason || s.bot_decision || '';
+    const l = rr.toLowerCase();
     const act = (s.action || '').toUpperCase();
-    if (bd.includes('will buy')) return null;
+    if (l.includes('will buy')) return null;
     if (act === 'SELL') return 'SELL Signal';
-    if (bd.includes('already held')) return 'Already Holding';
-    if (bd.includes('max positions')) return 'Capital Limit';
-    if (bd.includes('re-entry') || bd.includes('cooldown')) return 'Re-entry Cooldown';
-    if (bd.includes('score')) return 'Low Trade Score';
-    if (bd.includes('r:r')) return 'Low R:R';
-    if (bd.includes('confidence')) return 'Low Confidence';
-    if (!s.mtf_aligned && act === 'BUY') return 'MTF Failed';
+    if (l.includes('already held')) return 'Already Holding';
+    if (l.includes('max positions')) return 'Capital Limit';
+    if (l.includes('re-entry') || l.includes('cooldown')) return 'Re-entry Cooldown';
+    if (l.includes('trade score') || l.includes('score')) return 'Low Trade Score';
+    if (l.includes('r:r')) return 'Low R:R';
+    if (l.includes('confidence')) return 'Low Confidence';
+    if (l.includes('mtf') || (s.mtf_aligned === false && act === 'BUY')) return 'MTF Failed';
     return 'Other';
   }
 
   function missingFor(sym, s){
+    if (s.rejection_reason) return s.rejection_reason;
     const bd = (s.bot_decision || '').toLowerCase();
-    const score = num(s.overall_score);
+    const score = num(s.trade_score || s.overall_score);
     const conf = num(s.confidence);
     const rr = num(s.risk_reward_ratio);
     if (bd.includes('already held')) return 'Already holding this stock';
     if (bd.includes('max positions')) return 'Position slots are full';
     if (bd.includes('re-entry') || bd.includes('cooldown')) return 'Re-entry cooldown active';
-    if (bd.includes('score')) return `Need +${Math.max(1, Math.ceil(60 - score))} score`;
+    if (bd.includes('score')) return `Need +${Math.max(1, Math.ceil(60 - score))} trade score`;
     if (bd.includes('r:r')) return `Need R:R >= 1.5 (currently ${fmt2(rr)})`;
-    if (bd.includes('confidence')) return `Need +${Math.max(1, Math.ceil((0.55 - conf)*100))}% confidence`;
-    if (!s.mtf_aligned && s.action === 'BUY') return 'MTF not aligned';
+    if (bd.includes('confidence')) return `Need +${Math.max(1, Math.ceil((65 - conf)))}% confidence`;
+    if (s.mtf_aligned === false && s.action === 'BUY') return s.mtf_reason || 'MTF not aligned';
     return 'Did not pass quality gate';
   }
 
@@ -77,7 +79,7 @@
       aiBuy: all.filter(s => (s.action||'').toUpperCase() === 'BUY' && num(s.overall_score) > 0).length,
       passedScore: all.filter(s => num(s.overall_score) >= 60).length,
       passedRisk: buys.length,
-      executed: d.total_trades || d.orders?.length || 0
+      executed: d.orders_executed || d.total_trades || (d.orders || []).length || 0
     };
 
     renderCards(d, all, buys, pipeline);
@@ -209,29 +211,30 @@
   function renderClosest(all){
     const closest = all
       .filter(s => (s.action||'').toUpperCase() === 'BUY' && !(s.bot_decision||'').toLowerCase().includes('will buy'))
-      .sort((a,b) => num(b.overall_score) - num(a.overall_score))
+      .sort((a,b) => num(b.trade_score||b.overall_score) - num(a.trade_score||a.overall_score))
       .slice(0,5);
     if (!closest.length){
       setHtml('ais-closest', '<div style="color:#6b7280;font-size:13px;padding:12px 0">No stocks close to qualifying.</div>');
       return;
     }
     const html = closest.map(s=>{
-      const score = num(s.overall_score);
+      const tradeScore = num(s.trade_score || s.overall_score);
+      const aiScore = num(s.ai_score || s.overall_score);
       const conf = Math.round(num(s.confidence)*100);
       const miss = missingFor(s.symbol, s);
-      const sc = scoreColorClass(score);
+      const sc = scoreColorClass(tradeScore);
       return `
         <div class="ais-closest-card" style="border:1px solid ${sc.border};background:${sc.bg}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
             <span style="font-weight:700;color:#f9fafb;font-size:14px">${s.symbol}</span>
-            <span style="font-weight:700;color:${colors[sc.txt]}">${score}</span>
+            <span style="font-weight:700;color:${colors[sc.txt]}">${tradeScore}</span>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;color:#d1d5db;margin-bottom:6px">
-            <div>Score <b style="color:${colors[sc.txt]}">${score}</b></div>
+            <div>Trade <b style="color:${colors[sc.txt]}">${tradeScore}</b></div>
+            <div>AI <b>${aiScore}</b></div>
             <div>Conf <b>${conf}%</b></div>
-            <div>R:R <b>${fmt2(s.risk_reward_ratio)}</b></div>
           </div>
-          <div style="font-size:11px;color:#9ca3af;margin-bottom:4px">MTF: ${s.mtf_aligned?'Aligned ✓':'Not aligned'} | Sector: ${s.sector||'—'}</div>
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:4px">R:R ${fmt2(s.risk_reward_ratio)} · MTF: ${s.mtf_aligned?'Aligned ✓':'Not aligned'} · ${s.expected_hold_days||'—'}</div>
           <div style="font-size:11px;color:${colors.orange};font-weight:600">Missing: ${miss}</div>
         </div>`;
     }).join('');
@@ -265,16 +268,18 @@
   function buildTableBody(rows){
     return rows.map(s=>{
       const d = decision(s);
-      const score = num(s.overall_score);
+      const tradeScore = num(s.trade_score || s.overall_score);
+      const aiScore = num(s.ai_score || s.overall_score);
       const conf = Math.round(num(s.confidence)*100);
-      const sc = scoreColorClass(score);
+      const sc = scoreColorClass(tradeScore);
+      const aiSc = scoreColorClass(aiScore);
       const rsi = s.rsi ? Math.round(num(s.rsi)) : '—';
       return `
         <tr class="ais-candidate-row" data-symbol="${s.symbol}" onclick="showSignalDetail('${s.symbol}')">
           <td><b style="color:#f9fafb">${s.symbol}</b></td>
           <td style="color:#9ca3af;font-size:12px">${s.sector||'—'}</td>
-          <td style="text-align:center"><span class="ais-score-pill" style="background:${sc.bg};color:${colors[sc.txt]};border-color:${sc.border}">${score}</span></td>
-          <td style="text-align:center"><span style="color:#93c5fd">${score}</span></td>
+          <td style="text-align:center"><span class="ais-score-pill" style="background:${sc.bg};color:${colors[sc.txt]};border-color:${sc.border}">${tradeScore}</span></td>
+          <td style="text-align:center"><span class="ais-score-pill" style="background:${aiSc.bg};color:${colors[aiSc.txt]};border-color:${aiSc.border}">${aiScore}</span></td>
           <td style="text-align:center">${conf}%</td>
           <td style="text-align:center;color:${s.risk_reward_ratio>=1.5?'#22c55e':s.risk_reward_ratio>=1?'#eab308':'#ef4444'}">${fmt2(s.risk_reward_ratio)}</td>
           <td style="text-align:center;color:${s.mtf_aligned?'#22c55e':'#ef4444'};font-size:12px">${s.mtf_aligned?'✓':'✗'}</td>
@@ -292,8 +297,8 @@
     const sorted = [...tableSignals].sort((a,b)=>{
       let va, vb;
       if (key === 'symbol') { va = a.symbol; vb = b.symbol; }
-      else if (key === 'score') { va = num(a.overall_score); vb = num(b.overall_score); }
-      else if (key === 'ai') { va = num(a.overall_score); vb = num(b.overall_score); }
+      else if (key === 'score') { va = num(a.trade_score || a.overall_score); vb = num(b.trade_score || b.overall_score); }
+      else if (key === 'ai') { va = num(a.ai_score || a.overall_score); vb = num(b.ai_score || b.overall_score); }
       else if (key === 'conf') { va = num(a.confidence); vb = num(b.confidence); }
       else if (key === 'rr') { va = num(a.risk_reward_ratio); vb = num(b.risk_reward_ratio); }
       if (typeof va === 'string') return dir==='asc' ? va.localeCompare(vb) : vb.localeCompare(va);
@@ -346,7 +351,8 @@
     const buyCnt = all.filter(s => (s.action||'').toUpperCase() === 'BUY').length;
     const sellCnt = all.filter(s => (s.action||'').toUpperCase() === 'SELL').length;
     const skipCnt = all.length - buyCnt - sellCnt;
-    const scores = all.map(s=>num(s.overall_score)).filter(x=>x>0);
+    const tradeScores = all.map(s=>num(s.trade_score || s.overall_score)).filter(x=>x>0);
+    const aiScores = all.map(s=>num(s.ai_score || s.overall_score)).filter(x=>x>0);
     const confs = all.map(s=>num(s.confidence)).filter(x=>x>0);
     const rrs = all.map(s=>num(s.risk_reward_ratio)).filter(x=>x>0);
     const avg = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(1) : '—';
@@ -355,10 +361,10 @@
       <div class="ais-stat-chip"><span>BUY Signals</span><b class="green">${buyCnt}</b></div>
       <div class="ais-stat-chip"><span>SELL Signals</span><b class="red">${sellCnt}</b></div>
       <div class="ais-stat-chip"><span>SKIP/HOLD</span><b class="orange">${skipCnt}</b></div>
-      <div class="ais-stat-chip"><span>Avg Trade Score</span><b>${avg(scores)}</b></div>
-      <div class="ais-stat-chip"><span>Highest Score</span><b>${max(scores)}</b></div>
+      <div class="ais-stat-chip"><span>Avg Trade Score</span><b>${avg(tradeScores)}</b></div>
+      <div class="ais-stat-chip"><span>Highest Trade Score</span><b>${max(tradeScores)}</b></div>
+      <div class="ais-stat-chip"><span>Avg AI Score</span><b>${avg(aiScores)}</b></div>
       <div class="ais-stat-chip"><span>Avg Confidence</span><b>${avg(confs)}</b></div>
-      <div class="ais-stat-chip"><span>Highest Conf</span><b>${max(confs)}</b></div>
       <div class="ais-stat-chip"><span>Avg R:R</span><b>${avg(rrs)}</b></div>
     `;
     setHtml('ais-today-stats', html);
@@ -389,15 +395,33 @@
     setHtml('ais-missed-body', html);
   }
 
+  function buildScoreBreakdown(components){
+    const comp = components || {};
+    const items = Object.entries(comp).sort((a,b)=>b[1]-a[1]);
+    if (!items.length) return '<div style="color:#6b7280;font-size:12px">No component breakdown available.</div>';
+    return items.map(([k,v])=>{
+      const cls = v>=15 ? 'green' : v>=5 ? 'yellow' : 'red';
+      const sign = v>=0 ? '+' : '';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="color:#9ca3af;font-size:12px;text-transform:capitalize">${k.replace(/_/g,' ')}</span>
+        <span style="color:${colors[cls]};font-weight:700;font-size:13px">${sign}${v.toFixed(1)}</span>
+      </div>`;
+    }).join('');
+  }
+
   window.showSignalDetail = function(symbol){
     const s = tableSignals.find(x=>x.symbol===symbol);
     if(!s) return;
     const d = decision(s);
-    const score = num(s.overall_score);
+    const tradeScore = num(s.trade_score || s.overall_score);
+    const aiScore = num(s.ai_score || s.overall_score);
     const conf = Math.round(num(s.confidence)*100);
     const miss = missingFor(symbol, s);
-    const sc = scoreColorClass(score);
+    const tradeSc = scoreColorClass(tradeScore);
+    const aiSc = scoreColorClass(aiScore);
     const bd = s.bot_decision || 'Evaluated';
+    const posSize = s.position_size ? s.position_size + ' shares' : '—';
+    const invest = s.investment_amount ? rupee(s.investment_amount) : '—';
     const modal = document.getElementById('ais-detail-modal');
     setHtml('ais-detail-content', `
       <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:16px">
@@ -408,23 +432,31 @@
         <span class="ais-decision-pill ${d.color}" style="background:${colors[d.color+'Bg']};color:${colors[d.color]};border:1px solid ${colors[d.color]};padding:4px 10px;border-radius:99px;font-size:13px;font-weight:700">${d.icon} ${d.label}</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px">
-        <div class="ais-detail-metric"><div class="ais-detail-label">Trade Score</div><div style="color:${colors[sc.txt]};font-weight:800;font-size:20px">${score}</div></div>
-        <div class="ais-detail-metric"><div class="ais-detail-label">AI Overall</div><div style="color:${colors[sc.txt]};font-weight:800;font-size:20px">${score}</div></div>
+        <div class="ais-detail-metric"><div class="ais-detail-label">Trade Score</div><div style="color:${colors[tradeSc.txt]};font-weight:800;font-size:20px">${tradeScore}</div></div>
+        <div class="ais-detail-metric"><div class="ais-detail-label">AI Overall</div><div style="color:${colors[aiSc.txt]};font-weight:800;font-size:20px">${aiScore}</div></div>
         <div class="ais-detail-metric"><div class="ais-detail-label">Confidence</div><div style="font-weight:800;font-size:20px">${conf}%</div></div>
         <div class="ais-detail-metric"><div class="ais-detail-label">R:R</div><div style="font-weight:800;font-size:20px">${fmt2(s.risk_reward_ratio)}x</div></div>
         <div class="ais-detail-metric"><div class="ais-detail-label">MTF</div><div style="font-weight:800;font-size:20px;color:${s.mtf_aligned?'#22c55e':'#ef4444'}">${s.mtf_aligned?'✓ Aligned':'✗ Not aligned'}</div></div>
+        <div class="ais-detail-metric"><div class="ais-detail-label">Expected Hold</div><div style="font-weight:800;font-size:18px">${s.expected_hold_days||'—'}</div></div>
+        <div class="ais-detail-metric"><div class="ais-detail-label">Position Size</div><div style="font-weight:800;font-size:18px">${posSize}</div></div>
+        <div class="ais-detail-metric"><div class="ais-detail-label">Investment</div><div style="font-weight:800;font-size:18px">${invest}</div></div>
         <div class="ais-detail-metric"><div class="ais-detail-label">Entry / Target / SL</div><div style="font-size:14px;font-weight:700">${rupee(s.price)} / <span class="green">${rupee(s.target)}</span> / <span class="red">${rupee(s.stop_loss)}</span></div></div>
       </div>
-      <div class="ais-detail-section">
-        <div class="ais-detail-label">Rejection / Final Reason</div>
-        <div style="font-size:13px;color:#e2e8f0;line-height:1.6">${bd}</div>
-        <div style="font-size:12px;color:${colors.orange};margin-top:6px"><b>Missing requirement:</b> ${miss}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="ais-detail-section">
+          <div class="ais-detail-label">Rejection / Final Reason</div>
+          <div style="font-size:13px;color:#e2e8f0;line-height:1.6">${bd}</div>
+          <div style="font-size:12px;color:${colors.orange};margin-top:6px"><b>Missing requirement:</b> ${miss}</div>
+        </div>
+        <div class="ais-detail-section">
+          <div class="ais-detail-label">Trade Score Breakdown</div>
+          ${buildScoreBreakdown(s.trade_components)}
+        </div>
       </div>
       <div class="ais-detail-section">
         <div class="ais-detail-label">Reasoning</div>
         <div style="font-size:12px;color:#9ca3af;line-height:1.6">${(s.reasoning||'No detailed reasoning recorded.').substring(0,500)}</div>
       </div>
-      <div style="font-size:11px;color:#6b7280;margin-top:14px">Score component breakdown is not exposed in the current data feed. Showing available signal data only.</div>
     `);
     modal.style.display = 'flex';
   };

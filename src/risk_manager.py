@@ -73,6 +73,7 @@ class Position:
     status: PositionStatus = PositionStatus.OPEN
     exit_price: Optional[float] = None
     exit_time: Optional[datetime] = None
+    exit_reason: Optional[str] = None
     pnl: float = 0.0
     pnl_percentage: float = 0.0
     charges: float = 0.0        # brokerage + STT + exchange
@@ -81,6 +82,7 @@ class Position:
     planned_exit_date: Optional[datetime] = None
     product_type: str = "MIS"
     highest_price: float = 0.0
+    first_entry_price: float = 0.0
     trailing_stop: Optional[float] = None
     atr_at_entry: float = 0.0   # ATR used for SL calculation
     partial_booked: bool = False # True once partial profit booked
@@ -121,31 +123,33 @@ class RiskManager:
                 if p.get('status') not in ('OPEN', 'PARTIAL'):
                     continue
                 pos = Position(
-                    symbol=p['symbol'],
-                    entry_price=p['entry_price'],
-                    quantity=p['quantity'],
-                    stop_loss=p['stop_loss'],
-                    target=p['target'],
-                    entry_time=datetime.fromisoformat(p['entry_time']),
+                    symbol=p.get('symbol', ''),
+                    entry_price=float(p.get('entry_price', 0.0) or 0.0),
+                    quantity=int(p.get('quantity', 0) or 0),
+                    stop_loss=float(p.get('stop_loss', 0.0) or 0.0),
+                    target=float(p.get('target', 0.0) or 0.0),
+                    entry_time=datetime.fromisoformat(p['entry_time']) if p.get('entry_time') else datetime.now(),
                     status=PositionStatus(p.get('status', 'OPEN')),
                     planned_exit_date=datetime.fromisoformat(p['planned_exit_date']) if p.get('planned_exit_date') else None,
                     product_type=p.get('product_type', 'CNC'),
-                    highest_price=p.get('highest_price', p['entry_price']),
-                    trailing_stop=p.get('trailing_stop'),
-                    atr_at_entry=p.get('atr_at_entry', 0.0),
+                    highest_price=float(p.get('highest_price', p.get('entry_price', 0.0) or 0.0)),
+                    first_entry_price=float(p.get('first_entry_price', p.get('entry_price', 0.0) or 0.0)),
+                    trailing_stop=float(p.get('trailing_stop')) if p.get('trailing_stop') is not None else None,
+                    atr_at_entry=float(p.get('atr_at_entry', 0.0) or 0.0),
                     partial_booked=p.get('partial_booked', False),
-                    partial_qty=p.get('partial_qty', 0),
-                    initial_quantity=p.get('initial_quantity', p.get('quantity', 0)),
-                    partial_count=p.get('partial_count', 0),
-                    scale_in_qty=p.get('scale_in_qty', 0),
-                    sector=p.get('sector', 'Unknown'),
-                    pnl=p.get('pnl', 0.0),
-                    pnl_percentage=p.get('pnl_percentage', 0.0),
-                    charges=p.get('charges', 0.0),
-                    net_pnl=p.get('net_pnl', 0.0),
-                    slippage=p.get('slippage', 0.0),
-                    exit_price=p.get('exit_price'),
+                    partial_qty=int(p.get('partial_qty', 0) or 0),
+                    partial_count=int(p.get('partial_count', 0) or 0),
+                    scale_in_qty=int(p.get('scale_in_qty', 0) or 0),
+                    initial_quantity=int(p.get('initial_quantity', 0) or 0),
+                    exit_price=float(p.get('exit_price')) if p.get('exit_price') is not None else None,
                     exit_time=datetime.fromisoformat(p['exit_time']) if p.get('exit_time') else None,
+                    exit_reason=p.get('exit_reason'),
+                    pnl=float(p.get('pnl', 0.0) or 0.0),
+                    pnl_percentage=float(p.get('pnl_percentage', 0.0) or 0.0),
+                    charges=float(p.get('charges', 0.0) or 0.0),
+                    net_pnl=float(p.get('net_pnl', 0.0) or 0.0),
+                    slippage=float(p.get('slippage', 0.0) or 0.0),
+                    sector=p.get('sector', 'Unknown'),
                 )
                 if '_partial_target' in p:
                     pos._partial_target = p['_partial_target']
@@ -195,6 +199,7 @@ class RiskManager:
                     'planned_exit_date': p.planned_exit_date.isoformat() if p.planned_exit_date else None,
                     'product_type': p.product_type,
                     'highest_price': p.highest_price,
+                    'first_entry_price': p.first_entry_price,
                     'trailing_stop': p.trailing_stop,
                     'atr_at_entry': p.atr_at_entry,
                     'partial_booked': p.partial_booked,
@@ -300,6 +305,16 @@ class RiskManager:
         Enterprise portfolio-level gate runs first.
         """
         symbol = signal['symbol']
+
+        # Defensive DB check: positions list can drift vs source-of-truth
+        open_db_symbols = {
+            p.get('symbol')
+            for p in self._store.load_positions()
+            if p.get('status') in ('OPEN', 'PARTIAL')
+        }
+        if symbol in open_db_symbols:
+            logger.warning(f"Duplicate position: {symbol} already open")
+            return False
 
         # ── Enterprise master pre-BUY gate ───────────────────────────
         if not self._enterprise.pre_buy_risk_check(signal):
@@ -421,6 +436,10 @@ class RiskManager:
                                        if config.TRADING_MODE == "swing"
                                        else config.STOP_LOSS_PERCENTAGE))
         stop_loss = max(stop_loss, sl_floor)  # tightest SL wins
+        # Respect a signal-level stop loss (e.g. based on support) if it is tighter
+        signal_sl = signal.get('stop_loss', 0.0)
+        if 0 < signal_sl < entry_price and signal_sl > stop_loss:
+            stop_loss = signal_sl
 
         # Keep signal target unless overriding
         target = signal['target']
@@ -443,6 +462,7 @@ class RiskManager:
         position = Position(
             symbol=signal['symbol'],
             entry_price=entry_price,
+            first_entry_price=entry_price,
             quantity=quantity,
             stop_loss=round(stop_loss, 2),
             target=target,
@@ -527,6 +547,18 @@ class RiskManager:
 
             effective_stop = max(position.stop_loss, position.trailing_stop or 0)
 
+            # ── Target hit ─────────────────────────────────────────────
+            if current_price >= position.target:
+                logger.info(
+                    f"SELL_PIPELINE | origin=risk_manager.check_positions "
+                    f"| symbol={position.symbol} | current_price={current_price} "
+                    f"| target={position.target} | reason='Target hit achieved'"
+                )
+                exit_signals.append(
+                    self._close_position(position, current_price, PositionStatus.TARGET_HIT, "Target hit achieved")
+                )
+                continue
+
             # ── Partial profit booking ─────────────────────────────────
             atr_pct = config.PARTIAL_PROFIT_ATR_MULTIPLIER * position.atr_at_entry / position.entry_price if position.atr_at_entry and position.entry_price else 0
             partial_target = getattr(position, '_partial_target',
@@ -557,6 +589,12 @@ class RiskManager:
                                 and current_price > position.stop_loss
                              else "Stop loss hit")
                 self.add_to_blacklist(position.symbol)  # blacklist after SL
+                logger.info(
+                    f"SELL_PIPELINE | origin=risk_manager.check_positions "
+                    f"| symbol={position.symbol} | current_price={current_price} "
+                    f"| stop_loss={position.stop_loss} | trailing_stop={position.trailing_stop} "
+                    f"| reason='{sl_reason}'"
+                )
                 exit_signals.append({
                     'symbol': position.symbol,
                     'action': 'SELL',
@@ -626,6 +664,7 @@ class RiskManager:
             position.slippage = exit_price - position.exit_price  # 0 here; broker fills in real mode
             self._last_exit_by_symbol[position.symbol] = position.exit_time
 
+        position.exit_reason = reason_override or self._get_exit_reason(status)
         self.daily_pnl += gross_pnl
         self.save_positions()
 
@@ -639,7 +678,7 @@ class RiskManager:
             'charges': position.charges,
             'net_pnl': position.net_pnl,
             'status': position.status.value,
-            'reason': reason_override or self._get_exit_reason(status),
+            'reason': position.exit_reason,
             'timestamp': datetime.now().isoformat()
         }
 
@@ -739,10 +778,13 @@ class RiskManager:
                 else:
                     break
         except Exception:
-            # Fallback: check in-memory positions
+            pass
+
+        # Fallback / supplement: check in-memory closed positions
+        if consecutive_losses < max_consec:
             recent = [p for p in self.positions if p.status != PositionStatus.OPEN][-5:]
             for p in reversed(recent):
-                if hasattr(p, 'pnl') and p.pnl < 0:
+                if p.pnl < 0:
                     consecutive_losses += 1
                 else:
                     break
