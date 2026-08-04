@@ -101,6 +101,7 @@ class TokenManager:
         Raises:
             ValueError: If token is expired and no request token provided
         """
+        self._load_token()  # Always pick the latest file token
         if self.is_token_valid():
             logger.info("Using existing valid token from storage")
             return self.access_token

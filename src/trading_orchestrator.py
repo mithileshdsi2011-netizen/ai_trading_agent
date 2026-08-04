@@ -107,6 +107,18 @@ class TradingOrchestrator:
         logger.info("=" * 50)
         logger.info(f"Starting trading cycle at {datetime.now()}")
         
+        # Reload token if a newer one was saved since startup
+        try:
+            from token_manager import TokenManager
+            fresh = TokenManager().get_access_token()
+            if self.market_data and getattr(self.market_data, 'kite', None):
+                self.market_data.kite.set_access_token(fresh)
+            if self.order_executor and hasattr(self.order_executor, 'broker') and getattr(self.order_executor.broker, 'kite', None):
+                self.order_executor.broker.kite.set_access_token(fresh)
+            logger.info("Kite token re-synced from disk")
+        except Exception:
+            pass
+        
         # Reset per-cycle market data metrics and warm the rate limiter
         self.market_data.new_cycle()
         self.market_data._get_instruments()
