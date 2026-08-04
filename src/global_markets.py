@@ -73,7 +73,13 @@ class GlobalMarketMonitor:
         try:
             import yfinance as yf
 
-            return yf.download(symbol, period=period, interval="1d", progress=False)
+            df = yf.download(symbol, period=period, interval="1d", progress=False)
+            if df is None or df.empty:
+                return None
+            # yfinance >=0.2 returns MultiIndex columns; flatten for uniform access
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(-1)
+            return df
         except Exception:
             return None
 
