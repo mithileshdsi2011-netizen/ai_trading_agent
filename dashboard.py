@@ -6094,6 +6094,9 @@ def api_data():
             o['pnl'] = fifo_pnl
             if o.get('transaction_type') == 'SELL':
                 o['sell_price'] = sell_price
+                # If FIFO matched an in-session buy, derive blended buy price for display
+                if not o.get('buy_price') and sell_price > 0 and int(o.get('quantity', 1)) > 0:
+                    o['buy_price'] = round(sell_price - (fifo_pnl / int(o.get('quantity', 1))), 2)
 
         # All completed orders (for trade history tab) + today's orders
         all_completed = [o for o in orders if o.get('status') == 'COMPLETE']

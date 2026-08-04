@@ -356,11 +356,22 @@ class ReconciliationEngine:
                     self._store.update_position(sym, 'OPEN', changes)
                     self._add_mismatch(mismatches, f'position_mismatch:{sym}', existing, changes, True)
 
-        # Close positions SQLite thinks are open but Kite doesn't have
+        # Do not close an open position just because it is absent from Kite
+        # positions (settlement delays can make a CNC position briefly disappear).
+        # Close only if we actually see a completed SELL order for the symbol.
+        kite_orders = _kite_orders(self.broker) if self.broker else []
+        completed_sell_symbols = {
+            ko.get('tradingsymbol', ko.get('symbol'))
+            for ko in kite_orders
+            if ko.get('transaction_type') == 'SELL' and ko.get('status') == 'COMPLETE'
+        }
+
         for sym, sp in sqlite_positions.items():
+            if sp.get('status') != 'OPEN':
+                continue
             if sym not in kite_by_sym:
                 # Verify not just in holdings (already handled in _reconcile_holdings)
-                if not sp.get('_seen_in_holdings'):
+                if not sp.get('_seen_in_holdings') and sym in completed_sell_symbols:
                     self._store.update_position(sym, 'OPEN', {'status': 'CLOSED', 'exit_reason': 'reconciliation: missing in broker', 'updated_at': _now()})
                     self._add_mismatch(mismatches, f'position_closed:{sym}', sp, {'status': 'CLOSED'}, True)
 

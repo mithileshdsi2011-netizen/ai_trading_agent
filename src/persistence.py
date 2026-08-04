@@ -666,9 +666,10 @@ class TradingStore:
                 data = self._loads(row["data"])
                 data.update(updates)
                 data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                new_status = data.get("status", status)
                 conn.execute(
-                    "UPDATE positions SET data = ?, updated_at = ? WHERE id = ?",
-                    (self._dumps(data), data["updated_at"], row["id"])
+                    "UPDATE positions SET status = ?, data = ?, updated_at = ? WHERE id = ?",
+                    (new_status, self._dumps(data), data["updated_at"], row["id"])
                 )
                 return True
 
