@@ -41,7 +41,7 @@ class TelegramAlerter:
             f"Target: ₹{signal['target']:.2f}\n"
             f"Stop Loss: ₹{signal['stop_loss']:.2f}\n"
             f"R:R: {signal['risk_reward_ratio']:.2f}\n"
-            f"Confidence: {signal.get('confidence', 0):.0%}\n"
+            f"Confidence: {signal.get('confidence', 0):.0f}%\n"
             f"Order ID: {order_id}"
         )
         self._send(msg)

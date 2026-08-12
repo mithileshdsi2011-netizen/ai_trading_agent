@@ -138,11 +138,12 @@ def get_error_policy(category_value: str) -> Dict:
 class BrokerIntegration:
     """Handles broker integration for order execution"""
     
-    def __init__(self):
+    def __init__(self, alert_engine=None):
         self.kite = None
         self.paper_trading = config.PAPER_TRADING
         self.live_ready = False
         self.token_manager = None
+        self.alert_engine = alert_engine
         self.paper_portfolio = {
             'cash': config.TRADING_AMOUNT,
             'positions': {},
@@ -165,6 +166,11 @@ class BrokerIntegration:
             self._write_broker_status(mode, self.live_ready, None)
         except Exception as e:
             error = str(e)
+            if self.alert_engine:
+                try:
+                    self.alert_engine.critical('Kite', f'Broker initialization failed: {error}', {'error': error})
+                except Exception:
+                    pass
             self._write_broker_status('FAILED', False, error)
             logger.error(f"Broker live initialization failed: {error}")
             raise

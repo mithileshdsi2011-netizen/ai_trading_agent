@@ -13,6 +13,7 @@ from broker_integration import BrokerIntegration, get_error_policy
 from email_reports import EmailReporter
 from risk_manager import RiskManager, Position, PositionStatus
 from trade_lifecycle_manager import TradeLifecycleManager
+from exit_decision_engine import ExitDecisionEngine
 from market_data import MarketDataFetcher
 from telegram_alerts import TelegramAlerter
 from trade_journal import TradeJournal
@@ -27,15 +28,17 @@ logger = logging.getLogger(__name__)
 class OrderExecutor:
     """Executes trading orders and manages order lifecycle"""
     
-    def __init__(self):
-        self.broker = BrokerIntegration()
+    def __init__(self, alert_engine=None):
+        self.alert_engine = alert_engine
+        self.broker = BrokerIntegration(alert_engine=alert_engine)
         self.risk_manager = RiskManager()
         self.market_data = MarketDataFetcher()
         self.lifecycle_manager = TradeLifecycleManager(self.market_data)
+        self.exit_decision_engine = ExitDecisionEngine(self.market_data)
         self.telegram = TelegramAlerter()
         self.journal = TradeJournal()
         self._store = get_store()
-        self.reconciliation_engine = ReconciliationEngine(broker=self.broker)
+        self.reconciliation_engine = ReconciliationEngine(broker=self.broker, alert_engine=alert_engine)
         self.executed_orders = []
         # Tracks symbols whose orders are in-flight (placed but not yet confirmed filled).
         # Prevents duplicate orders when the next cycle runs before Kite confirms a fill.
@@ -671,13 +674,15 @@ class OrderExecutor:
             if position.entry_time else 0.0
         )
 
-        # 1. Manual / circuit breaker / EOD / rebalance / AI sell: trust the orchestrator tag
+        # 1. Manual / circuit breaker / EOD / rebalance / AI sell / Exit Decision Engine: trust the tag
         if any(k in reason for k in ('manual', 'rebalance', 'end of day', 'circuit breaker')):
             return True, f"swing manual/administrative exit allowed: '{reason}'"
         if signal.get('_ai_sell_decision'):
             return True, f"swing AI sell decision allowed: '{reason}'"
         if signal.get('_circuit_breaker'):
             return True, "swing circuit breaker exit allowed"
+        if signal.get('_exit_decision_engine'):
+            return True, "swing exit decision engine approved"
 
         # 2. Target hit
         if position.target and current_price >= position.target:
@@ -767,10 +772,14 @@ class OrderExecutor:
         sell_qty = int(signal.get('position_size', position.quantity) or 0)
         try:
             exit_signal = self.risk_manager.close_position(sym, current_price, reason, sell_qty)
+            if exit_signal:
+                exit_signal['partial'] = bool(signal.get('_partial_exit'))
+                exit_signal['quantity'] = sell_qty
         except Exception as ce:
             logger.exception(f"Risk manager close_position failed for {sym} (order already placed): {ce}")
             exit_signal = None
         try:
+            cost_basis = position.average_price if position.average_price else position.entry_price
             self.journal.log_entry(
                 symbol=sym,
                 action='SELL',
@@ -778,9 +787,9 @@ class OrderExecutor:
                 quantity=sell_qty,
                 order_id=order_result.get('order_id') or None,
                 exit_reason=reason,
-                entry_price=position.entry_price,
+                entry_price=cost_basis,
                 entry_date=position.entry_time.isoformat() if position.entry_time else '',
-                gross_pnl=(current_price - position.entry_price) * sell_qty,
+                gross_pnl=(current_price - cost_basis) * sell_qty,
                 net_pnl=exit_signal['net_pnl'] if exit_signal else 0,
                 charges=exit_signal['charges'] if exit_signal else 0,
             )
@@ -799,12 +808,14 @@ class OrderExecutor:
             'paper_trading': order_result.get('paper_trading', False),
         }
 
-    def monitor_positions(self) -> List[Dict]:
+    def monitor_positions(self, market_regime: str = 'SIDEWAYS') -> List[Dict]:
         """
-        Monitor open positions using the enterprise trade lifecycle manager.
-        Executes trailing stops, partial scale-outs, time/volatility/gap exits
-        and scale-in opportunities.
+        Monitor open positions using the layered Exit Decision Engine.
+        Produces STRONG_HOLD, HOLD, TRAIL, PARTIAL_EXIT, or FULL_EXIT
+        for each position and routes exits to execution.
         """
+        # Always start with the latest persisted state (reconciliation may have repaired DB)
+        self.risk_manager._load_positions()
         positions = self.risk_manager.positions
         if not positions:
             return []
@@ -835,13 +846,22 @@ class OrderExecutor:
                 if price:
                     current_prices[symbol] = price
 
-        # Lifecycle manager produces all actions (HOLD, SELL, SCALE_IN)
-        actions = self.lifecycle_manager.process_positions(positions, current_prices)
+        # Layered Exit Decision Engine
+        decisions = self.exit_decision_engine.decide_all(
+            [p for p in positions if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}],
+            current_prices,
+            market_regime=market_regime
+        )
 
         executed = []
-        for action in actions:
-            if action.get('action') == 'SELL':
-                sym = action['symbol']
+        for decision in decisions:
+            sym = decision.symbol
+            price = current_prices.get(sym, 0)
+            position = next((p for p in positions if p.symbol == sym), None)
+            if not position:
+                continue
+
+            if decision.decision == 'FULL_EXIT':
                 if not self._should_attempt_sell(sym):
                     queued = self._pending_sells.get(sym, {}).get('next_retry') or 'manual'
                     logger.info(f"SELL for {sym} queued until {queued}")
@@ -850,55 +870,113 @@ class OrderExecutor:
                 sell_signal = {
                     'symbol': sym,
                     'action': 'SELL',
-                    'current_price': action['price'],
-                    'position_size': action['quantity'],
-                    'investment_amount': action['price'] * action['quantity'],
+                    'current_price': price,
+                    'position_size': decision.quantity or position.quantity,
+                    'investment_amount': price * (decision.quantity or position.quantity),
                     'stop_loss': 0,
                     'target': 0,
                     'risk_reward_ratio': 0,
                     'confidence': 1.0,
                     'overall_score': 0,
-                    'reasoning': action['reason'],
-                    '_lifecycle': True,
+                    'reasoning': decision.reason,
+                    '_exit_decision_engine': True,
                     '_origin': 'order_executor.monitor_positions',
                     'timestamp': datetime.now().isoformat()
                 }
                 logger.info(
                     f"SELL_PIPELINE | origin=order_executor.monitor_positions "
-                    f"| symbol={sym} | proposed_price={action['price']} | reason='{action['reason']}'"
+                    f"| symbol={sym} | proposed_price={price} | reason='{decision.reason}'"
                 )
                 order_result = self.execute_signal(sell_signal)
                 if order_result['success']:
                     executed.append({
                         'success': True,
                         'order_id': order_result.get('order_id'),
-                        'exit_signal': order_result.get('exit_signal', action),
-                        'lifecycle_state': action.get('lifecycle_state'),
+                        'exit_signal': order_result.get('exit_signal'),
+                        'exit_decision': decision.decision,
+                        'scores': decision.scores,
                         'timestamp': datetime.now().isoformat()
                     })
-                    logger.info(f"Lifecycle exit executed for {sym}: {action['reason']}")
+                    logger.info(f"Exit executed for {sym}: {decision.reason}")
                     try:
-                        self.telegram.exit(action, order_result.get('order_id', ''))
+                        self.telegram.exit(sell_signal, order_result.get('order_id', ''))
                     except Exception as te:
                         logger.error(f"Telegram exit alert error: {te}")
                 else:
-                    self._record_sell_failure(sym, order_result, action['reason'])
-                    logger.error(f"Lifecycle exit failed for {sym}: {order_result}")
-            elif action.get('action') == 'SCALE_IN':
-                order_result = self.execute_scale_in(action)
+                    self._record_sell_failure(sym, order_result, decision.reason)
+                    logger.error(f"Exit failed for {sym}: {order_result}")
+
+            elif decision.decision == 'PARTIAL_EXIT':
+                if not self._should_attempt_sell(sym):
+                    queued = self._pending_sells.get(sym, {}).get('next_retry') or 'manual'
+                    logger.info(f"PARTIAL SELL for {sym} queued until {queued}")
+                    continue
+
+                qty = min(decision.quantity, position.quantity)
+                sell_signal = {
+                    'symbol': sym,
+                    'action': 'SELL',
+                    'current_price': price,
+                    'position_size': qty,
+                    'investment_amount': price * qty,
+                    'stop_loss': 0,
+                    'target': 0,
+                    'risk_reward_ratio': 0,
+                    'confidence': 1.0,
+                    'overall_score': 0,
+                    'reasoning': decision.reason,
+                    '_partial_exit': True,
+                    '_exit_decision_engine': True,
+                    '_origin': 'order_executor.monitor_positions',
+                    'timestamp': datetime.now().isoformat()
+                }
+                logger.info(
+                    f"SELL_PIPELINE | origin=order_executor.monitor_positions "
+                    f"| symbol={sym} | proposed_price={price} | partial_qty={qty} "
+                    f"| reason='{decision.reason}'"
+                )
+                order_result = self.execute_signal(sell_signal)
                 if order_result['success']:
                     executed.append({
                         'success': True,
                         'order_id': order_result.get('order_id'),
-                        'scale_in': action,
+                        'exit_signal': order_result.get('exit_signal'),
+                        'exit_decision': decision.decision,
+                        'partial_qty': qty,
+                        'scores': decision.scores,
                         'timestamp': datetime.now().isoformat()
                     })
-                    logger.info(f"Scale-in executed for {action['symbol']}: +{action['quantity']}")
+                    logger.info(f"Partial exit executed for {sym}: {decision.reason}")
+                    try:
+                        self.telegram.exit(sell_signal, order_result.get('order_id', ''))
+                    except Exception as te:
+                        logger.error(f"Telegram exit alert error: {te}")
                 else:
-                    logger.warning(f"Scale-in failed for {action['symbol']}: {order_result}")
+                    self._record_sell_failure(sym, order_result, decision.reason)
+                    logger.error(f"Partial exit failed for {sym}: {order_result}")
+
+            elif decision.decision == 'TRAIL':
+                # Engine already mutates position trailing stop / target
+                executed.append({
+                    'symbol': sym,
+                    'action': 'HOLD',
+                    'decision': 'TRAIL',
+                    'reason': decision.reason,
+                    'scores': decision.scores,
+                    'timestamp': datetime.now().isoformat()
+                })
+                logger.info(f"TRAIL update for {sym}: {decision.reason}")
+
             else:
-                # HOLD action with lifecycle metadata for dashboard
-                executed.append(action)
+                # STRONG_HOLD / HOLD
+                executed.append({
+                    'symbol': sym,
+                    'action': 'HOLD',
+                    'decision': decision.decision,
+                    'reason': decision.reason,
+                    'scores': decision.scores,
+                    'timestamp': datetime.now().isoformat()
+                })
 
         # Persist updated stops / targets
         self.risk_manager.save_positions()

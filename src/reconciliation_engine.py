@@ -80,10 +80,19 @@ def _kite_holdings(broker) -> List[Dict[str, Any]]:
     if not broker.kite:
         return []
     try:
-        return broker.kite.holdings()
+        data = broker.kite.holdings()
     except Exception as e:
         logger.error(f"Could not fetch Kite holdings: {e}")
         return []
+
+    # CNC T1 delivery: 'quantity' = settled, 't1_quantity' = not yet settled.
+    # The bot owns the total, so combine them.
+    for p in data:
+        settled = _safe_float(p.get('quantity', 0))
+        t1 = _safe_float(p.get('t1_quantity', 0))
+        p['quantity'] = settled + t1
+
+    return data
 
 
 @dataclass
@@ -101,13 +110,15 @@ class ReconciliationEngine:
     # from the journal before we raise a CRITICAL alert.
     MISSING_JOURNAL_RETRY_THRESHOLD = 3
 
-    def __init__(self, broker=None, market_data_fetcher=None, store=None):
+    def __init__(self, broker=None, market_data_fetcher=None, store=None, alert_engine=None):
         self.broker = broker
         self.market_data_fetcher = market_data_fetcher
         self._store = store or (get_store() if get_store else None)
+        self._alert_engine = alert_engine
         self._scheduler_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_status: Optional[Dict[str, Any]] = None
+        self._last_healthy: bool = True
         self._lock = threading.Lock()
         # Track completed Kite orders that are not yet reflected in the journal
         self._missing_journal_retries: Dict[str, Dict[str, Any]] = {}
@@ -199,6 +210,22 @@ class ReconciliationEngine:
             with self._lock:
                 self._last_status = status
 
+            if self._alert_engine:
+                try:
+                    if not healthy and self._last_healthy:
+                        first_detected = next((m for m in mismatches if m.repair == 'detected'), None)
+                        detail = first_detected.type_ if first_detected else (status.get('error') or 'unknown')
+                        self._alert_engine.critical(
+                            'Reconciliation',
+                            f'Reconciliation unhealthy: {detail}',
+                            status
+                        )
+                    elif healthy and not self._last_healthy:
+                        self._alert_engine.info('Reconciliation', 'Reconciliation recovered', status)
+                except Exception:
+                    pass
+            self._last_healthy = healthy
+
             self._log_mismatches(mismatches, duration_ms)
             return status
 
@@ -217,6 +244,11 @@ class ReconciliationEngine:
                 self._store.save_broker_state('reconciliation', status)
             with self._lock:
                 self._last_status = status
+            if self._alert_engine:
+                try:
+                    self._alert_engine.critical('Reconciliation', f'Full reconciliation failed: {e}', status)
+                except Exception:
+                    pass
             return status
 
     # ── helpers: logging and counting ─────────────────────────────────────
@@ -282,6 +314,8 @@ class ReconciliationEngine:
                     break
 
             if not existing:
+                if sq <= 0:
+                    continue
                 # Kite has a holding we don't have in SQLite
                 position = {
                     'symbol': sym,
@@ -296,16 +330,27 @@ class ReconciliationEngine:
                 }
                 self._store.save_position(position)
                 self._add_mismatch(mismatches, f'holdings_missing:{sym}', None, position, True)
-            elif needs_save:
-                # Update existing live fields
+            elif needs_save or (existing.get('status') != 'OPEN' and sq > 0):
+                # Update live fields; only force OPEN when broker reports a positive quantity.
+                # A CLOSED position with 0 broker quantity must stay closed to avoid churn.
+                target_status = 'OPEN' if sq > 0 else existing.get('status', 'OPEN')
                 updates = {
                     'quantity': sq,
                     'average_price': avg,
                     'last_price': ltp,
                     'product': product,
                     'exchange': exchange,
+                    'status': target_status,
                     'updated_at': _now()
                 }
+                if target_status == 'CLOSED':
+                    exit_reason = existing.get('exit_reason')
+                    if not exit_reason or exit_reason == 'RECONCILIATION':
+                        for trade in reversed(self._store.get_trades(symbol=sym, action='SELL')):
+                            if trade.get('exit_reason') and trade.get('exit_reason') != 'RECONCILIATION':
+                                exit_reason = trade.get('exit_reason')
+                                break
+                    updates['exit_reason'] = exit_reason or existing.get('exit_reason') or 'RECONCILIATION'
                 self._store.update_position(sym, existing.get('status', 'OPEN'), updates)
                 self._add_mismatch(mismatches, f'holdings_mismatch:{sym}', existing, updates, True)
 
@@ -354,6 +399,7 @@ class ReconciliationEngine:
                     ('last_price', ltp),
                     ('product', product),
                     ('exchange', exchange),
+                    ('status', 'OPEN'),
                 ]:
                     if existing.get(field) != kite_val:
                         changes[field] = kite_val
@@ -391,7 +437,14 @@ class ReconciliationEngine:
                         None
                     )
                     oid = sell_order.get('order_id') if sell_order else 'unknown'
-                    exit_reason = sp.get('exit_reason') or 'RECONCILIATION'
+                    exit_reason = sp.get('exit_reason')
+                    if not exit_reason or exit_reason == 'RECONCILIATION':
+                        for trade in reversed(self._store.get_trades(symbol=sym, action='SELL')):
+                            if trade.get('exit_reason') and trade.get('exit_reason') != 'RECONCILIATION':
+                                exit_reason = trade.get('exit_reason')
+                                break
+                    if not exit_reason:
+                        exit_reason = 'RECONCILIATION'
                     logger.warning(
                         f"Position {sym}: broker reports completed SELL order_id={oid}; "
                         f"closing SQLite position with exit_reason={exit_reason}"
@@ -623,13 +676,28 @@ class ReconciliationEngine:
         cash = _safe_float(summary.get('cash', 0))
         holdings_value = _safe_float(summary.get('total_value', 0)) - cash
 
+        # Same-day CNC sale proceeds are not yet settled in kite.margins().
+        # Show them explicitly so the user sees where the money is.
+        today_str = date.today().isoformat()
+        unsettled = 0.0
+        for t in self._store.get_trades(action='SELL', date_from=today_str):
+            # Sell credit = net_pnl + invested (cost already removed from net)
+            unsettled += _safe_float(t.get('net_pnl', 0)) + _safe_float(t.get('invested', 0))
+
         snapshot = {
             'cash': cash,
             'holdings_value': holdings_value,
-            'total_value': _safe_float(summary.get('total_value', 0)),
-            'date': date.today().isoformat(),
+            'unsettled_proceeds': round(unsettled, 2),
+            'total_value': round(cash + holdings_value + unsettled, 2),
+            'date': today_str,
             'timestamp': _now()
         }
+
+        if unsettled > 0:
+            logger.info(
+                f"Portfolio: cash ₹{cash:,.2f} + holdings ₹{holdings_value:,.2f} "
+                f"+ unsettled sale proceeds ₹{unsettled:,.2f} = total ₹{snapshot['total_value']:,.2f}"
+            )
 
         latest = self._store.get_latest_portfolio_snapshot() or {}
         # Only update if materially changed or newer
@@ -657,12 +725,13 @@ class ReconciliationEngine:
             pass
         latency_ms = int((time.time() - start) * 1000)
 
-        market_open = False
+        old = self._store.get_broker_state('status') or {}
+        market_open = old.get('market_open', False)
         if self.market_data_fetcher:
             try:
                 market_open = self.market_data_fetcher.is_market_open()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"market_data_fetcher.is_market_open() failed: {e} — keeping previous={market_open}")
 
         token_expiry = '—'
         try:
@@ -673,7 +742,6 @@ class ReconciliationEngine:
         except Exception:
             pass
 
-        old = self._store.get_broker_state('status') or {}
         new = {
             'mode': 'PAPER' if self.broker.paper_trading else 'LIVE',
             'live_ready': self.broker.live_ready if not self.broker.paper_trading else True,

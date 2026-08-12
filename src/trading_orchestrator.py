@@ -27,6 +27,11 @@ from sell_decision_ai import SellDecisionAI
 from risk_manager import PositionStatus
 from decision_explainer import DecisionExplainer
 from reconciliation_engine import ReconciliationEngine
+from alert_engine import EnterpriseAlertEngine
+from persistence import get_store
+from portfolio_rotation import PortfolioRotationEngine
+from position_sizing import PositionSizingEngine
+from opportunity_ranking import OpportunityRankingEngine
 
 import os as _os
 _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'logs')
@@ -56,13 +61,17 @@ class TradingOrchestrator:
     def __init__(self):
         self.market_data = MarketDataFetcher()
         self.signal_generator = SignalGenerator()
-        self.order_executor = OrderExecutor()
         self.dynamic_universe = DynamicUniverse(kite=self.market_data.kite)
         self.market_regime = MarketRegimeDetector(kite=self.market_data.kite)
         self.telegram = TelegramAlerter()
         self.email = EmailReporter()
+        self.alert_engine = EnterpriseAlertEngine(email=self.email, telegram=self.telegram)
+        self.order_executor = OrderExecutor(alert_engine=self.alert_engine)
         self.scorer = TradeScorer()
         self.explainer = DecisionExplainer()
+        self.portfolio_rotation = PortfolioRotationEngine()
+        self.position_sizing = PositionSizingEngine()
+        self.opportunity_ranking = OpportunityRankingEngine()
         self.mtf = MultiTimeframeConfirmer(market_data=self.market_data)
         self.smart_exit = SmartExitAI(market_data=self.market_data)
         self.sell_decision_ai = SellDecisionAI()
@@ -71,7 +80,8 @@ class TradingOrchestrator:
         logger.info(f"TradingOrchestrator initialized — broker mode: {mode_str}, startup: {broker.startup_timestamp}")
 
         # Reconciliation engine: full reconcile before trading, then schedule every 60s
-        self.reconciliation_engine = ReconciliationEngine(broker=broker, market_data_fetcher=self.market_data)
+        self.reconciliation_engine = ReconciliationEngine(broker=broker, market_data_fetcher=self.market_data, alert_engine=self.alert_engine)
+        self._store = get_store()
         recon_status = self.reconciliation_engine.reconcile_all()
         if not recon_status.get('healthy'):
             raise RuntimeError(f"Startup reconciliation failed — not starting trading. {recon_status}")
@@ -96,6 +106,51 @@ class TradingOrchestrator:
         self._morning_shortlist_date: str = ''    # date when shortlist was built
         # One-shot circuit breaker: once it fires today, do not re-fire
         self._circuit_breaker_fired_today = False
+
+    def _resolve_market_open(self) -> (bool, Optional[str], Optional[bool]):
+        """
+        Resolve market-open status with fail-safe logic.
+
+        1. Prefer the reconciled broker_state if it is fresh (<90s) to avoid
+           duplicate market-status API calls.
+        2. Otherwise call market_data.is_market_open().
+        3. On any exception, fail safe: return market_open=False for trading
+           decisions, log MARKET_STATUS_UNAVAILABLE, and preserve the previous
+           market_open value for the dashboard.
+
+        Returns: (market_open_for_trading, error_message, previous_market_open)
+        """
+        MARKET_STATUS_MAX_AGE_SECONDS = 90
+        previous_market_open: Optional[bool] = None
+        previous_updated_at: Optional[str] = None
+
+        if self._store:
+            try:
+                broker_state = self._store.get_broker_state('status') or {}
+                previous_market_open = broker_state.get('market_open')
+                previous_updated_at = broker_state.get('updated_at')
+            except Exception:
+                pass
+
+        if previous_updated_at is not None and previous_market_open is not None:
+            try:
+                updated_dt = datetime.fromisoformat(previous_updated_at)
+                age = (datetime.now() - updated_dt).total_seconds()
+                if age <= MARKET_STATUS_MAX_AGE_SECONDS:
+                    logger.debug(f"Using fresh broker_state market_open={previous_market_open} (age={age:.0f}s)")
+                    return previous_market_open, None, previous_market_open
+            except Exception:
+                pass
+
+        try:
+            market_open = self.market_data.is_market_open()
+            return market_open, None, previous_market_open
+        except Exception as e:
+            logger.warning(
+                f"MARKET_STATUS_UNAVAILABLE | previous_market_open={previous_market_open} "
+                f"| exception={e!r} | trading_cycle_skipped"
+            )
+            return False, f"MARKET_STATUS_UNAVAILABLE: {e}", previous_market_open
     
     def run_once(self) -> Dict:
         """
@@ -122,10 +177,13 @@ class TradingOrchestrator:
         # Reset per-cycle market data metrics and warm the rate limiter
         self.market_data.new_cycle()
         self.market_data._get_instruments()
-        
+
+        market_open, market_status_error, previous_market_open = self._resolve_market_open()
         cycle_result = {
             'timestamp': datetime.now().isoformat(),
-            'market_open': self.market_data.is_market_open(),
+            'market_open': market_open,
+            'market_status_error': market_status_error,
+            'previous_market_open': previous_market_open,
             'signals_generated': [],
             'orders_executed': [],
             'positions_monitored': [],
@@ -200,9 +258,31 @@ class TradingOrchestrator:
                 self.market_data.get_cycle_metrics(); return cycle_result
         # ──────────────────────────────────────────────────────────────────
 
+        # Health gate: do not place new orders while reconciliation is unhealthy
+        recon_status = self.reconciliation_engine.get_status()
+        if not recon_status.get('healthy'):
+            logger.warning(
+                f"Reconciliation unhealthy ({recon_status.get('mismatches', 0)} mismatches) — "
+                "monitoring only, no new orders"
+            )
+            position_updates = self.order_executor.monitor_positions()
+            cycle_result['positions_monitored'] = position_updates
+            self.market_data.get_cycle_metrics(); return cycle_result
+
         # Check if market is open (includes holiday check)
         if not cycle_result['market_open']:
-            if self.market_data.is_market_holiday():
+            if cycle_result.get('market_status_error'):
+                logger.warning(
+                    f"Market status unverifiable — monitoring only | "
+                    f"previous_market_open={cycle_result.get('previous_market_open')} | "
+                    f"error={cycle_result['market_status_error']}"
+                )
+                try:
+                    position_updates = self.order_executor.monitor_positions()
+                    cycle_result['positions_monitored'] = position_updates
+                except Exception as me:
+                    logger.warning(f"monitor_positions failed during market status unavailability: {me}")
+            elif self.market_data.is_market_holiday():
                 logger.info("NSE holiday today — bot paused, no trading")
             else:
                 logger.info("Market is closed — skipping trading cycle")
@@ -269,14 +349,31 @@ class TradingOrchestrator:
             ist = pytz.timezone('Asia/Kolkata')
             today_str = datetime.now(ist).strftime('%Y-%m-%d')
             holdings = self.order_executor.broker.get_holdings()
-            total_value = holdings.get('total_value', 0)
+            total_value = float(holdings.get('total_value', 0) or 0)
+
+            # Same-day CNC SELL proceeds are T1 and not yet settled, so broker.holdings()
+            # reports a lower total_value after a sale. Add them back to avoid a false
+            # drawdown that trips the emergency circuit breaker.
+            try:
+                unsettled = sum(
+                    float(t.get('net_pnl', 0) or 0) + float(t.get('invested', 0) or 0)
+                    for t in self._store.get_trades(action='SELL', date_from=today_str)
+                )
+                if unsettled:
+                    total_value += unsettled
+                    logger.debug(f"Circuit breaker: added unsettled proceeds ₹{unsettled:,.2f} -> total_value ₹{total_value:,.2f}")
+            except Exception as _up_e:
+                logger.debug(f"Could not add unsettled proceeds to circuit-breaker value: {_up_e}")
+
             # Use peak value file as baseline; reset to current value on a new day
             peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
+            circuit_breaker_fired = False
             try:
                 with open(peak_path) as _pf:
                     _pd = json.load(_pf)
                     saved_date = _pd.get('date', '')
                     saved_peak = float(_pd.get('peak_value', total_value)) if saved_date == today_str else total_value
+                    circuit_breaker_fired = saved_date == today_str and bool(_pd.get('circuit_breaker_fired', False))
             except Exception:
                 saved_peak = total_value
             # Update peak if current value is higher
@@ -284,14 +381,14 @@ class TradingOrchestrator:
             try:
                 os.makedirs(os.path.dirname(peak_path), exist_ok=True)
                 with open(peak_path, 'w') as _pf:
-                    json.dump({'peak_value': peak_value, 'date': today_str}, _pf)
+                    json.dump({'peak_value': peak_value, 'date': today_str, 'circuit_breaker_fired': circuit_breaker_fired}, _pf)
             except Exception:
                 pass
             # Only trigger if we have real data (total_value > 0) and genuine drawdown > 15%
             if total_value > 0 and peak_value > 0:
                 drawdown = (peak_value - total_value) / peak_value
                 if drawdown > 0.15:
-                    if self._circuit_breaker_fired_today:
+                    if self._circuit_breaker_fired_today or circuit_breaker_fired:
                         logger.warning("Circuit breaker already triggered today; not closing again")
                     else:
                         self._circuit_breaker_fired_today = True
@@ -303,6 +400,17 @@ class TradingOrchestrator:
                             "🔴 EMERGENCY CIRCUIT BREAKER",
                             f"🔴 EMERGENCY CIRCUIT BREAKER\n\nDrawdown: {drawdown:.2%} from peak ₹{peak_value:.0f}\nAll positions closed."
                         )
+                        # Persist fired flag so a restart does not send duplicate alerts
+                        try:
+                            with open(peak_path) as _pf:
+                                _pd = json.load(_pf)
+                            _pd['circuit_breaker_fired'] = True
+                            _pd['date'] = today_str
+                            _pd['peak_value'] = peak_value
+                            with open(peak_path, 'w') as _pf:
+                                json.dump(_pd, _pf)
+                        except Exception:
+                            pass
                         self.market_data.get_cycle_metrics(); return cycle_result
         except Exception as e:
             logger.warning(f"Circuit breaker check failed (skipping): {e}")
@@ -529,7 +637,7 @@ class TradingOrchestrator:
             for sig in signals[:10]:
                 logger.info(
                     f"  Signal: {sig['symbol']:12s} action={sig.get('action','?'):4s} "
-                    f"confidence={sig.get('confidence',0):.0%} "
+                    f"confidence={sig.get('confidence',0):.0f}% "
                     f"score={sig.get('overall_score',0):.3f} "
                     f"rr={sig.get('risk_reward_ratio',0):.2f} "
                     f"atr={sig.get('atr',0):.2f} "
@@ -547,7 +655,82 @@ class TradingOrchestrator:
                 pass
 
             # --- Execute BUY signals with scoring, MTF, news filter ---
-            buy_signals = [] if _daily_loss_halt else [s for s in signals if s.get('action') == 'BUY']
+            _raw_buy_signals = [] if _daily_loss_halt else [s for s in signals if s.get('action') == 'BUY']
+            buy_signals = self.opportunity_ranking.rank(
+                buy_signals=_raw_buy_signals,
+                open_positions=self.order_executor.risk_manager.positions,
+                regime=regime,
+                cash=available_cash,
+            )
+            if buy_signals:
+                _top = buy_signals[0]
+                logger.info(f"OpportunityRanking: top={_top['symbol']} score={_top['opportunity_score']:.3f} ({_top['rank_reason']})")
+
+            # ── Portfolio Rotation Engine: rotate weak capital into better ideas ──
+            try:
+                _open_positions = [
+                    p for p in self.order_executor.risk_manager.positions
+                    if p.status in {PositionStatus.OPEN, PositionStatus.PARTIAL}
+                ]
+                _pv = portfolio_value if 'portfolio_value' in locals() else (available_cash + current_invested)
+                if buy_signals and _open_positions:
+                    rotation = self.portfolio_rotation.evaluate(
+                        buy_signals=buy_signals,
+                        open_positions=_open_positions,
+                        open_symbols=open_symbols,
+                        market_data=self.market_data,
+                        date_str=now_ist.strftime('%Y-%m-%d'),
+                        portfolio_value=_pv,
+                    )
+                    if rotation:
+                        sell_sym = rotation['sell_symbol']
+                        sell_price = rotation['sell_current_price']
+                        sell_qty = rotation['sell_quantity']
+                        sell_entry = rotation['sell_entry_price']
+                        sell_pnl = sell_qty * (sell_price - sell_entry)
+                        logger.warning(
+                            f"PORTFOLIO_ROTATION | SELL {sell_sym} "
+                            f"qty={sell_qty} price={sell_price:.2f} "
+                            f"pnl={sell_pnl:.2f} -> BUY {rotation['buy_signal']['symbol']}"
+                        )
+                        sell_signal = {
+                            'symbol': sell_sym,
+                            'action': 'SELL',
+                            'current_price': sell_price,
+                            'position_size': sell_qty,
+                            'investment_amount': sell_qty * sell_price,
+                            'stop_loss': 0,
+                            'target': 0,
+                            'risk_reward_ratio': 0,
+                            'confidence': 1.0,
+                            'overall_score': 0,
+                            'reasoning': rotation['reason'],
+                            'timestamp': datetime.now().isoformat(),
+                            '_origin': 'opportunity_cost_engine',
+                        }
+                        exec_r = self.order_executor.execute_signal(sell_signal)
+                        cycle_result['orders_executed'].append(exec_r)
+                        if exec_r.get('success'):
+                            logger.info(f"Portfolio rotation SELL executed: {sell_sym}")
+                            self._record_exit(
+                                sell_sym, sell_price, 'portfolio_rotation',
+                                pnl=sell_pnl, confidence=rotation['buy_signal'].get('confidence', 0),
+                            )
+                            # Update working state for the upcoming BUY loop
+                            open_symbols.discard(sell_sym)
+                            current_invested = max(0.0, current_invested - rotation['sell_investment_amount'])
+                            try:
+                                _h = self.order_executor.broker.get_holdings()
+                                _cash = _h.get('cash', available_cash + (sell_qty * sell_price))
+                                available_cash = _cash
+                            except Exception:
+                                available_cash += sell_qty * sell_price
+                            budget = min(available_cash, config.TRADING_AMOUNT)
+                        else:
+                            logger.error(f"Portfolio rotation SELL failed for {sell_sym}: {exec_r.get('error')}")
+            except Exception as _oc_e:
+                logger.warning(f"Portfolio rotation engine error: {_oc_e}")
+
             if buy_signals:
                 # Only count OPEN slots not already used
                 open_slot_count = len([p for p in self.order_executor.risk_manager.positions
@@ -661,13 +844,13 @@ class TradingOrchestrator:
                         signal_conf = best_signal.get('confidence', 0.0)
                         overall_score = best_signal.get('overall_score', 0.0)
                         if (score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN
-                                or signal_conf < config.MIN_CONFIDENCE_SIDEWAYS
+                                or signal_conf < config.MIN_CONFIDENCE_SIDEWAYS * 100
                                 or overall_score <= config.SIDEWAYS_BUY_OVERALL_SCORE_MIN):
                             reasons = []
                             if score_result['total_score'] < config.SIDEWAYS_BUY_SCORE_MIN:
                                 reasons.append(f"score {score_result['total_score']} < {config.SIDEWAYS_BUY_SCORE_MIN}")
-                            if signal_conf < config.MIN_CONFIDENCE_SIDEWAYS:
-                                reasons.append(f"confidence {signal_conf:.0%} < {config.MIN_CONFIDENCE_SIDEWAYS:.0%}")
+                            if signal_conf < config.MIN_CONFIDENCE_SIDEWAYS * 100:
+                                reasons.append(f"confidence {signal_conf:.0f}% < {config.MIN_CONFIDENCE_SIDEWAYS*100:.0f}%")
                             if overall_score <= config.SIDEWAYS_BUY_OVERALL_SCORE_MIN:
                                 reasons.append(f"overall {overall_score:.2f} <= {config.SIDEWAYS_BUY_OVERALL_SCORE_MIN}")
                             logger.warning(self.explainer.format_skip(
@@ -710,21 +893,38 @@ class TradingOrchestrator:
                         best_signal['_reentry_meta'] = reentry_result
                         best_signal['_reentry_meta']['reentry_confidence'] = best_signal.get('confidence', 0)
 
-                    # ── Adaptive position size (score × confidence tier) ────────
-                    price      = best_signal.get('current_price', 1)
-                    confidence = best_signal.get('confidence', 0.5)
-                    # Target allocation tier × score fraction
-                    conf_mult  = self._confidence_multiplier(confidence, per_stock_budget)
-                    # Reduce position size in SIDEWAYS regime
-                    regime_size_factor = config.SIDEWAYS_SIZE_FACTOR if regime == 'SIDEWAYS' else 1.0
-                    slot_budget = per_stock_budget * score_result['size_fraction'] * conf_mult * regime_size_factor
-                    qty = max(1, int(slot_budget / price))
-                    best_signal['position_size']     = qty
-                    best_signal['investment_amount'] = qty * price
+                    # ── Dynamic position size (confidence × ATR × regime × sector × correlation) ────────
+                    _pv = portfolio_value if 'portfolio_value' in locals() else (available_cash + current_invested)
+                    max_for_this_trade = max(0.0, available_cash * config.MAX_CAPITAL_USAGE - current_invested)
+                    sizing = self.position_sizing.calculate(
+                        signal=best_signal,
+                        open_positions=self.order_executor.risk_manager.positions,
+                        open_symbols=open_symbols,
+                        base_budget=per_stock_budget,
+                        cash_for_trade=max_for_this_trade,
+                        portfolio_value=_pv,
+                        regime=regime,
+                        market_data=self.market_data,
+                    )
+                    if sizing['qty'] <= 0:
+                        logger.warning(self.explainer.format_skip(
+                            symbol=sym,
+                            reason=f"Position size zero: {sizing['reason']}",
+                            score_result=score_result,
+                            mtf_result=mtf_result,
+                            confidence=best_signal.get('confidence', 0.0),
+                            overall_score=best_signal.get('overall_score', 0.0),
+                            rr=rr,
+                            regime=regime,
+                        ))
+                        continue
+                    best_signal['position_size']     = sizing['qty']
+                    best_signal['investment_amount'] = sizing['investment_amount']
                     best_signal['trade_score']        = score_result['total_score']
                     best_signal['score_components']   = score_result['components']
                     best_signal['mtf_aligned']        = mtf_result['strict']
                     best_signal['market_regime']      = regime  # Fix 7: journal uses this
+                    logger.info(sizing['reason'])
 
                     # Capital utilization guard — use actual available cash, not fixed config amount
                     projected_invested = current_invested + best_signal['investment_amount']
@@ -774,7 +974,7 @@ class TradingOrchestrator:
                 if sym not in open_symbols:
                     logger.info(f"Skipping SELL {sym}: not in open positions")
                     continue
-                logger.info(f"Sell signal: {sym} confidence {sell_signal.get('confidence', 0):.0%}")
+                logger.info(f"Sell signal: {sym} confidence {sell_signal.get('confidence', 0):.0f}%")
                 sell_signal['_origin'] = sell_signal.get('_origin', 'signal_generator')
                 logger.info(
                     f"SELL_PIPELINE | origin={sell_signal.get('_origin')} "
@@ -791,7 +991,7 @@ class TradingOrchestrator:
             
             # --- Monitor existing positions (SL / target / trailing) - HIGHEST PRIORITY ---
             logger.info("Monitoring existing positions (Stop Loss, Target, Trailing)...")
-            position_updates = self.order_executor.monitor_positions()
+            position_updates = self.order_executor.monitor_positions(regime)
             cycle_result['positions_monitored'] = position_updates
 
             # --- Monitor CNC holdings (prior-day delivery positions) ---
@@ -974,9 +1174,26 @@ class TradingOrchestrator:
         except Exception:
             pass
 
+        # Capture today's ranked opportunity queue for dashboard / diagnostics
+        try:
+            cycle_result['ranked_opportunities'] = [
+                {
+                    'symbol': s.get('symbol'),
+                    'confidence': s.get('confidence'),
+                    'rank': s.get('rank'),
+                    'rank_score': s.get('rank_score'),
+                    'expected_return': s.get('expected_return'),
+                    'current_price': s.get('current_price'),
+                    'target': s.get('target'),
+                }
+                for s in (buy_signals if 'buy_signals' in locals() else [])
+            ]
+        except Exception:
+            cycle_result['ranked_opportunities'] = []
+
         logger.info(f"Trading cycle completed at {datetime.now()}")
         logger.info("=" * 50)
-        
+
         self.market_data.get_cycle_metrics(); return cycle_result
     
     def _run_once_wrapper(self):
@@ -1618,6 +1835,15 @@ class TradingOrchestrator:
             except Exception as e:
                 logger.error(f"Token validation failed: {e}")
                 logger.warning("Please refresh token before market open")
+
+        # Full health reconciliation before trading starts
+        recon_status = self.reconciliation_engine.reconcile_all()
+        if not recon_status.get('healthy'):
+            msg = f"Pre-market health check FAILED: {recon_status.get('error', 'mismatches detected')}. Trading blocked."
+            logger.error(msg)
+            self._alert('🔴 PRE-MARKET HEALTH BLOCK', msg)
+        else:
+            logger.info("Pre-market health check passed")
 
         # Check system status
         logger.info("System ready for trading")

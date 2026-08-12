@@ -36,7 +36,7 @@ class DecisionExplainer:
             f"",
             f"  Trade Score:        {total}/100",
             f"  Overall AI Score:   {overall_score:.2f}",
-            f"  Confidence:         {confidence*100:.0f}%",
+            f"  Confidence:         {confidence:.0f}%",
             f"  Risk:Reward:        {rr:.2f}",
             f"  Regime:             {regime}",
             f"",
@@ -85,7 +85,7 @@ class DecisionExplainer:
             lines += [
                 f"",
                 f"  Trade Score:        {total}/100",
-                f"  Confidence:         {confidence*100:.0f}%" if confidence is not None else "  Confidence:         n/a",
+                f"  Confidence:         {confidence:.0f}%" if confidence is not None else "  Confidence:         n/a",
                 f"  Overall Score:      {overall_score:.2f}" if overall_score is not None else "  Overall Score:      n/a",
                 f"  Risk:Reward:        {rr:.2f}" if rr is not None else "  Risk:Reward:        n/a",
                 f"  Regime:             {regime}" if regime is not None else "  Regime:             n/a",

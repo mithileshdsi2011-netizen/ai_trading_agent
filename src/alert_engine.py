@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from config import config
 from persistence import get_store
+from email_reports import EmailReporter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,8 +44,18 @@ class EnterpriseAlertEngine:
     ):
         self.store = store or get_store()
         self.telegram = telegram
+        if email is None and getattr(config, 'EMAIL_ENABLED', False):
+            try:
+                email = EmailReporter()
+            except Exception as _e:
+                logger.warning(f"Could not create EmailReporter: {_e}")
         self.email = email
-        self.channels = set(channels or ['log', 'dashboard'])
+        default_channels = ['log', 'dashboard']
+        if self.email is not None:
+            default_channels.append('email')
+        if self.telegram is not None:
+            default_channels.append('telegram')
+        self.channels = set(channels or default_channels)
         self._popup_queue: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
 
@@ -148,9 +159,10 @@ class EnterpriseAlertEngine:
                 pass
 
     def _to_email(self, alert: Dict[str, Any]) -> None:
-        if self.email and hasattr(self.email, 'send'):
+        if self.email and hasattr(self.email, 'send_report'):
             try:
-                self.email.send(subject=f"[{alert['level']}] {alert['source']}", body=alert['message'])
+                body = f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p></body></html>"
+                self.email.send_report(subject=f"[{alert['level']}] {alert['source']}", body=body)
             except Exception:
                 pass
 

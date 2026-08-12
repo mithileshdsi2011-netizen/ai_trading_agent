@@ -124,7 +124,7 @@ def _kite_login_url() -> str:
 
 
 def _safe_dt(value):
-    """Parse a journal date/timestamp into a naive datetime."""
+    """Parse a journal/broker date/timestamp into a naive datetime."""
     if not value:
         return None
     try:
@@ -133,9 +133,25 @@ def _safe_dt(value):
         s = str(value)
         if 'T' in s:
             return datetime.fromisoformat(s.replace('Z', '+00:00')).replace(tzinfo=None)
+        # Broker format: 'Fri, 07 Aug 2026 09:50:57 GMT'
+        for fmt in ('%a, %d %b %Y %H:%M:%S %Z', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(s, fmt).replace(tzinfo=None)
+            except Exception:
+                pass
         return datetime.strptime(s[:10], '%Y-%m-%d')
     except Exception:
         return None
+
+
+def _safe_float(value, default=0.0):
+    """Convert a value to float safely."""
+    if value is None or value == '':
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 def _duration_text(start_dt, end_dt):
@@ -348,6 +364,8 @@ def _build_trade_events(trade_cards):
     """Flatten trade cards into BUY/SELL event rows for the history table."""
     events = []
     for c in trade_cards:
+        invested = c.get('invested', 0) or 0
+        pnl_pct = round((c.get('net_pnl', 0) or 0) / invested * 100, 2) if invested else 0.0
         events.append({
             'datetime': c.get('entry_date'),
             'symbol': c['symbol'],
@@ -358,8 +376,12 @@ def _build_trade_events(trade_cards):
             'sell_price': None,
             'total_value': c.get('invested', 0),
             'pnl': None,
+            'pnl_pct': pnl_pct,
+            'charges': c.get('charges', 0),
+            'exit_reason': c.get('exit_reason') or '',
             'source': c.get('source') or 'Bot',
             'trade_id': c.get('id'),
+            'order_id': c.get('id'),
         })
         if c.get('exit_price') is not None and c.get('exit_date'):
             entry_dt_ev = _safe_dt(c.get('entry_date'))
@@ -371,6 +393,8 @@ def _build_trade_events(trade_cards):
             else:
                 sell_dt_iso = c.get('exit_date')
             total_sell = round(c['exit_price'] * c['quantity'], 2) if c.get('exit_price') and c.get('quantity') else 0.0
+            pnl = c.get('net_pnl')
+            pnl_pct = round(pnl / invested * 100, 2) if invested and pnl is not None else 0.0
             events.append({
                 'datetime': sell_dt_iso,
                 'symbol': c['symbol'],
@@ -380,11 +404,152 @@ def _build_trade_events(trade_cards):
                 'buy_price': c.get('entry_price'),
                 'sell_price': c.get('exit_price'),
                 'total_value': total_sell,
-                'pnl': c.get('net_pnl'),
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+                'charges': c.get('charges', 0),
+                'exit_reason': c.get('exit_reason') or '',
                 'source': 'Bot',
                 'trade_id': c.get('id'),
+                'order_id': c.get('id'),
             })
     return sorted(events, key=lambda x: x['datetime'] or '', reverse=True)
+
+
+def _build_order_events(orders):
+    """Flatten raw broker/journal completed orders into BUY/SELL event rows."""
+    events = []
+    for o in (orders or []):
+        if str(o.get('status', '')).upper() != 'COMPLETE':
+            continue
+        qty = int(o.get('quantity', 0) or 0)
+        if qty <= 0:
+            continue
+        ttype = (o.get('transaction_type') or 'BUY').upper()
+        if ttype not in ('BUY', 'SELL'):
+            continue
+        dt = _safe_dt(o.get('order_timestamp'))
+        sym = o.get('tradingsymbol') or o.get('symbol') or '—'
+        avg = _safe_float(o.get('average_price'), 0.0)
+        buy_px = _safe_float(o.get('buy_price'), avg) if ttype == 'SELL' else avg
+        sell_px = _safe_float(o.get('sell_price'), avg) if ttype == 'SELL' else None
+        pnl = _safe_float(o.get('pnl'), None) if ttype == 'SELL' else None
+        pnl_pct = 0.0
+        if ttype == 'SELL' and buy_px and qty:
+            pnl_pct = round(pnl / (buy_px * qty) * 100, 2) if pnl is not None and pnl != 0.0 else round((sell_px - buy_px) / buy_px * 100, 2)
+        total = round(sell_px * qty, 2) if ttype == 'SELL' and sell_px else round(avg * qty, 2)
+        source = 'Broker' if o.get('_source') != 'journal' else 'Journal'
+        events.append({
+            'datetime': dt.isoformat() if dt else str(o.get('order_timestamp', '')),
+            'symbol': sym,
+            'type': ttype,
+            'quantity': qty,
+            'price': sell_px if ttype == 'SELL' else avg,
+            'buy_price': buy_px,
+            'sell_price': sell_px if ttype == 'SELL' else None,
+            'total_value': total,
+            'pnl': pnl,
+            'pnl_pct': pnl_pct,
+            'charges': 0.0,
+            'exit_reason': o.get('exit_reason') or '',
+            'source': source,
+            'trade_id': o.get('order_id') or o.get('id'),
+            'order_id': o.get('order_id') or o.get('id') or '—',
+        })
+    return sorted(events, key=lambda x: x['datetime'] or '', reverse=True)
+
+
+def _build_order_completed(orders):
+    """Pair completed SELL orders with their BUY counterpart to form finished trades."""
+    completed = []
+    store = get_store() if get_store else None
+    sell_exit_reasons = {}
+    if store:
+        for trade in (store.get_trades(action='SELL') or []):
+            if trade.get('order_id'):
+                sell_exit_reasons[trade.get('order_id')] = trade.get('exit_reason')
+            if trade.get('symbol'):
+                sell_exit_reasons[trade.get('symbol')] = trade.get('exit_reason')
+    # Sort ascending by timestamp for FIFO pairing
+    sorted_orders = sorted(
+        [o for o in (orders or []) if str(o.get('status', '')).upper() == 'COMPLETE'],
+        key=lambda x: _safe_dt(x.get('order_timestamp')) or datetime.min,
+    )
+    open_buys = {}
+    for o in sorted_orders:
+        ttype = (o.get('transaction_type') or 'BUY').upper()
+        sym = o.get('tradingsymbol') or o.get('symbol') or '—'
+        qty = int(o.get('quantity', 0) or 0)
+        if ttype == 'BUY' and qty > 0:
+            open_buys.setdefault(sym, []).append({
+                'dt': _safe_dt(o.get('order_timestamp')),
+                'price': _safe_float(o.get('average_price'), 0.0),
+                'oid': o.get('order_id') or o.get('id') or '—',
+                'qty': qty,
+                'remaining': qty,
+            })
+        elif ttype == 'SELL' and qty > 0:
+            sell_px = _safe_float(o.get('sell_price') or o.get('average_price'), 0.0)
+            buy_px = _safe_float(o.get('buy_price'), 0.0)
+            sell_dt = _safe_dt(o.get('order_timestamp'))
+            match_oid = '—'
+            match_buy_dt = None
+            matched_qty = 0
+            # Consume from open BUY queue
+            if sym in open_buys:
+                queue = open_buys[sym]
+                i = 0
+                while i < len(queue) and matched_qty < qty:
+                    b = queue[i]
+                    take = min(b['remaining'], qty - matched_qty)
+                    if take > 0:
+                        b['remaining'] -= take
+                        matched_qty += take
+                        if not match_buy_dt:
+                            match_buy_dt = b['dt']
+                            match_oid = b['oid']
+                    i += 1
+                open_buys[sym] = [b for b in queue if b['remaining'] > 0]
+            if not buy_px and matched_qty > 0:
+                buy_px = open_buys[sym][0]['price'] if (sym in open_buys and open_buys[sym]) else 0.0
+            net = _safe_float(o.get('pnl'), 0.0)
+            qty_for_pnl = qty if qty > 0 else matched_qty
+            invested = round(buy_px * qty_for_pnl, 2) if buy_px and qty_for_pnl else 0.0
+            pnl_pct = round(net / invested * 100, 2) if invested and net != 0.0 else 0.0
+            # If pnl missing, compute gross
+            if net == 0.0 and buy_px and sell_px and qty_for_pnl:
+                net = round((sell_px - buy_px) * qty_for_pnl, 2)
+                pnl_pct = round((sell_px - buy_px) / buy_px * 100, 2) if buy_px else 0.0
+            date_str = sell_dt.date().isoformat() if sell_dt else str(o.get('order_timestamp', ''))[:10]
+            time_str = sell_dt.time().isoformat()[:8] if sell_dt else '—'
+            holding = _duration_text(match_buy_dt, sell_dt) if match_buy_dt and sell_dt else ''
+            brokerage = round(((sell_px - buy_px) * qty_for_pnl - net), 2) if buy_px and qty_for_pnl and sell_px else 0.0
+            order_id = o.get('order_id') or o.get('id')
+            exit_reason = (
+                o.get('exit_reason')
+                or sell_exit_reasons.get(order_id)
+                or sell_exit_reasons.get(sym)
+                or '—'
+            )
+            completed.append({
+                'date': date_str,
+                'time': time_str,
+                'symbol': sym,
+                'buy_price': round(buy_px, 2) if buy_px else '—',
+                'sell_price': round(sell_px, 2) if sell_px else '—',
+                'qty': qty_for_pnl,
+                'holding_hours': 0.0,
+                'holding_time': holding or '—',
+                'net_pnl': net,
+                'pnl_pct': pnl_pct,
+                'action': ttype,
+                'exit_reason': exit_reason,
+                'brokerage': brokerage,
+                'buy_order_id': match_oid,
+                'sell_order_id': order_id or '—',
+                'regime': '—',
+                'sector': '—',
+            })
+    return sorted(completed, key=lambda x: f"{x.get('date', '')} {x.get('time', '')}", reverse=True)
 
 
 def _heartbeat_loop():
@@ -1608,7 +1773,43 @@ tr:last-child td{border:none}
 
   </div>
 
-  <!-- Row 3: Global Markets -->
+  <!-- Row 3: Open Positions / Holdings -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
+      📈 Open Positions / Holdings <span id="d-holdings-count" style="color:#3b82f6">(0)</span> <span class="pulse green" style="font-size:11px">● LIVE</span>
+    </div>
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#1f2937">
+        <th style="text-align:left;padding:10px 8px">Symbol</th>
+        <th style="text-align:right;padding:10px 8px">Qty</th>
+        <th style="text-align:right;padding:10px 8px">Avg Price</th>
+        <th style="text-align:right;padding:10px 8px">CMP</th>
+        <th style="text-align:right;padding:10px 8px">Total P&amp;L</th>
+        <th style="text-align:right;padding:10px 8px">Today %</th>
+        <th style="text-align:right;padding:10px 8px">Trail SL</th>
+        <th style="text-align:right;padding:10px 8px">Target</th>
+        <th style="text-align:center;padding:10px 8px">Status</th>
+      </tr></thead>
+      <tbody id="d-positions"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+      <tfoot id="d-positions-total" style="display:none;background:#1f2937;font-weight:600">
+        <tr>
+          <td style="padding:10px 8px;text-align:left">Total</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-qty">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-pnl">—</td>
+          <td style="padding:10px 8px;text-align:right" id="d-total-day-pct">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:right">—</td>
+          <td style="padding:10px 8px;text-align:center">—</td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+  </div>
+
+  <!-- Row 4: Global Markets -->
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🌍 Global Markets</div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1699,42 +1900,6 @@ tr:last-child td{border:none}
   <!-- Position Heatmap removed - details moved to Portfolio tab -->
 
   <!-- Portfolio Summary removed - key metrics now in top cards and Portfolio tab -->
-
-  <!-- Row 5: Open Positions Table -->
-  <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">
-      📈 Open Positions / Holdings <span id="d-holdings-count" style="color:#3b82f6">(0)</span> <span class="pulse green" style="font-size:11px">● LIVE</span>
-    </div>
-    <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead><tr style="background:#1f2937">
-        <th style="text-align:left;padding:10px 8px">Symbol</th>
-        <th style="text-align:right;padding:10px 8px">Qty</th>
-        <th style="text-align:right;padding:10px 8px">Avg Price</th>
-        <th style="text-align:right;padding:10px 8px">CMP</th>
-        <th style="text-align:right;padding:10px 8px">Total P&L</th>
-        <th style="text-align:right;padding:10px 8px">Today %</th>
-        <th style="text-align:right;padding:10px 8px">Trail SL</th>
-        <th style="text-align:right;padding:10px 8px">Target</th>
-        <th style="text-align:center;padding:10px 8px">Status</th>
-      </tr></thead>
-      <tbody id="d-positions"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
-      <tfoot id="d-positions-total" style="display:none;background:#1f2937;font-weight:600">
-        <tr>
-          <td style="padding:10px 8px;text-align:left">Total</td>
-          <td style="padding:10px 8px;text-align:right" id="d-total-qty">—</td>
-          <td style="padding:10px 8px;text-align:right">—</td>
-          <td style="padding:10px 8px;text-align:right">—</td>
-          <td style="padding:10px 8px;text-align:right" id="d-total-pnl">—</td>
-          <td style="padding:10px 8px;text-align:right" id="d-total-day-pct">—</td>
-          <td style="padding:10px 8px;text-align:right">—</td>
-          <td style="padding:10px 8px;text-align:right">—</td>
-          <td style="padding:10px 8px;text-align:center">—</td>
-        </tr>
-      </tfoot>
-    </table>
-    </div>
-  </div>
 
   <!-- Row 5+6: AI Opportunities + Market -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
@@ -1959,13 +2124,12 @@ tr:last-child td{border:none}
           <th style="text-align:right;padding:10px 8px">Avg Cost</th>
           <th style="text-align:right;padding:10px 8px">CMP</th>
           <th style="text-align:right;padding:10px 8px">Invested</th>
-          <th style="text-align:right;padding:10px 8px">Current Value</th>
           <th style="text-align:right;padding:10px 8px">Unrealised P&amp;L</th>
           <th style="text-align:right;padding:10px 8px">SL</th>
           <th style="text-align:right;padding:10px 8px">Target</th>
           <th style="text-align:center;padding:10px 8px">Action</th>
         </tr></thead>
-        <tbody id="pos-holdings-table"><tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
+        <tbody id="pos-holdings-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1976,22 +2140,27 @@ tr:last-child td{border:none}
     <div id="pos-pending-orders">No pending orders</div>
   </div>
 
-  <!-- 4. Completed Trades -->
+  <!-- 4. Current Week Completed Trades -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">✅ Completed Trades</div>
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">✅ Current Week Completed Trades</div>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="background:#1f2937">
+          <th style="text-align:left;padding:10px 8px">Date</th>
+          <th style="text-align:left;padding:10px 8px">Time</th>
           <th style="text-align:left;padding:10px 8px">Symbol</th>
+          <th style="text-align:center;padding:10px 8px">Action</th>
+          <th style="text-align:right;padding:10px 8px">BUY Price</th>
+          <th style="text-align:right;padding:10px 8px">SELL Price</th>
           <th style="text-align:right;padding:10px 8px">Qty</th>
-          <th style="text-align:right;padding:10px 8px">Buy At</th>
-          <th style="text-align:right;padding:10px 8px">Sell At</th>
-          <th style="text-align:right;padding:10px 8px">Net P&amp;L</th>
           <th style="text-align:right;padding:10px 8px">Holding Time</th>
+          <th style="text-align:right;padding:10px 8px">Net P&amp;L</th>
+          <th style="text-align:right;padding:10px 8px">P&amp;L %</th>
           <th style="text-align:left;padding:10px 8px">Exit Reason</th>
           <th style="text-align:right;padding:10px 8px">Brokerage</th>
+          <th style="text-align:right;padding:10px 8px">Order IDs</th>
         </tr></thead>
-        <tbody id="pos-completed-trades"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No completed trades</td></tr></tbody>
+        <tbody id="pos-completed-trades"><tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No completed trades this week</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -2047,10 +2216,10 @@ tr:last-child td{border:none}
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
-        <th style="text-align:left">Stock</th><th>Qty</th><th>Avg Buy</th><th>Current Price</th>
+        <th style="text-align:left">Stock</th><th>Qty</th><th>Avg Buy</th>
         <th>Invested</th><th>Current Value</th><th>P&amp;L</th><th>Return</th>
       </tr></thead>
-      <tbody id="h-stock-breakdown"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Loading...</td></tr></tbody>
+      <tbody id="h-stock-breakdown"><tr><td colspan="7" style="text-align:center;color:#4b5563;padding:20px">Loading...</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -2090,11 +2259,20 @@ tr:last-child td{border:none}
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse">
       <thead><tr>
-        <th style="text-align:left">Date &amp; Time</th>
-        <th style="text-align:left">Stock</th>
-        <th>Type</th><th>Qty</th><th>Buy Price</th><th>Sell Price</th><th>Total Value</th><th>P&amp;L</th><th>Source</th>
+        <th style="text-align:left">Date</th>
+        <th style="text-align:left">Time</th>
+        <th style="text-align:left">Symbol</th>
+        <th>Action</th>
+        <th>Qty</th>
+        <th>Buy Price</th>
+        <th>Sell Price</th>
+        <th>Value</th>
+        <th>P&amp;L</th>
+        <th>P&amp;L %</th>
+        <th>Source</th>
+        <th>Order ID</th>
       </tr></thead>
-      <tbody id="h-history-table"><tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
+      <tbody id="h-history-table"><tr><td colspan="12" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr></tbody>
     </table>
     </div>
   </div>
@@ -3222,13 +3400,24 @@ function switchTab(id,btn){
   if(btn)btn.classList.add('active');
   if(id==='ipstatus') refreshIpStatus();
   if(id==='portfolio') load();
+  if(id==='positions') load();
+  if(id==='lifecycle') load();
+  if(id==='history'){
+    if(window._lastData){ window._historyData=window._lastData.trade_events||[]; renderHistory(window._historyFilter||'ALL'); }
+    load();
+  }
+  if(id==='analytics') load();
+  if(id==='signals'){ if (typeof renderAiSignals === 'function') renderAiSignals(window._lastData); }
   if(id==='morning') loadMorningReport();
+  if(id==='journal') loadJournal();
   if(id==='skipped') loadSkippedOpportunities();
   if(id==='explain') loadExplainability();
   if(id==='market-intelligence') loadMarketIntelligence();
   if(id==='portfolio-optimizer') loadPortfolioOptimizer();
   if(id==='backtesting') loadBacktesting();
+  if(id==='backtest') loadBacktesting();
   if(id==='ai-learning') loadAiLearning();
+  if(id==='botstatus') loadMonitoring();
   if(id==='monitoring') loadMonitoring();
   if(id==='smart-execution') loadSmartExecution();
 }
@@ -3566,8 +3755,8 @@ function renderPositionsTab(d){
 
   // 2. Current Holdings (aggregated one row per symbol)
   const htEl=document.getElementById('pos-holdings-table');
-  if(!positions.length){
-    if(htEl) htEl.innerHTML='<tr><td colspan="11" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+    if(!positions.length){
+    if(htEl) htEl.innerHTML='<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
   } else if(htEl){
     htEl.innerHTML = positions.map(p => {
       const sym=p.tradingsymbol;
@@ -3576,8 +3765,7 @@ function renderPositionsTab(d){
       const first=parseFloat(p.first_entry_price||avg);
       const ltp=parseFloat(p.last_price||avg);
       const invested=avg*qty;
-      const value=ltp*qty;
-      const pnl=parseFloat(p.pnl||value-invested);
+      const pnl=parseFloat(p.pnl||(ltp-avg)*qty);
       const sl=parseFloat(p.trailing_stop||p.stop_loss||0);
       const tgt=parseFloat(p.target||0);
       return `<tr style="border-bottom:1px solid #1f293744">
@@ -3587,7 +3775,6 @@ function renderPositionsTab(d){
         <td style="text-align:right;padding:10px 8px">${rupee(avg)}</td>
         <td style="text-align:right;font-weight:600;padding:10px 8px">${rupee(ltp)}</td>
         <td style="text-align:right;padding:10px 8px">${rupee(invested)}</td>
-        <td style="text-align:right;padding:10px 8px">${rupee(value)}</td>
         <td style="text-align:right;padding:10px 8px"><span class="${pnlClass(pnl)}">${pnlStr(pnl)}</span></td>
         <td style="text-align:right;padding:10px 8px;color:#ef4444">${sl>0?rupee(sl):'—'}</td>
         <td style="text-align:right;padding:10px 8px;color:#22c55e">${tgt>0?rupee(tgt):'—'}</td>
@@ -3626,38 +3813,45 @@ function renderPositionsTab(d){
     }
   }
 
-  // 4. Completed Trades from trade_events SELLs
+  // 4. Current Week Completed Trades
   const ctEl=document.getElementById('pos-completed-trades');
-  // Build trade_id -> BUY datetime map for holding time
-  const buyById={};
-  (d.trade_events||[]).forEach(t=>{ if(t.type==='BUY' && t.trade_id) buyById[t.trade_id]=t; });
-  const sells=(d.trade_events||[]).filter(t=>t.type==='SELL');
   if(ctEl){
-    if(!sells.length){
-      ctEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No completed trades</td></tr>';
+    const now=new Date();
+    const day=now.getDay();
+    const monOffset=day===0 ? -6 : 1-day;
+    const weekStart=new Date(now.getFullYear(), now.getMonth(), now.getDate()+monOffset);
+    const weekTrades=(d.completed_trades_full||[]).filter(t=>{
+      if(!t.date) return false;
+      const td=new Date(t.date+'T00:00:00');
+      return td>=weekStart && td<=now;
+    });
+    if(!weekTrades.length){
+      ctEl.innerHTML='<tr><td colspan="13" style="text-align:center;color:#4b5563;padding:20px">No completed trades this week</td></tr>';
     } else {
-      ctEl.innerHTML = sells.map(t => {
+      ctEl.innerHTML = weekTrades.map(t => {
         const sym=t.symbol;
-        const qty=parseInt(t.quantity||0);
+        const qty=parseInt(t.qty||0);
         const buy=parseFloat(t.buy_price||0);
-        const sell=parseFloat(t.sell_price||t.price||0);
-        const pnl=parseFloat(t.pnl||0);
-        const buyDt=buyById[t.trade_id]?_toDate(buyById[t.trade_id].datetime):null;
-        const sellDt=_toDate(t.datetime);
-        let hold='—';
-        if(buyDt && sellDt){
-          const h=(sellDt-buyDt)/3600000;
-          hold = h>=24?Math.floor(h/24)+'d '+(Math.floor(h%24))+'h':Math.floor(h)+'h';
-        }
+        const sell=parseFloat(t.sell_price||0);
+        const pnl=parseFloat(t.net_pnl||0);
+        const pct=parseFloat(t.pnl_pct||0);
+        const buyOid=t.buy_order_id?String(t.buy_order_id).slice(-12):'—';
+        const sellOid=t.sell_order_id?String(t.sell_order_id).slice(-12):'—';
+        const oids=(buyOid!=='—'||sellOid!=='—')?(buyOid+' / '+sellOid).replace(/— \/|\/ —/g,'—'):'—';
         return `<tr style="border-bottom:1px solid #1f293744">
+          <td style="font-size:12px;color:#9ca3af;padding:10px 8px;white-space:nowrap">${t.date||'—'}</td>
+          <td style="font-size:12px;color:#9ca3af;padding:10px 8px;white-space:nowrap">${t.time||'—'}</td>
           <td style="font-weight:700;color:#f9fafb;padding:10px 8px">${sym}</td>
-          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:center;padding:10px 8px">${t.action||'—'}</td>
           <td style="text-align:right;padding:10px 8px">${rupee(buy)}</td>
           <td style="text-align:right;padding:10px 8px">${rupee(sell)}</td>
+          <td style="text-align:right;padding:10px 8px">${qty}</td>
+          <td style="text-align:right;padding:10px 8px;color:#9ca3af">${t.holding_time||'—'}</td>
           <td style="text-align:right;padding:10px 8px"><span class="${pnlClass(pnl)}">${pnlStr(pnl)}</span></td>
-          <td style="text-align:right;padding:10px 8px;color:#9ca3af">${hold}</td>
+          <td style="text-align:right;padding:10px 8px;color:#9ca3af">${pct.toFixed(2)}%</td>
           <td style="padding:10px 8px;color:#9ca3af;font-size:12px">${t.exit_reason||'—'}</td>
-          <td style="text-align:right;padding:10px 8px;color:#9ca3af">—</td>
+          <td style="text-align:right;padding:10px 8px;color:#9ca3af">${rupee(t.brokerage||0)}</td>
+          <td style="text-align:right;padding:10px 8px;font-size:11px;color:#6b7280;font-family:monospace">${oids}</td>
         </tr>`;
       }).join('');
     }
@@ -4178,7 +4372,7 @@ function renderHistory(filter){
   const el=document.getElementById('h-history-table');
   if(!el) return;
   if(!filtered.length){
-    el.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
+    el.innerHTML='<tr><td colspan="12" style="text-align:center;color:#4b5563;padding:20px">No history yet</td></tr>';
     return;
   }
   el.innerHTML=filtered.map(o=>{
@@ -4187,13 +4381,17 @@ function renderHistory(filter){
     const sellP=o.sell_price===null||o.sell_price===undefined?null:parseFloat(o.sell_price);
     const qty=parseInt(o.quantity||0);
     const val=parseFloat(o.total_value||0);
-    const ts=fmtDateTime(o.datetime);
+    const dt=fmtDateTime(o.datetime);
+    const [dateStr, timeStr]=dt.includes(' ')?dt.split(' '):[dt,'—'];
     const pnlVal=o.pnl===null||o.pnl===undefined?null:parseFloat(o.pnl);
+    const pnlPct=parseFloat(o.pnl_pct||0);
     const pnlText=pnlVal===null?'—':pnlStr(pnlVal);
     const pnlClassName=pnlVal===null?'':pnlClass(pnlVal);
     const src='<span style="font-size:10px;color:#a78bfa;background:#1f2937;padding:2px 6px;border-radius:4px">'+String(o.source||'Bot')+'</span>';
+    const oid=o.order_id?'#'+o.order_id:'—';
     return `<tr>
-      <td style="font-size:12px;color:#9ca3af;white-space:nowrap">${ts}</td>
+      <td style="font-size:12px;color:#9ca3af;white-space:nowrap">${dateStr}</td>
+      <td style="font-size:12px;color:#9ca3af;white-space:nowrap">${timeStr}</td>
       <td style="font-weight:700;color:#f9fafb">${o.symbol||'—'}</td>
       <td><span class="badge ${isBuy?'badge-buy':'badge-sell'}">${isBuy?'BUY':'SELL'}</span></td>
       <td style="text-align:center">${qty}</td>
@@ -4201,7 +4399,9 @@ function renderHistory(filter){
       <td style="font-family:monospace">${sellP===null?'<span style="color:#4b5563">—</span>':rupee(sellP)}</td>
       <td style="font-weight:600">${rupee(val)}</td>
       <td class="${pnlClassName}">${pnlText}</td>
+      <td style="font-size:12px;color:#9ca3af">${pnlPct?pnlPct.toFixed(2)+'%':''}</td>
       <td>${src}</td>
+      <td style="font-size:11px;color:#6b7280;font-family:monospace">${oid}</td>
     </tr>`;
   }).join('');
 }
@@ -4346,8 +4546,11 @@ function renderNotifs(){
 
 // ─── Data Store ───────────────────────────────────────────────────────────────
 let prevData=null;
+let _loading=false;
 
 async function load(){
+  if(_loading) return;
+  _loading=true;
   try{
     const d=await fetch('/api/data',{cache:'no-store'}).then(r=>r.json());
     window._lastData=d;
@@ -4482,14 +4685,14 @@ async function load(){
     const maxPos=parseInt(d.cfg_max_positions||5);
     const openPos=parseInt(d.open_positions||0);
     const cash=parseFloat(d.cash||0);
-    const tradeBudget=parseFloat(d.cfg_trading_amount||15000);
     if(opp.length){
       oppEl.innerHTML=opp.slice(0,5).map(s=>{
         const score=Math.round(s.overall_score||0);
         const price=parseFloat(s.price||0);
-        const qty=Math.max(1,Math.floor(tradeBudget/price)) || 1;
-        const capital=qty*price;
-        const canBuy=openPos<maxPos && cash>=capital;
+        const qty=Math.max(1,parseInt(s.position_size||1));
+        const capital=parseFloat(s.investment_amount||qty*price);
+        const scoreMin = parseInt(d.cfg_sideways_buy_score_min || 58);
+        const canBuy=openPos<maxPos && cash>=capital && (s.trade_score||0)>=scoreMin;
         const rr2=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
         const trend=s.trend||(score>=70?'Bullish':score>=50?'Neutral':'Bearish');
         const trendStyle=trend==='Bullish'?'color:#22c55e':trend==='Bearish'?'color:#ef4444':'color:#eab308';
@@ -4613,9 +4816,9 @@ async function load(){
     const hasFii=fd.fii_net!=null || fd.dii_net!=null;
     if(hasFii){
       const fmtCr=(v)=>{const n=parseFloat(v); return isNaN(n)?'—':(n>=0?'+':'')+n.toFixed(0)+' Cr';};
-      const fiiNet=parseFloat(fd.fii_net||0);
-      const diiNet=parseFloat(fd.dii_net||0);
-      const netFlow=parseFloat(fd.net_flow||0);
+      const fiiNet=parseFloat(fd.fii_net);
+      const diiNet=parseFloat(fd.dii_net);
+      const netFlow=parseFloat(fd.net_flow);
       const fiiNetEl=document.getElementById('fii-net');
       fiiNetEl.textContent=fmtCr(fiiNet);
       fiiNetEl.className='stat-value-sm '+(fiiNet>=0?'green':'red');
@@ -4629,24 +4832,26 @@ async function load(){
       document.getElementById('fii-dii-sentiment').textContent=sent;
       document.getElementById('fii-dii-sentiment').className='stat-value-sm '+(sent==='POSITIVE'?'green':sent==='NEGATIVE'?'red':'yellow');
     } else {
+      const status=fd.status||'Awaiting market data';
       ['fii-net','dii-net','fii-dii-net','fii-dii-sentiment'].forEach(id=>{
         const el=document.getElementById(id);
-        if(el){ el.textContent='Awaiting market data'; el.className='stat-value-sm'; }
+        if(el){ el.textContent=status; el.className='stat-value-sm'; }
       });
     }
 
     // VIX Risk
     const vix=d.vix_risk||{};
-    document.getElementById('vix-value').textContent=vix.vix!=null?vix.vix.toFixed(2):'—';
+    const vixStatus=vix.status;
+    document.getElementById('vix-value').textContent=vix.vix!=null?vix.vix.toFixed(2):(vixStatus||'—');
     document.getElementById('vix-score').textContent=vix.volatility_score!=null?vix.volatility_score.toFixed(1):'—';
-    const vixFactor=parseFloat(vix.risk_factor||1);
     const vixFactorEl=document.getElementById('vix-factor');
-    vixFactorEl.textContent=vixFactor.toFixed(2);
+    vixFactorEl.textContent=vix.risk_factor!=null?parseFloat(vix.risk_factor).toFixed(2):'—';
+    const vixFactor=parseFloat(vix.risk_factor||0);
     vixFactorEl.className='stat-value-sm '+(vixFactor>=0.8?'green':vixFactor>=0.5?'yellow':'red');
-    const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
     const vixLevelEl=document.getElementById('vix-level');
-    vixLevelEl.textContent=vixLevel;
-    vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':'red');
+    vixLevelEl.textContent=vix.risk_level!=null?(vix.risk_level||'UNKNOWN').toUpperCase():'—';
+    const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
+    vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':vixLevel==='EXTREME'?'red':'');
 
     // Sector Rotation (dedupe strong from weak)
     const sr=d.sector_rotation||{};
@@ -4680,6 +4885,7 @@ async function load(){
     }
 
     // Daily goals
+    const tradeBudget=parseFloat(d.cfg_trading_amount||d.budget||15000);
     const dailyTarget=Math.round(tradeBudget*(d.cfg_tgt_pct||0.10));
     const dailyLossLimit=Math.round(tradeBudget*(d.cfg_daily_loss||0.05));
     const currentPnl=dpnl;
@@ -4740,7 +4946,6 @@ async function load(){
             <td style="font-weight:700;color:#f9fafb">${p.tradingsymbol}</td>
             <td style="text-align:center">${qty}</td>
             <td>${rupee(avg)}</td>
-            <td>${rupee(ltp)}</td>
             <td>${rupee(invested)}</td>
             <td>${rupee(curVal)}</td>
             <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
@@ -4748,7 +4953,7 @@ async function load(){
           </tr>`;
         }).join('');
       } else {
-        sbEl.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
+        sbEl.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4b5563;padding:20px">No open positions</td></tr>';
       }
     }
 
@@ -4756,6 +4961,8 @@ async function load(){
     renderHistoryOpenPositions(d);
     renderRetryQueue(d.pending_sells || []);
     window._historyData=d.trade_events||[];
+    window._completedTrades=d.completed_trades_full||[];
+    window._allOrders=d.all_orders||[];
     renderHistory(window._historyFilter||'ALL');
 
     // ── TAB: TRADE LIFECYCLE ─────────────────────────────────────────────────
@@ -5042,6 +5249,8 @@ async function load(){
   }catch(e){
     console.error('Dashboard error:',e);
     document.getElementById('last-updated').textContent='JS ERROR: '+e.message;
+  }finally{
+    _loading=false;
   }
 }
 
@@ -5420,7 +5629,7 @@ async function loadExplainability(){
     tbody.innerHTML=actions.map(a=>{
       const ts=fmtTime(a.timestamp);
       const sc=parseFloat(a.score||0).toFixed(1);
-      const conf=parseFloat(a.confidence||0).toFixed(1);
+      const confPct=(parseFloat(a.confidence||0)*100).toFixed(1);
       const pnl=a.net_pnl!==undefined?parseFloat(a.net_pnl).toFixed(2):'—';
       const mis=(a.score_components&&a.score_components.market_intelligence_score!=null)?parseFloat(a.score_components.market_intelligence_score).toFixed(1):'—';
       const color=a.action==='BUY'?'green':(a.action||'').startsWith('SELL')?'red':'yellow';
@@ -5431,7 +5640,7 @@ async function loadExplainability(){
         <td style="padding:8px;border-bottom:1px solid #374151;max-width:250px;white-space:pre-wrap">${a.reason||'—'}</td>
         <td style="padding:8px;border-bottom:1px solid #374151">${sc}</td>
         <td style="padding:8px;border-bottom:1px solid #374151">${mis}</td>
-        <td style="padding:8px;border-bottom:1px solid #374151">${conf}%</td>
+        <td style="padding:8px;border-bottom:1px solid #374151">${confPct}%</td>
         <td style="padding:8px;border-bottom:1px solid #374151">${pnl}</td>
         <td style="padding:8px;border-bottom:1px solid #374151">${a.price!=null?a.price.toFixed(2):'—'}</td>
         <td style="padding:8px;border-bottom:1px solid #374151">${a.quantity!=null?a.quantity:'—'}</td>
@@ -6378,6 +6587,7 @@ def api_data():
         "cfg_tgt_pct": config.SWING_TARGET_PERCENTAGE if config.TRADING_MODE == 'swing' else config.TARGET_PERCENTAGE,
         "cfg_max_capital": config.MAX_CAPITAL_USAGE,
         "cfg_daily_loss": config.DAILY_MAX_LOSS_PCT,
+        "cfg_sideways_buy_score_min": config.SIDEWAYS_BUY_SCORE_MIN,
         "cfg_risk_per_trade": config.RISK_PER_TRADE,
         "cfg_swing_max_hold_days": config.SWING_MAX_HOLD_DAYS,
         "cfg_reentry_cooldown_hours": config.REENTRY_COOLDOWN_HOURS,
@@ -6757,10 +6967,14 @@ def api_data():
             kite_syms_today = {o.get('tradingsymbol') for o in all_completed}
             for je in journal_entries:
                 sym = je.get('symbol')
-                ts = str(je.get('date', '')) + ' 09:00:00'
+                je_dt = _safe_dt(
+                    je.get('timestamp') or je.get('exit_date') or je.get('entry_date') or je.get('date')
+                )
+                ts = je_dt.strftime('%Y-%m-%d %H:%M:%S') if je_dt else '1970-01-01 09:00:00'
                 if je.get('kite_order_id') not in kite_ids:
-                    # Show as SELL row if the journal entry has an exit price (closed trade)
-                    if je.get('exit_price') and je.get('net_pnl') is not None:
+                    action = (je.get('action') or 'BUY').upper()
+                    if action == 'SELL' and je.get('exit_price') is not None and je.get('net_pnl') is not None:
+                        # Closed SELL from journal
                         all_completed.append({
                             'tradingsymbol':    sym,
                             'transaction_type': 'SELL',
@@ -6775,10 +6989,10 @@ def api_data():
                             '_source':          'journal',
                         })
                     else:
-                        # Still-open position — show as BUY row
+                        # Open or closed BUY (do not mislabel a closed BUY as a SELL)
                         all_completed.append({
                             'tradingsymbol':    sym,
-                            'transaction_type': je.get('action', 'BUY'),
+                            'transaction_type': 'BUY',
                             'quantity':         je.get('quantity', 0),
                             'average_price':    je.get('entry_price', 0),
                             'buy_price':        je.get('entry_price', 0),
@@ -6790,14 +7004,46 @@ def api_data():
                         })
         except Exception:
             pass
-        data['all_orders'] = sorted(all_completed, key=lambda x: str(x.get('order_timestamp', '')), reverse=True)
+        # Normalize, filter journal noise, and dedupe orders
+        all_completed = [o for o in all_completed if int(o.get('quantity', 0) or 0) > 0]
+        all_completed = [o for o in all_completed if not (
+            o.get('_source') == 'journal' and
+            (o.get('transaction_type') or 'BUY').upper() == 'SELL' and
+            _safe_float(o.get('pnl'), 0.0) == 0.0 and
+            _safe_float(o.get('buy_price'), 0.0) == _safe_float(o.get('average_price'), 0.0) and
+            not o.get('order_id')
+        )]
+        for o in all_completed:
+            _odt = _safe_dt(o.get('order_timestamp'))
+            if _odt:
+                o['order_timestamp'] = _odt.strftime('%Y-%m-%d %H:%M:%S')
+        order_groups = {}
+        for o in all_completed:
+            k = (
+                o.get('tradingsymbol') or o.get('symbol', ''),
+                o.get('transaction_type', 'BUY').upper(),
+                str(o.get('order_timestamp', '')),
+                str(int(o.get('quantity', 0) or 0)),
+            )
+            order_groups.setdefault(k, []).append(o)
+        deduped = []
+        for k, items in order_groups.items():
+            items.sort(
+                key=lambda x: (
+                    0 if x.get('_source') != 'journal' else 1,
+                    0 if x.get('order_id') else 1,
+                    -abs(_safe_float(x.get('pnl'), 0.0)),
+                )
+            )
+            deduped.append(items[0])
+        data['all_orders'] = sorted(deduped, key=lambda x: str(x.get('order_timestamp', '')), reverse=True)
 
         # Paired professional trade cards and BUY/SELL event history (no duplicate SELLs)
         try:
             now_naive = now_ist.replace(tzinfo=None)
             all_cards = _build_trade_cards(journal_entries, data.get('positions', []), now_naive)
             data['trade_cards'] = [c for c in all_cards if c.get('status') == 'Open']
-            data['trade_events'] = _build_trade_events([c for c in all_cards if c.get('status') == 'Completed'])
+            data['trade_events'] = _build_order_events(data.get('all_orders', []))
         except Exception as _tc_err:
             logger.error(f"Trade history card build failed: {_tc_err}")
             data['trade_cards'] = []
@@ -6922,6 +7168,9 @@ def api_data():
                 for t in closed
             ], key=lambda x: x.get('date', ''), reverse=True)
 
+            # Completed trades now reconciled from broker + journal orders (one row per SELL)
+            data['completed_trades_full'] = _build_order_completed(data.get('all_orders', []))
+
             # Portfolio growth curve from realized P&L
             start_capital = float(data.get('budget', config.TRADING_AMOUNT) or 15000)
             closed_sorted = sorted(closed, key=lambda x: x.get('exit_date', '') or '')
@@ -7001,11 +7250,24 @@ def api_data():
             if p.get('_source') != 'holding'  # don't double-count settled holdings
         )
         total_stocks_value = holdings_value + t1_value
+
+        # Same-day CNC sales are not yet settled in kite.margins(); include them in
+        # the displayed account balance so the user sees where the money is.
+        today_str = now_ist.strftime("%Y-%m-%d")
+        unsettled = 0.0
+        try:
+            if get_store is not None:
+                for t in get_store().get_trades(action='SELL', date_from=today_str):
+                    unsettled += _safe_float(t.get('net_pnl', 0)) + _safe_float(t.get('invested', 0))
+        except Exception:
+            pass
+
         data['holdings_value'] = total_stocks_value
-        # True portfolio = cash + current market value of all stocks (settled + T+1)
-        data['net_portfolio_value'] = data.get('cash', 0) + total_stocks_value
+        data['unsettled_proceeds'] = round(unsettled, 2)
+        # True portfolio = cash + current market value of all stocks (settled + T+1) + unsettled sales
+        data['net_portfolio_value'] = data.get('cash', 0) + total_stocks_value + unsettled
         # account_balance shown in Portfolio tab header = total portfolio value
-        data['account_balance'] = data.get('cash', 0) + total_stocks_value
+        data['account_balance'] = data.get('cash', 0) + total_stocks_value + unsettled
     except Exception:
         pass
 
@@ -7342,19 +7604,61 @@ def api_data():
     except Exception:
         data['sector_rotation'] = {}
 
-    # India VIX risk snapshot (from store; computed separately)
-    try:
-        if get_store is not None:
-            data['vix_risk'] = get_store().get_latest_vix_risk() or {}
-    except Exception:
-        data['vix_risk'] = {}
+    # Market-open guard for messaging (09:15-15:30 IST, Mon-Fri)
+    _wd = now_ist.weekday()
+    _hr, _min = now_ist.hour, now_ist.minute
+    market_open = (
+        _wd < 5
+        and (_hr > 9 or (_hr == 9 and _min >= 15))
+        and (_hr < 15 or (_hr == 15 and _min <= 30))
+    )
+    _status_unavailable = 'Market Closed' if not market_open else 'Awaiting Data'
 
-    # FII/DII institutional flow snapshot (from store; computed separately)
+    # India VIX risk snapshot (computed live from Kite)
     try:
-        if get_store is not None:
-            data['fii_dii'] = get_store().get_latest_fii_dii() or {}
-    except Exception:
-        data['fii_dii'] = {}
+        _vix = None
+        for _vix_key in ("NSE:INDIA VIX", "NSE:INDIAVIX"):
+            try:
+                _q = kite.ltp([_vix_key])
+                if _q and _vix_key in _q and _q[_vix_key].get('last_price'):
+                    _p = float(_q[_vix_key]['last_price'])
+                    if _p > 0:
+                        _vix = _p
+                        break
+            except Exception:
+                continue
+        if _vix is not None:
+            from vix_risk_engine import IndiaVIXRiskEngine
+            data['vix_risk'] = {
+                'timestamp': now_ist.isoformat(),
+                'vix': round(_vix, 2),
+                'volatility_score': round(min(100.0, _vix * 2.5), 2),
+                'risk_factor': IndiaVIXRiskEngine.risk_factor_from_vix(_vix),
+                'risk_level': IndiaVIXRiskEngine.risk_level(_vix),
+            }
+        else:
+            data['vix_risk'] = {'status': _status_unavailable, 'reason': 'Could not fetch India VIX'}
+    except Exception as _vix_err:
+        data['vix_risk'] = {'status': _status_unavailable, 'reason': 'VIX fetch error'}
+
+    # FII/DII institutional flow snapshot (computed live from NSE)
+    try:
+        from fii_dii import FII_DII_Engine
+        _fd_engine = FII_DII_Engine(store=get_store() if get_store is not None else None)
+        _fd = _fd_engine.compute(refresh=True)
+        if _fd.get('reason'):
+            data['fii_dii'] = {
+                'status': _status_unavailable,
+                'reason': _fd.get('reason'),
+                'fii_net': None,
+                'dii_net': None,
+                'net_flow': None,
+                'sentiment': None,
+            }
+        else:
+            data['fii_dii'] = _fd
+    except Exception as _fd_err:
+        data['fii_dii'] = {'status': _status_unavailable, 'reason': 'FII/DII fetch error'}
 
     # Options chain intelligence snapshot (from store; computed separately)
     try:
