@@ -57,6 +57,7 @@ class EnterpriseAlertEngine:
             default_channels.append('telegram')
         self.channels = set(channels or default_channels)
         self._popup_queue: List[Dict[str, Any]] = []
+        self._email_cooldowns: Dict[str, datetime] = {}  # Track email cooldowns per source
         self._lock = threading.Lock()
 
     # ── Core alert lifecycle ──────────────────────────────────────────────
@@ -161,8 +162,20 @@ class EnterpriseAlertEngine:
     def _to_email(self, alert: Dict[str, Any]) -> None:
         if self.email and hasattr(self.email, 'send_report'):
             try:
+                # Add cooldown: only send email if 1 hour has passed since last email for same source
+                cooldown_key = f"email_cooldown_{alert['source']}"
+                now = datetime.now()
+                last_sent = self._email_cooldowns.get(cooldown_key)
+                
+                if last_sent and (now - last_sent).total_seconds() < 3600:  # 1 hour cooldown
+                    logger.info(f"Email cooldown active for {alert['source']}, skipping duplicate alert")
+                    return
+                
                 body = f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p></body></html>"
                 self.email.send_report(subject=f"[{alert['level']}] {alert['source']}", body=body)
+                
+                # Store cooldown timestamp
+                self._email_cooldowns[cooldown_key] = now
             except Exception:
                 pass
 
