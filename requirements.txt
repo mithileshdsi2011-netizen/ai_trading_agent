@@ -1,4 +1,6 @@
 # Core dependencies
+Flask==3.0.3
+psutil==6.0.0
 yfinance==0.2.44
 pandas==2.2.2
 numpy==1.26.4

@@ -47,6 +47,7 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
         'paper_trading': True
     }
     mock_executor.monitor_positions.return_value = []
+    mock_executor.monitor_holdings.return_value = []
     mock_executor.get_execution_summary.return_value = {
         'position_summary': {
             'open_positions': 1,
@@ -73,7 +74,7 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
             'stop_loss': 2450.0,
             'target': 2600.0,
             'risk_reward_ratio': 2.0,
-            'confidence': 0.8,
+            'confidence': 80,
             'overall_score': 0.6
         }
     ]
@@ -96,11 +97,19 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
         'components': {},
         'size_fraction': 1.0
     }
+    orchestrator.position_sizing = Mock()
+    orchestrator.position_sizing.calculate.return_value = {
+        'qty': 2,
+        'investment_amount': 5000.0,
+        'reason': 'deterministic test sizing',
+    }
     orchestrator.explainer = Mock()
     orchestrator.explainer.format_skip.return_value = ''
     orchestrator.explainer.format_buy.return_value = ''
     orchestrator.telegram = Mock()
     orchestrator.email = Mock()
+    orchestrator._store.get_broker_state = Mock(return_value={})
+    mock_market.is_market_holiday.return_value = False
 
     # Disable external-service-dependent guards
     orchestrator._is_correlated_with_open = lambda *a, **kw: False
@@ -131,6 +140,25 @@ class TestTradingOrchestrator:
         assert result['market_open'] is False
         assert len(result['signals_generated']) == 0
         assert len(result['orders_executed']) == 0
+
+    @patch('trading_orchestrator.MarketDataFetcher')
+    @patch('trading_orchestrator.SignalGenerator')
+    @patch('trading_orchestrator.OrderExecutor')
+    def test_run_once_known_nse_holiday(self, mock_executor, mock_signal, mock_market):
+        """Holiday handling is deterministic and independent of today's date."""
+        mock_market_instance = Mock()
+        mock_signal_instance = Mock()
+        mock_executor_instance = Mock()
+        orchestrator = TradingOrchestrator()
+        _stub_run_once_deps(orchestrator, mock_market_instance, mock_signal_instance,
+                            mock_executor_instance, market_open=False)
+        mock_market_instance.is_market_holiday.return_value = True
+
+        result = orchestrator.run_once()
+
+        assert result['market_open'] is False
+        assert result['signals_generated'] == []
+        assert result['orders_executed'] == []
     
     @patch('trading_orchestrator.MarketDataFetcher')
     @patch('trading_orchestrator.SignalGenerator')

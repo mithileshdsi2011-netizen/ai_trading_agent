@@ -75,6 +75,15 @@ class TestMarketDataFetcher:
 
         assert result.empty
 
+    def test_instrument_mapping_does_not_invent_missing_symbol(self, fetcher, monkeypatch):
+        """A symbol absent from the current NSE master remains unavailable."""
+        monkeypatch.setattr(
+            type(fetcher), '_symbol_to_token', {'TATAPOWER': 877057}, raising=False
+        )
+
+        assert fetcher._get_instrument_token('TATAPOWER') == 877057
+        assert fetcher._get_instrument_token('TATAMOTORS') is None
+
     def test_get_realtime_price(self, fetcher, monkeypatch):
         """Test getting real-time price"""
         monkeypatch.setattr(

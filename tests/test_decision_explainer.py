@@ -4,6 +4,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import pytest
+import re
 from decision_explainer import DecisionExplainer
 
 
@@ -28,7 +29,7 @@ def test_format_buy_contains_key_fields():
         symbol='RELIANCE',
         score_result=_score_result(),
         mtf_result={'aligned': True},
-        confidence=0.72,
+        confidence=72,
         overall_score=0.84,
         rr=2.3,
         regime='BULL',
@@ -36,7 +37,7 @@ def test_format_buy_contains_key_fields():
     assert 'BUY RELIANCE' in out
     assert 'Trade Score:        80' in out
     assert 'Overall AI Score:   0.84' in out
-    assert 'Confidence:         72%' in out
+    assert re.search(r'Confidence:\s+72%', out)
     assert 'Risk:Reward:        2.3' in out
     assert 'Regime:             BULL' in out
     assert 'Decision:           BUY' in out
@@ -54,7 +55,7 @@ def test_format_skip_with_score_breakdown():
             'volume': 12, 'sector': 4, 'sentiment': 0, 'regime': 6,
         }),
         mtf_result={'aligned': False},
-        confidence=0.60,
+        confidence=60,
         overall_score=0.37,
         rr=1.2,
         regime='SIDEWAYS',
@@ -62,7 +63,7 @@ def test_format_skip_with_score_breakdown():
     assert 'SKIP HAPPSTMNDS' in out
     assert 'Decision:           SKIP' in out
     assert 'Trade Score:        63' in out
-    assert 'Confidence:         60%' in out
+    assert re.search(r'Confidence:\s+60%', out)
     assert 'MTF               FAIL' in out
 
 

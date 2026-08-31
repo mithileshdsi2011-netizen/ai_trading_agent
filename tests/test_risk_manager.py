@@ -33,7 +33,7 @@ class TestRiskManager:
             'stop_loss': 2450.0,
             'target': 2600.0,
             'risk_reward_ratio': 2.0,
-            'confidence': 0.8,
+            'confidence': 80,
             'overall_score': 0.6,
             '_research': {'sector': 'Energy'},
             'market_regime': 'BULL'
@@ -76,7 +76,7 @@ class TestRiskManager:
     
     def test_can_open_position_low_confidence(self, risk_manager, sample_signal):
         """Test can open position with low confidence"""
-        sample_signal['confidence'] = 0.5
+        sample_signal['confidence'] = 50
         result = risk_manager.can_open_position(sample_signal)
         assert result is False
     

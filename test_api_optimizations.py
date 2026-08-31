@@ -7,6 +7,7 @@ import sys
 import os
 import time
 from datetime import datetime
+import pytest
 
 sys.path.insert(0, 'src')
 
@@ -14,6 +15,12 @@ from api_usage_monitor import api_monitor
 from optimized_market_data import OptimizedMarketDataFetcher
 from optimized_signal_generator import OptimizedSignalGenerator
 from api_integration_manager import api_manager
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get('RUN_LIVE_TESTS') != '1',
+    reason='Requires explicit RUN_LIVE_TESTS=1 because it calls live market-data APIs',
+)
 
 def test_batch_vs_individual_calls():
     """Test batch API calls vs individual calls"""
@@ -79,13 +86,9 @@ def test_batch_vs_individual_calls():
         print(f"   Speed improvement: {individual_time/batch_time:.1f}x faster")
         print()
     
-    return {
-        'individual_time': individual_time,
-        'batch_time': batch_time,
-        'individual_calls': individual_calls,
-        'batch_calls': batch_calls,
-        'symbols_tested': len(test_symbols)
-    }
+    assert batch_calls == 1
+    assert len(batch_prices) <= len(test_symbols)
+    assert batch_time >= 0
 
 def test_signal_generation_optimization():
     """Test optimized signal generation"""
@@ -119,12 +122,11 @@ def test_signal_generation_optimization():
     print(f"   Batch processing: {stats['batch_processing']}")
     print()
     
-    return {
-        'signals_count': len(signals),
-        'time_taken': elapsed_time,
-        'symbols_processed': len(test_symbols),
-        'optimization_stats': stats
-    }
+    assert isinstance(signals, list)
+    assert len(signals) <= len(test_symbols)
+    assert elapsed_time >= 0
+    assert stats['batch_processing'] is True
+    assert stats['optimization_enabled'] is True
 
 def test_api_usage_monitoring():
     """Test API usage monitoring and reporting"""
@@ -162,7 +164,8 @@ def test_api_usage_monitoring():
         print("✅ No optimizations needed - API usage is optimal")
         print()
     
-    return report
+    assert report['total_api_calls'] >= 0
+    assert 0 <= report['health_score'] <= 100
 
 def test_integration_manager():
     """Test the API integration manager"""
@@ -196,11 +199,9 @@ def test_integration_manager():
     print(f"   Circuit breaker events: {metrics['circuit_breaker_events']}")
     print()
     
-    return {
-        'market_data': market_data,
-        'performance_metrics': metrics,
-        'data_fetch_time': data_time
-    }
+    assert set(('prices', 'stock_info', 'historical_data')) <= set(market_data)
+    assert metrics['total_api_calls'] >= 0
+    assert data_time >= 0
 
 def simulate_trading_cycle():
     """Simulate a complete trading cycle with optimizations"""
@@ -286,19 +287,19 @@ def main():
     
     try:
         # Run all tests
-        test1_results = test_batch_vs_individual_calls()
-        test2_results = test_signal_generation_optimization()
-        test3_results = test_api_usage_monitoring()
-        test4_results = test_integration_manager()
+        test_batch_vs_individual_calls()
+        test_signal_generation_optimization()
+        test_api_usage_monitoring()
+        test_integration_manager()
         test5_results = simulate_trading_cycle()
         
         # Summary
         print("🎯 TESTING SUMMARY")
         print("=" * 60)
-        print(f"✅ Batch vs Individual: {test1_results['batch_calls']} vs {test1_results['individual_calls']} calls")
-        print(f"✅ Signal Generation: {test2_results['signals_count']} signals in {test2_results['time_taken']:.2f}s")
-        print(f"✅ API Monitoring: Health score {test3_results['health_score']}/100")
-        print(f"✅ Integration Manager: {test4_results['performance_metrics']['efficiency_percentage']:.1f}% efficiency")
+        print("✅ Batch vs Individual: assertions passed")
+        print("✅ Signal Generation: assertions passed")
+        print("✅ API Monitoring: assertions passed")
+        print("✅ Integration Manager: assertions passed")
         print(f"✅ Trading Cycle: {test5_results['reduction_percentage']:.1f}% API reduction")
         print()
         
