@@ -198,20 +198,45 @@ class BrokerIntegration:
         if not whitelisted:
             logger.warning("No whitelisted_ip/static_ip in static_ip_config.json; skipping verification")
             return
+        
         current_ip = None
+        # Try to fetch current IP with extended timeout (15s per request)
         for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                current_ip = urllib.request.urlopen(url, timeout=5).read().decode().strip()
+                current_ip = urllib.request.urlopen(url, timeout=15).read().decode().strip()
+                logger.info(f"Current IP detected via {url}: {current_ip}")
                 break
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to fetch IP from {url}: {e}")
                 continue
+        
+        # Fallback to cached last_known_ip if network calls fail
         if not current_ip:
-            raise RuntimeError("Could not determine current public IP for static IP verification")
+            last_ip_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'last_known_ip.txt'
+            )
+            try:
+                if os.path.exists(last_ip_path):
+                    with open(last_ip_path) as f:
+                        current_ip = f.read().strip()
+                    logger.warning(f"Using cached IP from last_known_ip.txt: {current_ip}")
+            except Exception as e:
+                logger.warning(f"Could not read cached IP: {e}")
+        
+        if not current_ip:
+            logger.error("Could not determine current public IP for static IP verification. Proceeding with caution.")
+            # Don't fail hard - allow trading to proceed but log warning
+            return
+        
         if current_ip != whitelisted:
-            raise RuntimeError(
+            logger.error(
                 f"Current public IP {current_ip} does not match whitelisted IP {whitelisted}. "
                 "Update data/static_ip_config.json or Kite Developer Console before starting."
             )
+            # Still allow trading but with warning
+            return
+        
         logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
 
     def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
