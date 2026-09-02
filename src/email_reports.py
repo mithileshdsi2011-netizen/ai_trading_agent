@@ -10,6 +10,7 @@ from datetime import datetime, date
 from typing import Dict, List, Set
 
 from config import config
+from persistence import get_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,6 +68,13 @@ class EmailReporter:
         if self._already_sent(subject):
             logger.info(f"Email already sent today, skipping duplicate: {subject}")
             return False
+
+        if subject.startswith("AI Swing Trading Bot – Daily Trading Report – "):
+            report_date = subject.rsplit(" – ", 1)[-1]
+            report_key = f"daily-trading-report:{report_date}"
+            if not get_store().claim_email_report(report_key):
+                logger.info(f"Daily email report already claimed, skipping duplicate: {subject}")
+                return False
         try:
             msg = MIMEMultipart()
             msg["From"] = self.username

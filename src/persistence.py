@@ -451,6 +451,11 @@ class TradingStore:
                 CREATE INDEX IF NOT EXISTS idx_notification_history_timestamp
                     ON notification_history (timestamp);
 
+                CREATE TABLE IF NOT EXISTS email_report_sends (
+                    report_key TEXT PRIMARY KEY,
+                    sent_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS daily_health_reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
@@ -2054,6 +2059,19 @@ class TradingStore:
                         snapshot.get("content", ""),
                     ),
                 )
+
+    def claim_email_report(self, report_key: str) -> bool:
+        """Atomically claim a report key so only one process can send it."""
+        with self._lock:
+            with self._conn() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO email_report_sends (report_key, sent_at)
+                    VALUES (?, ?)
+                    """,
+                    (report_key, datetime.now().isoformat()),
+                )
+                return cursor.rowcount == 1
 
     def get_notification_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:

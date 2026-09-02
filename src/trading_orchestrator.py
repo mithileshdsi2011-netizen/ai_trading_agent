@@ -1781,16 +1781,12 @@ class TradingOrchestrator:
         return result
     
     def _send_eod_reports(self):
-        """Send end-of-day Telegram summary + email report."""
+        """Send the end-of-day Telegram summary."""
         try:
             summary = self.get_performance_report()
             self.telegram.daily_summary(summary)
         except Exception as e:
             logger.error(f"Telegram EOD summary failed: {e}")
-        try:
-            self.daily_email_report()
-        except Exception as e:
-            logger.error(f"EOD email report failed: {e}")
 
     def daily_reset(self):
         """Reset daily statistics"""
