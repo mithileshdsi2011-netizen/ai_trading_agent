@@ -2954,6 +2954,21 @@ tr:last-child td{border:none}
 
     </div><!-- /6-card grid -->
 
+    <!-- ── Duplicate PID Detection Box ─────────────────────────────────────── -->
+    <div style="background:#1e293b;border-radius:12px;padding:18px 24px;border:1px solid #334155;margin-bottom:20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div id="pid-status-icon" style="font-size:32px">🔄</div>
+      <div style="flex:1;min-width:200px">
+        <div style="color:#94a3b8;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Duplicate PID Detection</div>
+        <div id="pid-status-text" style="font-size:18px;font-weight:700;color:#f1f5f9">Checking…</div>
+        <div id="pid-status-sub" style="font-size:12px;color:#64748b;margin-top:3px">—</div>
+      </div>
+      <div style="text-align:right;min-width:120px">
+        <div style="color:#64748b;font-size:10px;margin-bottom:4px">PROCESSES</div>
+        <div id="pid-count" style="font-size:20px;font-weight:700;color:#f1f5f9">—</div>
+      </div>
+      <button onclick="refreshPidStatus()" style="background:#3b82f6;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap">🔄 Refresh</button>
+    </div>
+
     <!-- ── Quick Action Links (always visible) ──────────────────────────── -->
     <div style="background:#1e293b;border-radius:12px;padding:18px 20px;border:1px solid #334155;margin-bottom:20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
       <div style="font-size:13px;font-weight:600;color:#94a3b8;flex:1 1 160px">🔧 Kite Quick Actions</div>
@@ -3398,7 +3413,10 @@ function switchTab(id,btn){
   const tabEl=document.getElementById('tab-'+id);
   if(tabEl){tabEl.classList.add('active');tabEl.style.display='block';}
   if(btn)btn.classList.add('active');
-  if(id==='ipstatus') refreshIpStatus();
+  if(id==='ipstatus'){
+    refreshIpStatus();
+    refreshPidStatus();
+  }
   if(id==='portfolio') load();
   if(id==='positions') load();
   if(id==='lifecycle') load();
@@ -6522,6 +6540,30 @@ async function loadAiLearning(){
     }
   }catch(e){console.error('AI Learning load error:',e);}
 }
+
+// ─── PID Status Loader ───────────────────────────────────────────────────────
+async function refreshPidStatus(){
+  try{
+    const r=await fetch('/api/pid-status');
+    const d=await r.json();
+    const icon=document.getElementById('pid-status-icon');
+    const text=document.getElementById('pid-status-text');
+    const sub=document.getElementById('pid-status-sub');
+    const count=document.getElementById('pid-count');
+    if(icon)icon.textContent=d.status.includes('OK')?'✅':d.status.includes('DUPLICATE')?'🔴':'⚠️';
+    if(text)text.textContent=d.status;
+    if(sub)sub.textContent=d.message;
+    if(count)count.textContent=d.count;
+  }catch(e){
+    console.error('PID status load error:',e);
+    const icon=document.getElementById('pid-status-icon');
+    const text=document.getElementById('pid-status-text');
+    const sub=document.getElementById('pid-status-sub');
+    if(icon)icon.textContent='⚠️';
+    if(text)text.textContent='⚠️ PID CHECK ERROR';
+    if(sub)sub.textContent=e.message;
+  }
+}
 </script>
 </body></html>"""
 
@@ -8357,6 +8399,45 @@ def api_health():
     except Exception:
         pass
     return jsonify(h)
+
+
+@app.route('/api/pid-status')
+def api_pid_status():
+    """Check for duplicate trading bot processes."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['pgrep', '-f', 'trading_orchestrator.py'],
+            capture_output=True,
+            text=True
+        )
+        pids = [pid.strip() for pid in result.stdout.split('\n') if pid.strip()]
+        count = len(pids)
+        if count == 0:
+            return jsonify({
+                'status': '⚠️ PID CHECK ERROR',
+                'count': 0,
+                'message': 'No trading orchestrator process found'
+            })
+        elif count == 1:
+            return jsonify({
+                'status': '🟢 PID OK',
+                'count': 1,
+                'message': 'Single process running'
+            })
+        else:
+            return jsonify({
+                'status': '🔴 DUPLICATE PID RUNNING',
+                'count': count,
+                'message': f'{count} duplicate processes detected',
+                'pids': pids
+            })
+    except Exception as e:
+        return jsonify({
+            'status': '⚠️ PID CHECK ERROR',
+            'count': 0,
+            'message': str(e)
+        })
 
 
 @app.route('/api/portfolio/optimizer')
