@@ -162,12 +162,16 @@ class EnterpriseAlertEngine:
     def _to_email(self, alert: Dict[str, Any]) -> None:
         if self.email and hasattr(self.email, 'send_report'):
             try:
-                # Add cooldown: only send email if 1 hour has passed since last email for same source
-                cooldown_key = f"email_cooldown_{alert['source']}"
+                # Add cooldown: only send email if cooldown period has passed since last email for same source+message
+                # Use source+message combination to avoid spam for the same recurring issue
+                cooldown_key = f"email_cooldown_{alert['source']}_{hash(alert['message'])}"
                 now = datetime.now()
                 last_sent = self._email_cooldowns.get(cooldown_key)
                 
-                if last_sent and (now - last_sent).total_seconds() < 3600:  # 1 hour cooldown
+                # Use 24 hour cooldown for critical alerts, 1 hour for others
+                cooldown_seconds = 86400 if alert['level'] == 'CRITICAL' else 3600
+                
+                if last_sent and (now - last_sent).total_seconds() < cooldown_seconds:
                     logger.info(f"Email cooldown active for {alert['source']}, skipping duplicate alert")
                     return
                 
