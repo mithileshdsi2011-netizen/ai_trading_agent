@@ -1591,6 +1591,8 @@ tr:last-child td{border:none}
   <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
   <button class="tab-btn" onclick="switchTab('monitoring',this)">🚨 Monitoring</button>
   <button class="tab-btn" onclick="switchTab('smart-execution',this)">⚡ Smart Execution</button>
+  <button class="tab-btn" onclick="switchTab('ipo',this)">📊 IPO Intelligence</button>
+  <button class="tab-btn" onclick="switchTab('intraday',this)">⚡ Intraday Trading</button>
 </div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
@@ -3362,6 +3364,212 @@ tr:last-child td{border:none}
   </div>
 </div><!-- /tab-smart-execution -->
 
+<!-- ===== TAB: IPO INTELLIGENCE ===== -->
+<div id="tab-ipo" class="tab-content">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div>
+      <h3 style="color:#f9fafb;font-size:18px;margin:0">📊 IPO Intelligence</h3>
+      <div style="font-size:12px;color:#6b7280;margin-top:4px">Analyze Indian IPOs with scoring and risk assessment</div>
+    </div>
+    <div id="ipo-data-source" style="font-size:11px;color:#f59e0b;background:#f59e0b22;padding:6px 12px;border-radius:4px;font-weight:600">Demo IPO data</div>
+  </div>
+
+  <!-- IPO Summary Table -->
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">IPO Summary</div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#1f2937">
+          <th style="text-align:left;padding:10px 8px">IPO</th>
+          <th style="text-align:left;padding:10px 8px">Price Band</th>
+          <th style="text-align:center;padding:10px 8px">Score</th>
+          <th style="text-align:center;padding:10px 8px">Risk</th>
+          <th style="text-align:center;padding:10px 8px">Recommendation</th>
+          <th style="text-align:center;padding:10px 8px">Status</th>
+        </tr></thead>
+        <tbody id="ipo-summary-table"><tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- IPO Sections -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+    <!-- Open IPOs -->
+    <div class="card">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🟢 Open IPOs</div>
+      <div id="ipo-open-list" style="font-size:13px;color:#4b5563">Loading...</div>
+    </div>
+
+    <!-- Upcoming IPOs -->
+    <div class="card">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📅 Upcoming IPOs</div>
+      <div id="ipo-upcoming-list" style="font-size:13px;color:#4b5563">Loading...</div>
+    </div>
+
+    <!-- Recently Listed -->
+    <div class="card">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Recently Listed</div>
+      <div id="ipo-recent-list" style="font-size:13px;color:#4b5563">Loading...</div>
+    </div>
+
+    <!-- Post-Listing Watchlist -->
+    <div class="card">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">👁️ Post-Listing Watchlist</div>
+      <div id="ipo-watchlist" style="font-size:13px;color:#4b5563">No IPOs in watchlist (READ-ONLY)</div>
+    </div>
+  </div>
+
+  <!-- IPO Detail View -->
+  <div class="card" id="ipo-detail-card" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">IPO Details</div>
+      <button onclick="document.getElementById('ipo-detail-card').style.display='none'" style="background:#1f2937;color:#e5e7eb;border:none;padding:6px 12px;border-radius:4px;font-size:12px;cursor:pointer">Close</button>
+    </div>
+    <div id="ipo-detail-content" style="font-size:13px;color:#f9fafb">Select an IPO to view details</div>
+  </div>
+</div><!-- /tab-ipo -->
+
+<!-- ===== TAB: INTRADAY TRADING ===== -->
+<div id="tab-intraday" class="tab-content">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div>
+      <h3 style="color:#f9fafb;font-size:18px;margin:0">⚡ Intraday Trading</h3>
+      <p style="color:#9ca3af;font-size:13px;margin:4px 0 0 0">Angel One SmartAPI - Paper Trading Mode</p>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button onclick="loadIntradayData()" style="background:#1d4ed8;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-size:13px;cursor:pointer">Refresh</button>
+    </div>
+  </div>
+
+  <!-- Status Boxes -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px">
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Angel Authentication</div>
+      <div id="intraday-auth-status" style="color:#f9fafb;font-size:16px;font-weight:700">NOT CONFIGURED</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Market Data</div>
+      <div id="intraday-market-status" style="color:#f9fafb;font-size:16px;font-weight:700">UNAVAILABLE</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Mode</div>
+      <div id="intraday-mode" style="color:#10b981;font-size:16px;font-weight:700">PAPER</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Trading Status</div>
+      <div id="intraday-trading-status" style="color:#10b981;font-size:16px;font-weight:700">ACTIVE</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Market Regime</div>
+      <div id="intraday-regime" style="color:#f9fafb;font-size:16px;font-weight:700">—</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Static IP (Angel)</div>
+      <div id="intraday-static-ip" style="color:#9ca3af;font-size:13px;font-weight:600">NOT REQUIRED FOR PAPER MODE</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Kill Switch</div>
+      <button id="intraday-kill-btn" onclick="toggleIntradayKillSwitch()" style="background:#ef4444;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">STOP INTRADAY</button>
+    </div>
+  </div>
+
+  <!-- Today's Summary -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Today</h4>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Trades</div>
+        <div id="intraday-trades-count" style="color:#f9fafb;font-size:18px;font-weight:700">0 / 5</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Wins</div>
+        <div id="intraday-wins" style="color:#10b981;font-size:18px;font-weight:700">0</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Losses</div>
+        <div id="intraday-losses" style="color:#ef4444;font-size:18px;font-weight:700">0</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">P&L</div>
+        <div id="intraday-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Daily Loss Limit</div>
+        <div id="intraday-loss-limit" style="color:#f9fafb;font-size:18px;font-weight:700">₹200</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Opportunities -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Top Opportunities</h4>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:#374151">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Direction</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Score</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Entry</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Stop</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Target</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">R:R</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Status</th>
+          </tr>
+        </thead>
+        <tbody id="intraday-opportunities-body">
+          <tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Open Paper Positions</h4>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:#374151">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Side</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Entry</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Current</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">SL</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Target</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">P&L</th>
+          </tr>
+        </thead>
+        <tbody id="intraday-positions-body">
+          <tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Trade History -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Today's Trade History</h4>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:#374151">
+            <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Entry</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Exit</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">P&L</th>
+            <th style="padding:8px;text-align:left;color:#f9fafb">Exit Reason</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Time</th>
+          </tr>
+        </thead>
+        <tbody id="intraday-history-body">
+          <tr><td colspan="6" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /tab-intraday -->
+
 </div><!-- /main container -->
 
 <script>
@@ -3438,6 +3646,8 @@ function switchTab(id,btn){
   if(id==='botstatus') loadMonitoring();
   if(id==='monitoring') loadMonitoring();
   if(id==='smart-execution') loadSmartExecution();
+  if(id==='ipo') loadIPOData();
+  if(id==='intraday') loadIntradayData();
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -6473,6 +6683,351 @@ async function loadSmartExecution(){
   }catch(e){console.error('Smart execution load error:',e);}
 }
 
+// ─── IPO Intelligence Loader ───────────────────────────────────────────────────
+async function loadIPOData(){
+  try{
+    const r=await fetch('/api/ipo-data');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    
+    // Update data source indicator
+    const sourceEl=document.getElementById('ipo-data-source');
+    if(sourceEl){
+      sourceEl.textContent=d.is_demo_data?'Demo IPO data':'Live IPO data';
+      sourceEl.style.color=d.is_demo_data?'#f59e0b':'#22c55e';
+      sourceEl.style.background=d.is_demo_data?'#f59e0b22':'#22c55e22';
+    }
+    
+    // Render summary table
+    const summaryTable=document.getElementById('ipo-summary-table');
+    if(summaryTable && d.all_ipos && d.all_ipos.length){
+      summaryTable.innerHTML=d.all_ipos.map(ipo=>{
+        const scoreColor=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
+        const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':'#ef4444';
+        const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':'#ef4444';
+        const statusColor=ipo.status==='OPEN'?'#22c55e':ipo.status==='UPCOMING'?'#3b82f6':ipo.status==='LISTED'?'#84cc16':'#6b7280';
+        return `<tr style="cursor:pointer;border-bottom:1px solid #1f293744" onclick="showIPODetails('${ipo.symbol}')">
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${ipo.name}</td>
+          <td style="padding:10px 8px;color:#9ca3af">${ipo.price_band||'N/A'}</td>
+          <td style="padding:10px 8px;text-align:center"><span style="background:${scoreColor}33;color:${scoreColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score.toFixed(1)}</span></td>
+          <td style="padding:10px 8px;text-align:center"><span style="color:${riskColor};font-weight:600;font-size:12px">${ipo.risk_level}</span></td>
+          <td style="padding:10px 8px;text-align:center"><span style="background:${recColor}33;color:${recColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px">${ipo.recommendation}</span></td>
+          <td style="padding:10px 8px;text-align:center"><span style="color:${statusColor};font-weight:600;font-size:12px">${ipo.status}</span></td>
+        </tr>`;
+      }).join('');
+    }else if(summaryTable){
+      summaryTable.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No IPO data available</td></tr>';
+    }
+    
+    // Render open IPOs
+    const openList=document.getElementById('ipo-open-list');
+    if(openList && d.open_ipos && d.open_ipos.length){
+      openList.innerHTML=d.open_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
+        <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Score: ${ipo.score.toFixed(1)} • ${ipo.recommendation}</div>
+      </div>`).join('');
+    }else if(openList){
+      openList.innerHTML='<div style="color:#6b7280">No open IPOs</div>';
+    }
+    
+    // Render upcoming IPOs
+    const upcomingList=document.getElementById('ipo-upcoming-list');
+    if(upcomingList && d.upcoming_ipos && d.upcoming_ipos.length){
+      upcomingList.innerHTML=d.upcoming_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
+        <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Open: ${ipo.open_date||'TBD'} • Score: ${ipo.score.toFixed(1)}</div>
+      </div>`).join('');
+    }else if(upcomingList){
+      upcomingList.innerHTML='<div style="color:#6b7280">No upcoming IPOs</div>';
+    }
+    
+    // Render recent IPOs
+    const recentList=document.getElementById('ipo-recent-list');
+    if(recentList && d.recent_ipos && d.recent_ipos.length){
+      recentList.innerHTML=d.recent_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
+        <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Listed: ${ipo.listing_date||'TBD'} • Score: ${ipo.score.toFixed(1)}</div>
+      </div>`).join('');
+    }else if(recentList){
+      recentList.innerHTML='<div style="color:#6b7280">No recent IPOs</div>';
+    }
+    
+    // Store IPO details for detail view
+    window._ipoDetails=d.ipo_details||{};
+    
+  }catch(e){
+    console.error('IPO data load error:',e);
+    const summaryTable=document.getElementById('ipo-summary-table');
+    if(summaryTable)summaryTable.innerHTML='<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">IPO data temporarily unavailable</td></tr>';
+  }
+}
+
+// ─── Intraday Trading Loader ───────────────────────────────────────────────────
+async function loadIntradayData(){
+  try{
+    const r=await fetch('/api/intraday-data');
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    
+    // Update status boxes
+    const authStatus=document.getElementById('intraday-auth-status');
+    if(authStatus){
+      authStatus.textContent=d.auth_configured?'CONNECTED':'NOT CONFIGURED';
+      authStatus.style.color=d.auth_configured?'#22c55e':'#f59e0b';
+    }
+    
+    const marketStatus=document.getElementById('intraday-market-status');
+    if(marketStatus){
+      const mdStatus=d.market_data_status||(d.market_data_available?'LIVE':'DISCONNECTED');
+      marketStatus.textContent=mdStatus;
+      marketStatus.style.color=mdStatus==='LIVE'?'#22c55e':mdStatus==='STALE'?'#f59e0b':'#ef4444';
+    }
+    
+    const modeEl=document.getElementById('intraday-mode');
+    if(modeEl){
+      modeEl.textContent=d.mode;
+      modeEl.style.color=d.mode==='PAPER'?'#10b981':'#ef4444';
+    }
+    
+    const tradingStatus=document.getElementById('intraday-trading-status');
+    if(tradingStatus){
+      tradingStatus.textContent=d.trading_blocked?'BLOCKED':'ACTIVE';
+      tradingStatus.style.color=d.trading_blocked?'#ef4444':'#10b981';
+    }
+    
+    const regimeEl=document.getElementById('intraday-regime');
+    if(regimeEl){
+      const regime=(d.market_regime||'—').replace('_',' ');
+      regimeEl.textContent=regime;
+      regimeEl.style.color=regime==='BULLISH'?'#22c55e':regime==='BEARISH'?'#ef4444':regime==='HIGH VOLATILITY'?'#f97316':'#9ca3af';
+    }
+    
+    const ipEl=document.getElementById('intraday-static-ip');
+    if(ipEl){
+      ipEl.textContent=d.static_ip_status||'—';
+      ipEl.style.color=(d.static_ip_status||'').startsWith('CONFIGURED')?'#22c55e':'#9ca3af';
+    }
+    
+    const killBtn=document.getElementById('intraday-kill-btn');
+    if(killBtn){
+      killBtn.dataset.stopped=d.kill_switch?'1':'0';
+      if(d.kill_switch){
+        killBtn.textContent='INTRADAY STOPPED — RESUME';
+        killBtn.style.background='#10b981';
+      }else{
+        killBtn.textContent='STOP INTRADAY';
+        killBtn.style.background='#ef4444';
+      }
+    }
+    
+    // Update daily stats
+    const tradesCount=document.getElementById('intraday-trades-count');
+    if(tradesCount)tradesCount.textContent=`${d.daily_state.trades_today} / ${d.daily_state.max_trades_per_day}`;
+    
+    const winsEl=document.getElementById('intraday-wins');
+    if(winsEl)winsEl.textContent=d.daily_state.wins_today;
+    
+    const lossesEl=document.getElementById('intraday-losses');
+    if(lossesEl)lossesEl.textContent=d.daily_state.losses_today;
+    
+    const pnlEl=document.getElementById('intraday-pnl');
+    if(pnlEl){
+      pnlEl.textContent=pnlStr(d.daily_state.realized_pnl);
+      pnlEl.style.color=pnlClass(d.daily_state.realized_pnl);
+    }
+    
+    const lossLimitEl=document.getElementById('intraday-loss-limit');
+    if(lossLimitEl)lossLimitEl.textContent=rupee(d.daily_state.daily_loss_limit);
+    
+    // Render opportunities
+    const oppBody=document.getElementById('intraday-opportunities-body');
+    if(oppBody && d.opportunities && d.opportunities.length){
+      oppBody.innerHTML=d.opportunities.map(opp=>{
+        const dirColor=opp.direction==='LONG'?'#22c55e':'#ef4444';
+        const scoreColor=opp.score>=80?'#22c55e':opp.score>=70?'#84cc16':opp.score>=60?'#f97316':'#6b7280';
+        return `<tr style="border-bottom:1px solid #1f293744">
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${opp.symbol}</td>
+          <td style="padding:10px 8px;color:${dirColor};font-weight:600">${opp.direction}</td>
+          <td style="padding:10px 8px;text-align:right"><span style="color:${scoreColor};font-weight:700">${opp.score.toFixed(1)}</span></td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${opp.entry.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${opp.stop_loss.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${opp.target.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">${opp.risk_reward.toFixed(1)}</td>
+          <td style="padding:10px 8px;color:#9ca3af">${opp.classification}</td>
+        </tr>`;
+      }).join('');
+    }else if(oppBody){
+      oppBody.innerHTML='<tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">No opportunities</td></tr>';
+    }
+    
+    // Render positions
+    const posBody=document.getElementById('intraday-positions-body');
+    if(posBody && d.positions && d.positions.length){
+      posBody.innerHTML=d.positions.map(pos=>{
+        const dirColor=pos.direction==='LONG'?'#22c55e':'#ef4444';
+        return `<tr style="border-bottom:1px solid #1f293744">
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${pos.symbol}</td>
+          <td style="padding:10px 8px;color:${dirColor};font-weight:600">${pos.direction}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.entry_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.current_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.stop_loss.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.target.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:${pnlClass(pos.unrealized_pnl)}">${pnlStr(pos.unrealized_pnl)}</td>
+        </tr>`;
+      }).join('');
+    }else if(posBody){
+      posBody.innerHTML='<tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>';
+    }
+    
+    // Render history
+    const histBody=document.getElementById('intraday-history-body');
+    if(histBody && d.history && d.history.length){
+      histBody.innerHTML=d.history.map(trade=>{
+        return `<tr style="border-bottom:1px solid #1f293744">
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.entry_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.exit_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:${pnlClass(trade.net_pnl)}">${pnlStr(trade.net_pnl)}</td>
+          <td style="padding:10px 8px;color:#9ca3af">${trade.exit_reason}</td>
+          <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.exit_time}</td>
+        </tr>`;
+      }).join('');
+    }else if(histBody){
+      histBody.innerHTML='<tr><td colspan="6" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>';
+    }
+    
+  }catch(e){
+    console.error('Intraday data load error:',e);
+    const oppBody=document.getElementById('intraday-opportunities-body');
+    if(oppBody)oppBody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:20px">Intraday data temporarily unavailable</td></tr>';
+  }
+}
+
+// ─── Intraday Kill Switch ──────────────────────────────────────────────────────
+async function toggleIntradayKillSwitch(){
+  try{
+    const current=document.getElementById('intraday-kill-btn');
+    const stopping=!(current && current.dataset.stopped==='1');
+    const r=await fetch('/api/intraday/kill-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:stopping})});
+    const d=await r.json();
+    if(d.error)throw new Error(d.error);
+    if(current)current.dataset.stopped=d.kill_switch?'1':'0';
+    loadIntradayData();
+  }catch(e){
+    console.error('Intraday kill switch error:',e);
+    alert('Could not toggle intraday kill switch: '+e.message);
+  }
+}
+
+// ─── IPO Detail View ───────────────────────────────────────────────────────────
+function showIPODetails(symbol){
+  const ipo=window._ipoDetails[symbol];
+  if(!ipo)return;
+  
+  const detailCard=document.getElementById('ipo-detail-card');
+  const detailContent=document.getElementById('ipo-detail-content');
+  
+  if(!detailCard || !detailContent)return;
+  
+  const scoreColor=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
+  const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':'#ef4444';
+  const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':'#ef4444';
+  
+  detailContent.innerHTML=`
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+      <div class="card-sm">
+        <div class="stat-label">IPO</div>
+        <div class="stat-value-sm">${ipo.name}</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Sector</div>
+        <div class="stat-value-sm">${ipo.sector||'N/A'}</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Status</div>
+        <div class="stat-value-sm" style="color:${ipo.status==='OPEN'?'#22c55e':ipo.status==='UPCOMING'?'#3b82f6':'#6b7280'}">${ipo.status}</div>
+      </div>
+    </div>
+    
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+      <div class="card-sm">
+        <div class="stat-label">Price Band</div>
+        <div class="stat-value-sm">${ipo.price_band||'N/A'}</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Issue Size</div>
+        <div class="stat-value-sm">₹${(ipo.issue_size||0).toFixed(0)} Cr</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Fresh Issue</div>
+        <div class="stat-value-sm">₹${(ipo.fresh_issue||0).toFixed(0)} Cr</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">OFS</div>
+        <div class="stat-value-sm">₹${(ipo.offer_for_sale||0).toFixed(0)} Cr</div>
+      </div>
+    </div>
+    
+    <div class="grid grid-cols-3 gap-4 mb-4">
+      <div class="card-sm">
+        <div class="stat-label">IPO Score</div>
+        <div class="stat-value-sm" style="color:${scoreColor}">${ipo.score.toFixed(1)}/100</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Risk Level</div>
+        <div class="stat-value-sm" style="color:${riskColor}">${ipo.risk_level}</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Recommendation</div>
+        <div class="stat-value-sm" style="color:${recColor}">${ipo.recommendation}</div>
+      </div>
+    </div>
+    
+    <div class="card mb-4">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:8px">Score Breakdown</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">
+        <div><span style="color:#6b7280">Financial:</span> ${ipo.financial_score.toFixed(1)}</div>
+        <div><span style="color:#6b7280">Valuation:</span> ${ipo.valuation_score.toFixed(1)}</div>
+        <div><span style="color:#6b7280">Structure:</span> ${ipo.structure_score.toFixed(1)}</div>
+        <div><span style="color:#6b7280">Subscription:</span> ${ipo.subscription_score.toFixed(1)}</div>
+        <div><span style="color:#6b7280">Business:</span> ${ipo.business_score.toFixed(1)}</div>
+        <div><span style="color:#6b7280">Market:</span> ${ipo.market_score.toFixed(1)}</div>
+      </div>
+    </div>
+    
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div class="card">
+        <div style="font-size:13px;font-weight:600;color:#22c55e;margin-bottom:8px">✓ Positive Factors</div>
+        <ul style="margin:0;padding-left:16px;font-size:12px;color:#f9fafb">
+          ${ipo.positive_factors.map(f=>`<li>${f}</li>`).join('')||'<li style="color:#6b7280">No specific positive factors identified</li>'}
+        </ul>
+      </div>
+      <div class="card">
+        <div style="font-size:13px;font-weight:600;color:#ef4444;margin-bottom:8px">⚠ Risk Factors</div>
+        <ul style="margin:0;padding-left:16px;font-size:12px;color:#f9fafb">
+          ${ipo.risk_factors.map(f=>`<li>${f}</li>`).join('')||'<li style="color:#6b7280">No specific risk factors identified</li>'}
+        </ul>
+      </div>
+    </div>
+    
+    <div class="card">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:8px">Risk Explanation</div>
+      <div style="font-size:12px;color:#f9fafb">${ipo.risk_explanation||'Low risk profile with strong fundamentals.'}</div>
+    </div>
+    
+    <div class="card" style="margin-top:12px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:8px">Business Description</div>
+      <div style="font-size:12px;color:#f9fafb">${ipo.business_description||'N/A'}</div>
+    </div>
+    
+    <div style="font-size:11px;color:#6b7280;margin-top:12px">
+      Data Quality: ${ipo.data_quality} • Analyzed: ${ipo.analyzed_at}
+    </div>
+  `;
+  
+  detailCard.style.display='block';
+}
+
 // ─── AI Learning Loader ───────────────────────────────────────────────────────
 async function loadAiLearning(){
   try{
@@ -8608,6 +9163,125 @@ def api_smart_execution():
         engine = SmartExecutionEngine(store=get_store())
         return jsonify(engine.get_dashboard_data())
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ipo-data')
+def api_ipo_data():
+    """IPO Intelligence data: open, upcoming, recent IPOs with analysis."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from ipo.analyzer import IPOAnalyzer
+        from ipo.providers.mock_provider import MockIPODataProvider
+        
+        # Initialize analyzer with mock provider
+        provider = MockIPODataProvider()
+        analyzer = IPOAnalyzer(provider)
+        
+        # Get analyzed IPOs
+        open_ipos = analyzer.get_open_ipos_analysis()
+        upcoming_ipos = analyzer.get_upcoming_ipos_analysis()
+        recent_ipos = analyzer.get_recent_ipos_analysis()
+        
+        # Convert to serializable format
+        def serialize_analysis(result):
+            ipo = result.ipo
+            return {
+                'name': ipo.name,
+                'symbol': ipo.symbol,
+                'sector': ipo.sector,
+                'status': ipo.status.value if hasattr(ipo.status, 'value') else str(ipo.status),
+                'price_band': ipo.get_price_display(),
+                'issue_size': ipo.issue_size,
+                'fresh_issue': ipo.fresh_issue,
+                'offer_for_sale': ipo.offer_for_sale,
+                'open_date': ipo.open_date,
+                'close_date': ipo.close_date,
+                'listing_date': ipo.listing_date,
+                'score': result.score,
+                'risk_level': result.risk_level.value if hasattr(result.risk_level, 'value') else str(result.risk_level),
+                'recommendation': result.recommendation.value if hasattr(result.recommendation, 'value') else str(result.recommendation),
+                'financial_score': result.financial_score,
+                'valuation_score': result.valuation_score,
+                'structure_score': result.structure_score,
+                'subscription_score': result.subscription_score,
+                'business_score': result.business_score,
+                'market_score': result.market_score,
+                'positive_factors': result.positive_factors,
+                'risk_factors': result.risk_factors,
+                'risk_explanation': result.risk_explanation,
+                'data_quality': result.data_quality,
+                'analyzed_at': result.analyzed_at,
+                'business_description': ipo.business_description
+            }
+        
+        # Build response
+        all_ipos = open_ipos + upcoming_ipos + recent_ipos
+        serialized_all = [serialize_analysis(ipo) for ipo in all_ipos]
+        ipo_details = {ipo['symbol']: ipo for ipo in serialized_all if ipo.get('symbol')}
+        
+        return jsonify({
+            'is_demo_data': provider.is_demo_data(),
+            'data_source': provider.get_data_source_name(),
+            'open_ipos': [serialize_analysis(ipo) for ipo in open_ipos],
+            'upcoming_ipos': [serialize_analysis(ipo) for ipo in upcoming_ipos],
+            'recent_ipos': [serialize_analysis(ipo) for ipo in recent_ipos],
+            'all_ipos': serialized_all,
+            'ipo_details': ipo_details
+        })
+    except Exception as e:
+        logger.error(f"IPO data API error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/intraday-data')
+def api_intraday_data():
+    """Intraday Trading data: status, opportunities, positions, history.
+
+    Isolated from Swing/Kite — any failure here only degrades the
+    Intraday tab and never touches existing engines.
+    """
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from intraday.engine import get_intraday_engine
+
+        engine = get_intraday_engine()
+
+        # Lazy scan: run a cycle if due (safe no-op when Angel isn't configured)
+        try:
+            engine.maybe_run_cycle()
+        except Exception as cycle_err:
+            logger.error(f"Intraday cycle error: {cycle_err}")
+
+        return jsonify(engine.get_status())
+    except Exception as e:
+        logger.error(f"Intraday data API error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/intraday/kill-switch', methods=['POST'])
+def api_intraday_kill_switch():
+    """Intraday-only kill switch. Does NOT affect Swing Trading."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from intraday.engine import get_intraday_engine
+
+        payload = request.get_json(silent=True) or {}
+        active = bool(payload.get('active', False))
+
+        engine = get_intraday_engine()
+        engine.set_kill_switch(active)
+
+        return jsonify({
+            'kill_switch': active,
+            'trading': 'STOPPED' if active else 'ACTIVE'
+        })
+    except Exception as e:
+        logger.error(f"Intraday kill-switch error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
