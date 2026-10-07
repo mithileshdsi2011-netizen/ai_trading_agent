@@ -470,6 +470,7 @@ class TestNseIPOProvider:
         provider = self._provider(payloads=[
             [{'companyName': 'Future Co', 'symbol': 'FUT',
               'issueStartDate': '01-01-2099', 'issueEndDate': '05-01-2099'}],
+            [],  # open-issues fetch made while deduping upcoming
             [{'companyName': 'Old Co', 'symbol': 'OLD',
               'issueStartDate': '01-01-2020', 'issueEndDate': '05-01-2020',
               'listingDate': '15-01-2020'}],
@@ -478,6 +479,50 @@ class TestNseIPOProvider:
         recent = provider.get_recent_ipos()
         assert upcoming[0].status in (IPOStatus.UPCOMING, IPOStatus.OPEN)
         assert recent[0].status == IPOStatus.LISTED
+
+    def test_upcoming_excludes_already_open_symbols(self):
+        """NSE's upcoming feed lists currently-open issues — dedupe by symbol."""
+        provider = self._provider(payloads=[
+            [{'companyName': 'Dup Co', 'symbol': 'DUP'},
+             {'companyName': 'New Co', 'symbol': 'NEW'}],   # upcoming feed
+            [{'companyName': 'Dup Co', 'symbol': 'DUP'}],   # open feed
+        ])
+        symbols = [i.symbol for i in provider.get_upcoming_ipos()]
+        assert symbols == ['NEW']
+
+    def test_per_category_rows_deduped_to_one_per_symbol(self):
+        """Per-category subscription rows (QIB/NII/Total) collapse to one IPO."""
+        provider = self._provider(payloads=[
+            [{'companyName': 'Cat Co', 'symbol': 'CAT', 'category': 'QIB'},
+             {'companyName': 'Cat Co', 'symbol': 'CAT', 'category': 'Total',
+              'noOfTime': '2.5'}],
+        ])
+        open_ipos = provider.get_open_ipos()
+        assert len(open_ipos) == 1
+        assert open_ipos[0].subscription is not None
+        assert open_ipos[0].subscription.overall == 2.5
+
+    def test_company_field_and_rs_price_parsed(self):
+        """Past-issues schema: 'company' name + 'Rs.208 to Rs.220' priceRange."""
+        provider = self._provider(payloads=[
+            [{'company': 'Past Co', 'symbol': 'PAST', 'securityType': 'EQ',
+              'ipoStartDate': '29-SEP-2026', 'ipoEndDate': '01-OCT-2026',
+              'priceRange': 'Rs.208 to Rs.220', 'issuePrice': '220',
+              'listingDate': '07-OCT-2026'}],
+        ])
+        ipo = provider.get_recent_ipos()[0]
+        assert ipo.name == 'Past Co'
+        assert ipo.price_band_min == 208.0 and ipo.price_band_max == 220.0
+        assert ipo.listing_date == '2026-10-07'
+
+    def test_issue_size_shares_times_price_to_crores(self):
+        """issueSize is a share count — converted to crores via issue price."""
+        provider = self._provider(payloads=[
+            [{'companyName': 'Sized Co', 'symbol': 'SIZ',
+              'issueSize': '7500000', 'issuePrice': 'Rs.100'}],
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.issue_size == 75.0  # 7.5M shares × ₹100 = ₹75 cr
 
     def test_fallback_contract_no_mixed_data(self):
         """Provider raises on transport failure; dashboard falls back to

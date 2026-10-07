@@ -117,8 +117,11 @@ class NseIPODataProvider(IPODataProvider):
     def _num(v) -> Optional[float]:
         if v is None:
             return None
+        s = (str(v).replace(',', '').replace('₹', '')
+             .replace('Rs.', '').replace('Rs', '').replace('INR', '')
+             .replace('x', '').strip())
         try:
-            return float(str(v).replace(',', '').replace('₹', '').replace('x', '').strip())
+            return float(s)
         except (ValueError, TypeError):
             return None
 
@@ -141,37 +144,55 @@ class NseIPODataProvider(IPODataProvider):
         return s[:10] or None
 
     @classmethod
+    def _issue_size_cr(cls, row, lo, hi) -> Optional[float]:
+        """Issue size in crores — direct crore fields, else shares×price/1e7."""
+        direct = cls._num_field(row, 'issueSizeCr', 'issue_size_cr', 'issueSizeCrores')
+        if direct is not None:
+            return direct
+        shares = cls._num_field(row, 'issueSize', 'noOfSharesOffered', 'issue_size')
+        price = hi or lo or cls._num_field(row, 'issuePrice')
+        if shares and price:
+            return round(shares * price / 1e7, 2)
+        return None
+
+    @classmethod
     def _price_band(cls, row) -> tuple:
-        """Return (min, max) from min/max fields or a '95 to 100' band string."""
+        """Return (min, max) from min/max fields or a 'Rs.208 to Rs.220' band string."""
         lo = cls._num_field(row, 'minPrice', 'priceBandMin', 'price_band_min', 'minprice')
         hi = cls._num_field(row, 'maxPrice', 'priceBandMax', 'price_band_max', 'maxprice',
-                            'cutOffPrice', 'issuePrice', 'cutoffprice')
+                            'cutOffPrice', 'cutoffprice')
         band = cls._pick(row, 'priceBand', 'price_band', 'priceRange', 'price')
         if (lo is None or hi is None) and band:
-            nums = [cls._num(t) for t in str(band).replace('–', '-').replace('₹', '').split()]
+            nums = [cls._num(t) for t in str(band).replace('–', '-').split()]
             nums = [n for n in nums if n is not None]
             if nums:
                 lo = lo or min(nums)
                 hi = hi or max(nums)
+        single = cls._num_field(row, 'issuePrice', 'issue_price')
+        if lo is None and hi is None and single is not None:
+            lo = hi = single
         return lo, hi
 
     @classmethod
     def _to_ipo(cls, row: Dict[str, Any], status: IPOStatus) -> IPO:
         lo, hi = cls._price_band(row)
         return IPO(
-            name=str(cls._pick(row, 'companyName', 'company_name', 'name', 'issueName') or 'Unknown'),
+            name=str(cls._pick(row, 'companyName', 'company', 'company_name', 'name',
+                               'issueName', 'htmSym')
+                     or cls._pick(row, 'symbol', 'symbolName') or 'Unknown'),
             symbol=cls._pick(row, 'symbol', 'symbolName'),
             sector=cls._pick(row, 'industry', 'sector', 'industryNew'),
             status=status,
             price_band_min=lo,
             price_band_max=hi,
-            issue_size=cls._num_field(row, 'issueSizeCr', 'issue_size_cr', 'issueSizeCrores',
-                                      'issueSizeCrors'),
+            issue_size=cls._issue_size_cr(row, lo, hi),
             fresh_issue=cls._num_field(row, 'freshIssueCr', 'fresh_issue'),
             offer_for_sale=cls._num_field(row, 'ofsCr', 'offerForSale', 'offer_for_sale'),
-            open_date=cls._date(cls._pick(row, 'issueStartDate', 'biddingStartDate',
+            open_date=cls._date(cls._pick(row, 'issueStartDate', 'ipoStartDate',
+                                          'biddingStartDate',
                                           'openDate', 'startDate', 'issueOpenDate')),
-            close_date=cls._date(cls._pick(row, 'issueEndDate', 'biddingEndDate',
+            close_date=cls._date(cls._pick(row, 'issueEndDate', 'ipoEndDate',
+                                           'biddingEndDate',
                                            'closeDate', 'endDate', 'issueCloseDate')),
             listing_date=cls._date(cls._pick(row, 'listingDate', 'dateOfListing',
                                              't1ModStartDate')),
@@ -193,7 +214,13 @@ class NseIPODataProvider(IPODataProvider):
         retail = (cls._num_field(sub, 'retail', 'retailSubscription')
                   or cls._num_field(row, 'retailSubscribed'))
         overall = (cls._num_field(sub, 'total', 'overall', 'totalSubscription')
-                   or cls._num_field(row, 'totalSubscribed', 'subscriptionTimes'))
+                   or cls._num_field(row, 'totalSubscribed', 'subscriptionTimes',
+                                     'noOfTime'))
+        if overall is None:
+            bid = cls._num_field(row, 'noOfsharesBid')
+            offered = cls._num_field(row, 'noOfSharesOffered')
+            if bid is not None and offered:
+                overall = round(bid / offered, 2)
         if all(v is None for v in (qib, nii, retail, overall)):
             return None
         return IPOSubscription(qib=qib, nii=nii, retail=retail, overall=overall)
@@ -202,9 +229,11 @@ class NseIPODataProvider(IPODataProvider):
     def _status_for(row, default: IPOStatus) -> IPOStatus:
         """Derive status from dates when the feed doesn't state it."""
         open_d = NseIPODataProvider._date(
-            NseIPODataProvider._pick(row, 'issueStartDate', 'biddingStartDate', 'openDate', 'startDate'))
+            NseIPODataProvider._pick(row, 'issueStartDate', 'ipoStartDate', 'biddingStartDate',
+                                     'openDate', 'startDate'))
         close_d = NseIPODataProvider._date(
-            NseIPODataProvider._pick(row, 'issueEndDate', 'biddingEndDate', 'closeDate', 'endDate'))
+            NseIPODataProvider._pick(row, 'issueEndDate', 'ipoEndDate', 'biddingEndDate',
+                                     'closeDate', 'endDate'))
         list_d = NseIPODataProvider._date(
             NseIPODataProvider._pick(row, 'listingDate', 'dateOfListing'))
         today = datetime.now().strftime('%Y-%m-%d')
@@ -217,23 +246,45 @@ class NseIPODataProvider(IPODataProvider):
         return default
 
     # ── provider interface ──────────────────────────────────────────
+    @staticmethod
+    def _dedup_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """One row per symbol — prefer the 'Total' category row (per-category
+        subscription rows repeat the same symbol)."""
+        picked = {}
+        order = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sym = str(r.get('symbol') or r.get('symbolName') or '')
+            if not sym:
+                continue
+            if sym not in picked:
+                order.append(sym)
+                picked[sym] = r
+            elif str(r.get('category', '')).lower() == 'total':
+                picked[sym] = r
+        return [picked[s] for s in order]
+
     def get_open_ipos(self) -> List[IPO]:
         """Currently open issues."""
         def fetch():
             data = self._get_json("/api/ipo-current-issue")
             rows = data if isinstance(data, list) else data.get('data', [])
             return [self._to_ipo(r, self._status_for(r, IPOStatus.OPEN))
-                    for r in rows if isinstance(r, dict)]
+                    for r in self._dedup_rows(rows)]
         return self._cached('open', fetch)
 
     def get_upcoming_ipos(self) -> List[IPO]:
-        """Announced upcoming issues."""
+        """Announced upcoming issues — excludes symbols already open
+        (NSE's upcoming feed lists currently-open issues too)."""
         def fetch():
             data = self._get_json("/api/all-upcoming-issues?category=ipo")
             rows = data if isinstance(data, list) else (
                 data.get('data') or data.get('upcomingIpos') or [])
+            open_syms = {i.symbol for i in self.get_open_ipos()}
             return [self._to_ipo(r, self._status_for(r, IPOStatus.UPCOMING))
-                    for r in rows if isinstance(r, dict)]
+                    for r in self._dedup_rows(rows)
+                    if (r.get('symbol') or r.get('symbolName')) not in open_syms]
         return self._cached('upcoming', fetch)
 
     def get_recent_ipos(self) -> List[IPO]:
@@ -246,7 +297,7 @@ class NseIPODataProvider(IPODataProvider):
             data = self._get_json(path)
             rows = data if isinstance(data, list) else (data.get('data') or [])
             return [self._to_ipo(r, self._status_for(r, IPOStatus.CLOSED))
-                    for r in rows if isinstance(r, dict)]
+                    for r in self._dedup_rows(rows)]
         return self._cached('recent', fetch)
 
     def get_ipo_details(self, ipo_id: str) -> Optional[IPO]:
