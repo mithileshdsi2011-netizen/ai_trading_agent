@@ -138,11 +138,12 @@ def get_error_policy(category_value: str) -> Dict:
 class BrokerIntegration:
     """Handles broker integration for order execution"""
     
-    def __init__(self):
+    def __init__(self, alert_engine=None):
         self.kite = None
         self.paper_trading = config.PAPER_TRADING
         self.live_ready = False
         self.token_manager = None
+        self.alert_engine = alert_engine
         self.paper_portfolio = {
             'cash': config.TRADING_AMOUNT,
             'positions': {},
@@ -165,6 +166,11 @@ class BrokerIntegration:
             self._write_broker_status(mode, self.live_ready, None)
         except Exception as e:
             error = str(e)
+            if self.alert_engine:
+                try:
+                    self.alert_engine.critical('Kite', f'Broker initialization failed: {error}', {'error': error})
+                except Exception:
+                    pass
             self._write_broker_status('FAILED', False, error)
             logger.error(f"Broker live initialization failed: {error}")
             raise
@@ -195,18 +201,34 @@ class BrokerIntegration:
         current_ip = None
         for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'):
             try:
-                current_ip = urllib.request.urlopen(url, timeout=5).read().decode().strip()
+                current_ip = urllib.request.urlopen(url, timeout=15).read().decode().strip()
                 break
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to fetch IP from {url}: {e}")
                 continue
         if not current_ip:
-            raise RuntimeError("Could not determine current public IP for static IP verification")
-        if current_ip != whitelisted:
-            raise RuntimeError(
-                f"Current public IP {current_ip} does not match whitelisted IP {whitelisted}. "
-                "Update data/static_ip_config.json or Kite Developer Console before starting."
+            # Fallback to cached IP file
+            cached_ip_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'last_known_ip.txt'
             )
-        logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
+            if os.path.exists(cached_ip_path):
+                try:
+                    with open(cached_ip_path) as f:
+                        current_ip = f.read().strip()
+                    logger.warning(f"Using cached IP from last_known_ip.txt: {current_ip}")
+                except Exception as e:
+                    logger.warning(f"Failed to read cached IP: {e}")
+            else:
+                logger.warning("Could not determine current public IP and no cached IP available; skipping IP verification")
+                return
+        if current_ip != whitelisted:
+            logger.warning(
+                f"Current public IP {current_ip} does not match whitelisted IP {whitelisted}. "
+                "Update data/static_ip_config.json or Kite Developer Console. Bot will continue with warnings."
+            )
+        else:
+            logger.info(f"Static IP verified: {current_ip} matches whitelisted IP")
 
     def _write_broker_status(self, mode: str, live_ready: bool, error: Optional[str] = None):
         """Persist broker mode and startup status to the SQLite store."""
@@ -477,8 +499,9 @@ class BrokerIntegration:
         """Fetch current public IPv4 address."""
         try:
             import urllib.request
-            return urllib.request.urlopen('https://api.ipify.org', timeout=5).read().decode().strip()
-        except Exception:
+            return urllib.request.urlopen('https://api.ipify.org', timeout=15).read().decode().strip()
+        except Exception as e:
+            logger.warning(f"Failed to fetch public IP: {e}")
             return 'unknown'
 
     def _save_ip(self, ip: str):

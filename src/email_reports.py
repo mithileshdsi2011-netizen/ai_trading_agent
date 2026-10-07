@@ -21,6 +21,9 @@ class EmailReporter:
     # Class-level dedup: maps (date_str, subject_prefix) -> bool
     # Shared across all instances so restarts within the same day also dedup.
     _sent_today: dict = {}
+    
+    # Separate cooldown dict for rate limiting (not pruned by date)
+    _cooldowns: dict = {}
 
     def __init__(self):
         self.enabled = config.EMAIL_ENABLED
@@ -51,6 +54,16 @@ class EmailReporter:
         if not self.enabled or not self.username or not self.password or not self.to_email:
             logger.info("Email reports disabled or not configured")
             return False
+        
+        # Check cooldown: only send if 24 hours have passed since last email with same subject prefix
+        cooldown_key = f"cooldown_{subject[:50]}"  # Use first 50 chars of subject as key
+        now = datetime.now()
+        last_sent = EmailReporter._cooldowns.get(cooldown_key)
+        
+        if last_sent and (now - last_sent).total_seconds() < 86400:  # 24 hour cooldown (1 day)
+            logger.info(f"Email cooldown active for subject prefix, skipping duplicate: {subject[:50]}")
+            return False
+        
         if self._already_sent(subject):
             logger.info(f"Email already sent today, skipping duplicate: {subject}")
             return False
@@ -68,6 +81,8 @@ class EmailReporter:
 
             logger.info(f"Email report sent: {subject}")
             self._mark_sent(subject)
+            # Store cooldown timestamp in separate dict
+            EmailReporter._cooldowns[cooldown_key] = now
             return True
         except Exception as e:
             logger.error(f"Email report failed: {e}")

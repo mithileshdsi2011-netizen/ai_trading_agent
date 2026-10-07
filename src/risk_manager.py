@@ -83,6 +83,7 @@ class Position:
     product_type: str = "MIS"
     highest_price: float = 0.0
     first_entry_price: float = 0.0
+    average_price: float = 0.0   # broker-reported cost basis; used for profit %
     trailing_stop: Optional[float] = None
     atr_at_entry: float = 0.0   # ATR used for SL calculation
     partial_booked: bool = False # True once partial profit booked
@@ -134,6 +135,7 @@ class RiskManager:
                     product_type=p.get('product_type', 'CNC'),
                     highest_price=float(p.get('highest_price', p.get('entry_price', 0.0) or 0.0)),
                     first_entry_price=float(p.get('first_entry_price', p.get('entry_price', 0.0) or 0.0)),
+                    average_price=float(p.get('average_price', p.get('entry_price', 0.0) or 0.0)),
                     trailing_stop=float(p.get('trailing_stop')) if p.get('trailing_stop') is not None else None,
                     atr_at_entry=float(p.get('atr_at_entry', 0.0) or 0.0),
                     partial_booked=p.get('partial_booked', False),
@@ -200,6 +202,7 @@ class RiskManager:
                     'product_type': p.product_type,
                     'highest_price': p.highest_price,
                     'first_entry_price': p.first_entry_price,
+                    'average_price': p.average_price,
                     'trailing_stop': p.trailing_stop,
                     'atr_at_entry': p.atr_at_entry,
                     'partial_booked': p.partial_booked,
@@ -216,6 +219,7 @@ class RiskManager:
                     'slippage': p.slippage,
                     'exit_price': p.exit_price,
                     'exit_time': p.exit_time.isoformat() if p.exit_time else None,
+                    'exit_reason': p.exit_reason,
                 }
                 if hasattr(p, '_partial_target'):
                     d['_partial_target'] = p._partial_target
@@ -390,7 +394,8 @@ class RiskManager:
             return False
 
         # Check confidence using rounded percentages to avoid floating-point edge cases
-        conf_pct = round(signal['confidence'] * 100)
+        # signal['confidence'] is already 0-100 from the enterprise decision engine
+        conf_pct = round(signal['confidence'])
         regime = signal.get('market_regime', 'SIDEWAYS')
         if regime == 'BULL':
             threshold = config.MIN_CONFIDENCE_BULL
@@ -470,6 +475,7 @@ class RiskManager:
             planned_exit_date=planned_exit_date,
             product_type=product_type,
             highest_price=entry_price,
+            average_price=entry_price,
             trailing_stop=round(stop_loss, 2) if config.TRAILING_STOP_ENABLED else None,
             atr_at_entry=atr,
             initial_quantity=quantity,
@@ -635,13 +641,15 @@ class RiskManager:
         close_qty = min(close_qty, position.quantity)
         remaining = position.quantity - close_qty
 
-        gross_pnl = (exit_price - position.entry_price) * close_qty
+        # Cost basis for the shares being closed must be the broker-reported average price
+        cost_basis = position.average_price if position.average_price else position.entry_price
+        gross_pnl = (exit_price - cost_basis) * close_qty
         position.pnl += gross_pnl
-        position.pnl_percentage = ((exit_price - position.entry_price) / position.entry_price) * 100
+        position.pnl_percentage = ((exit_price - cost_basis) / cost_basis) * 100 if cost_basis else 0.0
 
         # Brokerage + charges (round-trip for the quantity being closed)
         charges = _total_charges(
-            position.entry_price * close_qty,
+            cost_basis * close_qty,
             exit_price * close_qty
         )
         position.charges += charges

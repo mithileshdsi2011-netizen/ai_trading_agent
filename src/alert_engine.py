@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from config import config
 from persistence import get_store
+from email_reports import EmailReporter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,9 +44,20 @@ class EnterpriseAlertEngine:
     ):
         self.store = store or get_store()
         self.telegram = telegram
+        if email is None and getattr(config, 'EMAIL_ENABLED', False):
+            try:
+                email = EmailReporter()
+            except Exception as _e:
+                logger.warning(f"Could not create EmailReporter: {_e}")
         self.email = email
-        self.channels = set(channels or ['log', 'dashboard'])
+        default_channels = ['log', 'dashboard']
+        if self.email is not None:
+            default_channels.append('email')
+        if self.telegram is not None:
+            default_channels.append('telegram')
+        self.channels = set(channels or default_channels)
         self._popup_queue: List[Dict[str, Any]] = []
+        self._email_cooldowns: Dict[str, datetime] = {}  # Track email cooldowns per source
         self._lock = threading.Lock()
 
     # ── Core alert lifecycle ──────────────────────────────────────────────
@@ -148,9 +160,26 @@ class EnterpriseAlertEngine:
                 pass
 
     def _to_email(self, alert: Dict[str, Any]) -> None:
-        if self.email and hasattr(self.email, 'send'):
+        if self.email and hasattr(self.email, 'send_report'):
             try:
-                self.email.send(subject=f"[{alert['level']}] {alert['source']}", body=alert['message'])
+                # Add cooldown: only send email if cooldown period has passed since last email for same source+message
+                # Use source+message combination to avoid spam for the same recurring issue
+                cooldown_key = f"email_cooldown_{alert['source']}_{hash(alert['message'])}"
+                now = datetime.now()
+                last_sent = self._email_cooldowns.get(cooldown_key)
+                
+                # Use 24 hour cooldown for critical alerts, 1 hour for others
+                cooldown_seconds = 86400 if alert['level'] == 'CRITICAL' else 3600
+                
+                if last_sent and (now - last_sent).total_seconds() < cooldown_seconds:
+                    logger.info(f"Email cooldown active for {alert['source']}, skipping duplicate alert")
+                    return
+                
+                body = f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p></body></html>"
+                self.email.send_report(subject=f"[{alert['level']}] {alert['source']}", body=body)
+                
+                # Store cooldown timestamp
+                self._email_cooldowns[cooldown_key] = now
             except Exception:
                 pass
 

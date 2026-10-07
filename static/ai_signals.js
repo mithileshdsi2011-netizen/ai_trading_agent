@@ -220,7 +220,7 @@
     const html = closest.map(s=>{
       const tradeScore = num(s.trade_score || s.overall_score);
       const aiScore = num(s.ai_score || s.overall_score);
-      const conf = Math.round(num(s.confidence)*100);
+      const conf = num(s.confidence).toFixed(1);
       const miss = missingFor(s.symbol, s);
       const sc = scoreColorClass(tradeScore);
       return `
@@ -270,7 +270,7 @@
       const d = decision(s);
       const tradeScore = num(s.trade_score || s.overall_score);
       const aiScore = num(s.ai_score || s.overall_score);
-      const conf = Math.round(num(s.confidence)*100);
+      const conf = num(s.confidence).toFixed(1);
       const sc = scoreColorClass(tradeScore);
       const aiSc = scoreColorClass(aiScore);
       const rsi = s.rsi ? Math.round(num(s.rsi)) : '—';
@@ -364,7 +364,7 @@
       <div class="ais-stat-chip"><span>Avg Trade Score</span><b>${avg(tradeScores)}</b></div>
       <div class="ais-stat-chip"><span>Highest Trade Score</span><b>${max(tradeScores)}</b></div>
       <div class="ais-stat-chip"><span>Avg AI Score</span><b>${avg(aiScores)}</b></div>
-      <div class="ais-stat-chip"><span>Avg Confidence</span><b>${avg(confs)}</b></div>
+      <div class="ais-stat-chip"><span>Avg Confidence</span><b>${avg(confs)}%</b></div>
       <div class="ais-stat-chip"><span>Avg R:R</span><b>${avg(rrs)}</b></div>
     `;
     setHtml('ais-today-stats', html);
@@ -415,7 +415,7 @@
     const d = decision(s);
     const tradeScore = num(s.trade_score || s.overall_score);
     const aiScore = num(s.ai_score || s.overall_score);
-    const conf = Math.round(num(s.confidence)*100);
+    const conf = num(s.confidence).toFixed(1);
     const miss = missingFor(symbol, s);
     const tradeSc = scoreColorClass(tradeScore);
     const aiSc = scoreColorClass(aiScore);

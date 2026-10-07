@@ -17,6 +17,13 @@ langgraph==0.1.6
 
 # Broker integration
 kiteconnect==5.0.0
+# Intraday engine (Angel One SmartAPI) — isolated from Kite.
+# smartapi-python requires pyotp/logzero/websocket-client explicitly
+# (per official README).
+smartapi-python>=1.5.5
+pyotp>=2.9.0
+logzero>=1.7.0
+websocket-client>=1.8.0
 
 # Data processing
 beautifulsoup4==4.12.3

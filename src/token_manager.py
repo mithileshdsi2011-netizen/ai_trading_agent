@@ -43,11 +43,20 @@ class TokenManager:
             if os.path.exists(self.token_file):
                 with open(self.token_file, 'r') as f:
                     token_data = json.load(f)
-                    self.access_token = token_data.get('access_token')
+                    new_token = token_data.get('access_token')
                     expiry_str = token_data.get('expiry')
                     if expiry_str:
                         self.token_expiry = datetime.fromisoformat(expiry_str)
-                    
+
+                    # If the token on disk has changed, a fresh token was saved
+                    # externally (e.g., get_kite_token.py) — clear the mid-session
+                    # invalidation flag so the running process can use it without a
+                    # manual restart.
+                    if new_token and new_token != self.access_token:
+                        TokenManager._token_invalidated = False
+                        logger.info("New token loaded from disk; cleared invalidation flag")
+
+                    self.access_token = new_token
                     logger.info(f"Loaded token from file, expires at: {self.token_expiry}")
         except Exception as e:
             logger.error(f"Error loading token: {e}")
