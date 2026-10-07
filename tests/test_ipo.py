@@ -392,5 +392,110 @@ class TestExplainableAnalysis:
         assert isinstance(result.risk_explanation, str)
 
 
+class TestNseIPOProvider:
+    """Live NSE provider — transport/mapping tests with a stubbed session.
+
+    No real network is used; the session double drives every branch.
+    """
+
+    def _provider(self, payloads=None, statuses=None):
+        from ipo.providers.nse_provider import NseIPODataProvider
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        queue = list(statuses or [])
+        payload_iter = iter(payloads or [])
+
+        def _get(url, timeout=None):
+            resp = MagicMock()
+            resp.status_code = queue.pop(0) if queue else 200
+            if url.endswith('/'):
+                return resp  # cookie bootstrap
+            try:
+                resp.json.return_value = next(payload_iter)
+            except StopIteration:
+                resp.json.return_value = []
+            return resp
+
+        session.get.side_effect = _get
+        return NseIPODataProvider(session=session, cache_ttl=60)
+
+    def test_maps_open_ipo_fields(self):
+        provider = self._provider(payloads=[
+            [{'companyName': 'Acme Industries Ltd', 'symbol': 'ACME',
+              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026',
+              'priceBand': '₹95 to ₹100', 'issueSizeCr': '250.5',
+              'listingDate': '15-10-2026'}],
+        ])
+        ipos = provider.get_open_ipos()
+        assert len(ipos) == 1
+        ipo = ipos[0]
+        assert ipo.name == 'Acme Industries Ltd'
+        assert ipo.symbol == 'ACME'
+        assert ipo.price_band_min == 95.0
+        assert ipo.price_band_max == 100.0
+        assert ipo.issue_size == 250.5
+        assert ipo.open_date == '2026-10-05'
+        assert ipo.close_date == '2026-10-08'
+        assert ipo.listing_date == '2026-10-15'
+        assert ipo.is_demo_data is False
+        assert provider.is_demo_data() is False
+        assert 'NSE' in provider.get_data_source_name()
+
+    def test_min_max_price_fields(self):
+        provider = self._provider(payloads=[
+            [{'companyName': 'Beta Corp', 'symbol': 'BETA',
+              'minPrice': '68', 'maxPrice': '72'}],
+        ])
+        ipos = provider.get_open_ipos()
+        assert ipos[0].price_band_min == 68.0
+        assert ipos[0].price_band_max == 72.0
+
+    def test_http_error_raises_provider_error(self):
+        from ipo.providers.nse_provider import IPOProviderError
+        provider = self._provider(statuses=[200, 403, 200, 403])
+        with pytest.raises(IPOProviderError):
+            provider.get_open_ipos()
+
+    def test_cache_prevents_refetch(self):
+        provider = self._provider(payloads=[
+            [{'companyName': 'Acme', 'symbol': 'ACME'}],
+        ])
+        first = provider.get_open_ipos()
+        second = provider.get_open_ipos()
+        assert first is second  # cached object returned
+        assert client_calls(provider) == 2  # bootstrap + one fetch
+
+    def test_upcoming_and_recent_endpoints(self):
+        provider = self._provider(payloads=[
+            [{'companyName': 'Future Co', 'symbol': 'FUT',
+              'issueStartDate': '01-01-2099', 'issueEndDate': '05-01-2099'}],
+            [{'companyName': 'Old Co', 'symbol': 'OLD',
+              'issueStartDate': '01-01-2020', 'issueEndDate': '05-01-2020',
+              'listingDate': '15-01-2020'}],
+        ])
+        upcoming = provider.get_upcoming_ipos()
+        recent = provider.get_recent_ipos()
+        assert upcoming[0].status in (IPOStatus.UPCOMING, IPOStatus.OPEN)
+        assert recent[0].status == IPOStatus.LISTED
+
+    def test_fallback_contract_no_mixed_data(self):
+        """Provider raises on transport failure; dashboard falls back to
+        the flagged mock — demo rows never pass as live."""
+        from ipo.providers.nse_provider import IPOProviderError
+        provider = self._provider(statuses=[200, 500])
+        with pytest.raises(IPOProviderError):
+            provider.get_open_ipos()
+        # Mock fallback stays flagged demo
+        mock = MockIPODataProvider()
+        assert mock.is_demo_data() is True
+        assert all(i.is_demo_data for i in mock.get_open_ipos())
+
+
+def client_calls(provider):
+    """Count session.get invocations on the stubbed session."""
+    return provider._session.get.call_count
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

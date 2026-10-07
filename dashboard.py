@@ -6693,9 +6693,10 @@ async function loadIPOData(){
     // Update data source indicator
     const sourceEl=document.getElementById('ipo-data-source');
     if(sourceEl){
-      sourceEl.textContent=d.is_demo_data?'Demo IPO data':'Live IPO data';
+      sourceEl.textContent=(d.is_demo_data?'Demo IPO data':'Live IPO data')+(d.data_source?' — '+d.data_source:'');
       sourceEl.style.color=d.is_demo_data?'#f59e0b':'#22c55e';
       sourceEl.style.background=d.is_demo_data?'#f59e0b22':'#22c55e22';
+      sourceEl.title=d.is_demo_data&&d.live_error?('Live fetch failed: '+d.live_error):'';
     }
     
     // Render summary table
@@ -9168,14 +9169,30 @@ def api_smart_execution():
 
 @app.route('/api/ipo-data')
 def api_ipo_data():
-    """IPO Intelligence data: open, upcoming, recent IPOs with analysis."""
+    """IPO Intelligence data: open, upcoming, recent IPOs with analysis.
+
+    Live NSE data is attempted first; on ANY fetch failure the endpoint
+    falls back to the clearly-flagged mock provider so live and demo
+    data are never mixed in a single response.
+    """
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
         from ipo.analyzer import IPOAnalyzer
         from ipo.providers.mock_provider import MockIPODataProvider
+        from ipo.providers.nse_provider import get_live_ipo_provider
         
-        # Initialize analyzer with mock provider
-        provider = MockIPODataProvider()
+        # Live first; flagged mock fallback on failure — never mixed
+        live_error = None
+        try:
+            provider = get_live_ipo_provider()
+            provider.get_open_ipos()
+            provider.get_upcoming_ipos()
+            provider.get_recent_ipos()
+        except Exception as live_err:
+            live_error = str(live_err)[:200]
+            logger.warning(f"IPO live provider unavailable ({live_error}); using flagged demo data")
+            provider = MockIPODataProvider()
+        
         analyzer = IPOAnalyzer(provider)
         
         # Get analyzed IPOs
@@ -9223,6 +9240,8 @@ def api_ipo_data():
         return jsonify({
             'is_demo_data': provider.is_demo_data(),
             'data_source': provider.get_data_source_name(),
+            'live_data_available': live_error is None,
+            'live_error': live_error,
             'open_ipos': [serialize_analysis(ipo) for ipo in open_ipos],
             'upcoming_ipos': [serialize_analysis(ipo) for ipo in upcoming_ipos],
             'recent_ipos': [serialize_analysis(ipo) for ipo in recent_ipos],
