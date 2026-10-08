@@ -26,10 +26,10 @@ class IntradayTradeManager:
             data_file: Optional custom data file path
         """
         self._trades: List[IntradayTrade] = []
-        self._data_file = data_file or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "data", "intraday", "intraday_trades.json"
-        )
+        if data_file is None:
+            from config import data_path
+            data_file = data_path(os.path.join("intraday", "intraday_trades.json"))
+        self._data_file = data_file
         self._load_trades()
     
     def _load_trades(self):

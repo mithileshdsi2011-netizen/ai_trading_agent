@@ -22,10 +22,8 @@ _LOCK = threading.Lock()
 
 def default_state_dir() -> str:
     """Default state directory: <project>/data/intraday/"""
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "data", "intraday"
-    )
+    from config import data_dir
+    return os.path.join(data_dir(), "intraday")
 
 
 def _serialize_position(pos: IntradayPosition) -> Dict[str, Any]:

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 import json
 import pytz
 
-from config import config
+from config import config, data_path
 from market_data import MarketDataFetcher
 from signal_generator import SignalGenerator
 from order_executor import OrderExecutor
@@ -208,7 +208,7 @@ class TradingOrchestrator:
                 # Try to reload token from file — bot may have started with a stale token
                 try:
                     import json as _json
-                    _tfile = os.path.join(os.path.dirname(__file__), '..', 'data', 'kite_token.json')
+                    _tfile = data_path('kite_token.json')
                     with open(_tfile) as _tf:
                         _td = _json.load(_tf)
                     _new_token = _td.get('access_token', '')
@@ -366,7 +366,7 @@ class TradingOrchestrator:
                 logger.debug(f"Could not add unsettled proceeds to circuit-breaker value: {_up_e}")
 
             # Use peak value file as baseline; reset to current value on a new day
-            peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
+            peak_path = data_path('peak_value.json')
             circuit_breaker_fired = False
             try:
                 with open(peak_path) as _pf:
@@ -418,7 +418,7 @@ class TradingOrchestrator:
         # Daily loss limit: if today's realised P&L is worse than DAILY_MAX_LOSS_PCT × capital, halt new buys
         _daily_loss_halt = False
         try:
-            _journal_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'trade_journal.json')
+            _journal_path = data_path('trade_journal.json')
             if os.path.exists(_journal_path):
                 with open(_journal_path) as _jf:
                     _all_entries = json.load(_jf)
@@ -535,9 +535,7 @@ class TradingOrchestrator:
 
                 # Morning report picks
                 try:
-                    _cache_path = os.path.join(
-                        os.path.dirname(os.path.dirname(__file__)), 'data', 'morning_report_cache.json'
-                    )
+                    _cache_path = data_path('morning_report_cache.json')
                     if os.path.exists(_cache_path):
                         with open(_cache_path) as _f:
                             _mr = json.load(_f)
@@ -1272,10 +1270,7 @@ class TradingOrchestrator:
             if not current_ip:
                 return  # can't determine IP — skip silently
 
-            ip_file = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'data', 'last_known_ip.txt'
-            )
+            ip_file = data_path('last_known_ip.txt')
             known_ip = open(ip_file).read().strip() if os.path.exists(ip_file) else None
 
             if known_ip and known_ip != current_ip:
@@ -1808,7 +1803,7 @@ class TradingOrchestrator:
             total_value = holdings.get('total_value', 0)
             if total_value <= 0:
                 return
-            peak_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'peak_value.json')
+            peak_path = data_path('peak_value.json')
             os.makedirs(os.path.dirname(peak_path), exist_ok=True)
             today_str = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d')
             with open(peak_path, 'w') as _pf:

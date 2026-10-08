@@ -23,6 +23,18 @@ load_dotenv()
 _log = logging.getLogger(__name__)
 
 
+def data_dir() -> str:
+    """Project data directory. Tests may relocate it via TRADING_DATA_DIR."""
+    return os.getenv("TRADING_DATA_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data"
+    )
+
+
+def data_path(filename: str) -> str:
+    """Absolute path to a file inside the data directory."""
+    return os.path.join(data_dir(), filename)
+
+
 def _require(key: str, default: str) -> str:
     """Read an env var; warn if absent so the operator knows a default was used."""
     val = os.getenv(key)

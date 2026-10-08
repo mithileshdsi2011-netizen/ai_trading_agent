@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 import logging
 
+from config import data_dir
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ class DecisionLogger:
     
     def __init__(self):
         self.decisions_today: List[DecisionRecord] = []
-        self.log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+        self.log_dir = data_dir()
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_file = os.path.join(self.log_dir, f'decisions_{date.today().strftime("%Y%m%d")}.json')
         self._load_today_decisions()

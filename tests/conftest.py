@@ -30,6 +30,8 @@ config.MIN_CONFIDENCE = 0.60
 config.MIN_RISK_REWARD = 1.5
 config.TRADING_START = "00:00"
 config.INTRADAY_CUTOFF = "23:59"
+# Tests must never send real email
+config.EMAIL_ENABLED = False
 
 # Enterprise AI decision engine thresholds expected by the test suite
 config.SCORE_BULL_THRESHOLD = 65
@@ -64,6 +66,40 @@ def isolated_test_env(tmp_path, monkeypatch):
     # Prevent real network/token side effects from tests
     monkeypatch.setenv("PAPER_TRADING", "True")
     monkeypatch.setenv("TRADING_MODE", "swing")
+
+    # Redirect every config.data_path()/data_dir() write to a per-test dir
+    # (covers peak_value.json, kite_token.json, trade_journal reads,
+    #  morning_report_cache, last_known_ip.txt, decision logs, intraday state)
+    monkeypatch.setenv("TRADING_DATA_DIR", str(tmp_path / "prod_data"))
+    monkeypatch.setenv("EMAIL_ENABLED", "false")
+    monkeypatch.setattr(config, "EMAIL_ENABLED", False)
+
+    # Hard transport block: no test may open a real SMTP connection,
+    # even if EMAIL_ENABLED is accidentally re-enabled by code under test.
+    import smtplib
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(smtplib, "SMTP", MagicMock(name="BlockedSMTP"))
+    monkeypatch.setattr(smtplib, "SMTP_SSL", MagicMock(name="BlockedSMTP_SSL"))
+
+    # Hard broker block: no test may place/modify/cancel a real order or
+    # create a real broker session, regardless of mocking mistakes.
+    def _blocked(*_a, **_k):
+        raise RuntimeError("Real broker order/session call blocked under pytest")
+
+    try:
+        from kiteconnect import KiteConnect
+        for _m in ("place_order", "modify_order", "cancel_order",
+                   "generate_session", "renew_access_token"):
+            monkeypatch.setattr(KiteConnect, _m, _blocked, raising=False)
+    except ImportError:
+        pass
+    try:
+        from SmartApi import SmartConnect
+        for _m in ("placeOrder", "modifyOrder", "cancelOrder",
+                   "generateSession", "generateToken", "terminateSession"):
+            monkeypatch.setattr(SmartConnect, _m, _blocked, raising=False)
+    except ImportError:
+        pass
 
     # Some modules use the current working directory for logs/data; keep original.
     # Reset global singletons that tests may cache on class instances.

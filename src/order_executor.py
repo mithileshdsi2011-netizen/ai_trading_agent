@@ -250,10 +250,8 @@ class OrderExecutor:
         _journal_entry_times: dict = {}
         try:
             import json as _json, os as _os
-            _jpath = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                'data', 'trade_journal.json'
-            )
+            from config import data_path as _data_path
+            _jpath = _data_path('trade_journal.json')
             if _os.path.exists(_jpath):
                 with open(_jpath) as _jf:
                     _entries = _json.load(_jf)

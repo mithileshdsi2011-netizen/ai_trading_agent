@@ -9,7 +9,7 @@ from typing import Optional
 import logging
 from kiteconnect import KiteConnect
 
-from config import config
+from config import config, data_dir, data_path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,9 +21,7 @@ class TokenManager:
     _token_invalidated: bool = False  # set True when Zerodha rejects mid-session
     
     def __init__(self):
-        # Get the project root directory (parent of src)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.token_file = os.path.join(project_root, "data", "kite_token.json")
+        self.token_file = data_path("kite_token.json")
         self.kite = None
         self.access_token = None
         self.token_expiry = None
@@ -32,10 +30,7 @@ class TokenManager:
     
     def _ensure_data_directory(self):
         """Ensure data directory exists"""
-        # Get the project root directory
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(project_root, "data")
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(data_dir(), exist_ok=True)
     
     def _load_token(self):
         """Load token from file"""

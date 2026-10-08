@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from enum import Enum
 
-from config import config
+from config import config, data_path
 from token_manager import TokenManager
 from persistence import get_store
 
@@ -185,10 +185,7 @@ class BrokerIntegration:
         """Verify the current public IP matches the configured static/whitelisted IP."""
         import urllib.request
         import json as _json
-        cfg_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'data', 'static_ip_config.json'
-        )
+        cfg_path = data_path('static_ip_config.json')
         if not os.path.exists(cfg_path):
             logger.warning("Static IP config not found; skipping static IP verification")
             return
@@ -208,10 +205,7 @@ class BrokerIntegration:
                 continue
         if not current_ip:
             # Fallback to cached IP file
-            cached_ip_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'data', 'last_known_ip.txt'
-            )
+            cached_ip_path = data_path('last_known_ip.txt')
             if os.path.exists(cached_ip_path):
                 try:
                     with open(cached_ip_path) as f:
@@ -507,8 +501,7 @@ class BrokerIntegration:
     def _save_ip(self, ip: str):
         """Save current IP to data/last_known_ip.txt for startup checks."""
         try:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            with open(os.path.join(root, 'data', 'last_known_ip.txt'), 'w') as f:
+            with open(data_path('last_known_ip.txt'), 'w') as f:
                 f.write(ip)
         except Exception:
             pass

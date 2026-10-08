@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 from functools import wraps
 
-from config import config
+from config import config, data_path
 try:
     from persistence import get_store
 except ImportError:
@@ -735,7 +735,7 @@ class ReconciliationEngine:
 
         token_expiry = '—'
         try:
-            token_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'kite_token.json')
+            token_path = data_path('kite_token.json')
             if os.path.exists(token_path):
                 with open(token_path) as f:
                     token_expiry = json.load(f).get('expiry', '—')[:16]
