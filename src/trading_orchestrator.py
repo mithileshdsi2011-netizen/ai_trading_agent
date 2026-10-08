@@ -365,6 +365,20 @@ class TradingOrchestrator:
             except Exception as _up_e:
                 logger.debug(f"Could not add unsettled proceeds to circuit-breaker value: {_up_e}")
 
+            # External deposits/withdrawals are cash flows, not trading P&L.
+            # Only confirmed ledger entries adjust the equity comparison;
+            # missing or malformed records keep the raw value, so real
+            # losses can never be masked as withdrawals.
+            try:
+                from cash_flows import net_outflow_on
+                net_outflow = net_outflow_on(today_str)
+                if net_outflow:
+                    total_value += net_outflow
+                    logger.info(f"Circuit breaker: equity adjusted for confirmed cash flows "
+                                f"(net outflow ₹{net_outflow:,.2f}) -> ₹{total_value:,.2f}")
+            except Exception as _cf_e:
+                logger.debug(f"Cash-flow adjustment skipped: {_cf_e}")
+
             # Use peak value file as baseline; reset to current value on a new day
             peak_path = data_path('peak_value.json')
             circuit_breaker_fired = False
