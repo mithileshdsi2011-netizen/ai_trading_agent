@@ -3,7 +3,10 @@ Email Trade Reports
 Sends daily and weekly email summaries of trading activity.
 """
 import logging
+import os
 import smtplib
+import socket
+import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, date
@@ -50,23 +53,18 @@ class EmailReporter:
             k: v for k, v in EmailReporter._sent_today.items() if k.startswith(today)
         }
 
-    def send_report(self, subject: str, body: str) -> bool:
-        if not self.enabled or not self.username or not self.password or not self.to_email:
-            logger.info("Email reports disabled or not configured")
-            return False
-        
-        # Check cooldown: only send if 24 hours have passed since last email with same subject prefix
-        cooldown_key = f"cooldown_{subject[:50]}"  # Use first 50 chars of subject as key
-        now = datetime.now()
-        last_sent = EmailReporter._cooldowns.get(cooldown_key)
-        
-        if last_sent and (now - last_sent).total_seconds() < 86400:  # 24 hour cooldown (1 day)
-            logger.info(f"Email cooldown active for subject prefix, skipping duplicate: {subject[:50]}")
-            return False
-        
-        if self._already_sent(subject):
-            logger.info(f"Email already sent today, skipping duplicate: {subject}")
-            return False
+    def _incident_store(self):
+        """Shared persistent store for cross-process incident dedup.
+        Returns None when unavailable — callers fall back to in-memory dedup."""
+        try:
+            from persistence import get_store
+            store = get_store()
+            return store if hasattr(store, 'upsert_alert_incident') else None
+        except Exception:
+            return None
+
+    def _deliver(self, subject: str, body: str) -> bool:
+        """One SMTP delivery attempt.  True = relay accepted the message."""
         try:
             msg = MIMEMultipart()
             msg["From"] = self.username
@@ -80,13 +78,55 @@ class EmailReporter:
                 server.send_message(msg)
 
             logger.info(f"Email report sent: {subject}")
-            self._mark_sent(subject)
-            # Store cooldown timestamp in separate dict
-            EmailReporter._cooldowns[cooldown_key] = now
             return True
         except Exception as e:
             logger.error(f"Email report failed: {e}")
             return False
+
+    def send_report(self, subject: str, body: str) -> bool:
+        if not self.enabled or not self.username or not self.password or not self.to_email:
+            logger.info("Email reports disabled or not configured")
+            return False
+
+        # Persistent incident dedup — survives restarts and coordinates
+        # across dashboard/orchestrator processes via the shared store.
+        # Key keeps the existing semantics: same-day, same-subject dedup.
+        store = self._incident_store()
+        if store is not None:
+            incident_key = f"email:{date.today().isoformat()}:{subject[:60]}"
+            try:
+                res = store.upsert_alert_incident(incident_key, 'EmailReporter', 'INFO')
+                if (res['event'] == 'repeat'
+                        and res['incident'].get('notify_state') != 'FAILED'):
+                    logger.info(f"Email already notified for incident, skipping: {subject[:50]}")
+                    return False
+                owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+                if not store.claim_incident_notification(incident_key, owner):
+                    return False
+                ok = self._deliver(subject, body)
+                store.complete_incident_notification(incident_key, owner, ok)
+                return ok
+            except Exception as e:
+                logger.warning(f"Incident dedup unavailable ({e}); using in-memory dedup")
+
+        # In-memory fallback (also used when the store is unreachable)
+        cooldown_key = f"cooldown_{subject[:50]}"  # Use first 50 chars of subject as key
+        now = datetime.now()
+        last_sent = EmailReporter._cooldowns.get(cooldown_key)
+
+        if last_sent and (now - last_sent).total_seconds() < 86400:  # 24 hour cooldown (1 day)
+            logger.info(f"Email cooldown active for subject prefix, skipping duplicate: {subject[:50]}")
+            return False
+
+        if self._already_sent(subject):
+            logger.info(f"Email already sent today, skipping duplicate: {subject}")
+            return False
+
+        if self._deliver(subject, body):
+            self._mark_sent(subject)
+            EmailReporter._cooldowns[cooldown_key] = now
+            return True
+        return False
 
     def daily_report(self, summary: Dict, positions: List[Dict], orders: List[Dict]) -> bool:
         now = datetime.now()

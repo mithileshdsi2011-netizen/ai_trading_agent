@@ -5,11 +5,15 @@ Generates, stores and routes alerts.  Supports multiple notification
 channels and prioritization.  Alerting is purely observational and does
 not modify trading decisions.
 """
+import hashlib
 import json
 import logging
 import os
+import re
+import socket
 import subprocess
 import threading
+import uuid
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +73,7 @@ class EnterpriseAlertEngine:
         message: str,
         data: Optional[Dict[str, Any]] = None,
         notify: bool = True,
+        incident_key: Optional[str] = None,
     ) -> int:
         """Create, store and route an alert.  Returns alert id."""
         level = level.upper()
@@ -82,6 +87,7 @@ class EnterpriseAlertEngine:
             'message': message,
             'data_json': json.dumps(data or {}),
             'acknowledged': 0,
+            'incident_key': incident_key,
         }
 
         alert_id = -1
@@ -159,29 +165,132 @@ class EnterpriseAlertEngine:
             except Exception:
                 pass
 
+    def _incident_key(self, alert: Dict[str, Any]) -> str:
+        """Stable per-incident key.  Explicit keys win; the fallback masks
+        only digit runs so 'Disk 90%' and 'Disk 91%' share one incident
+        while different symbols/names never merge."""
+        explicit = alert.get('incident_key')
+        if explicit:
+            return str(explicit)
+        masked = re.sub(r'\d+', '#', alert['message'])
+        digest = hashlib.sha1(masked.encode()).hexdigest()[:12]
+        return f"{alert['source']}:{digest}"
+
     def _to_email(self, alert: Dict[str, Any]) -> None:
-        if self.email and hasattr(self.email, 'send_report'):
+        if not (self.email and hasattr(self.email, 'send_report')):
+            return
+        if not hasattr(self.store, 'upsert_alert_incident'):
+            # Store lacks incident support — fail open so alerts are not lost.
             try:
-                # Add cooldown: only send email if cooldown period has passed since last email for same source+message
-                # Use source+message combination to avoid spam for the same recurring issue
-                cooldown_key = f"email_cooldown_{alert['source']}_{hash(alert['message'])}"
-                now = datetime.now()
-                last_sent = self._email_cooldowns.get(cooldown_key)
-                
-                # Use 24 hour cooldown for critical alerts, 1 hour for others
-                cooldown_seconds = 86400 if alert['level'] == 'CRITICAL' else 3600
-                
-                if last_sent and (now - last_sent).total_seconds() < cooldown_seconds:
-                    logger.info(f"Email cooldown active for {alert['source']}, skipping duplicate alert")
-                    return
-                
-                body = f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p></body></html>"
-                self.email.send_report(subject=f"[{alert['level']}] {alert['source']}", body=body)
-                
-                # Store cooldown timestamp
-                self._email_cooldowns[cooldown_key] = now
+                self.email.send_report(
+                    subject=f"[{alert['level']}] {alert['source']}",
+                    body=f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p></body></html>",
+                )
             except Exception:
                 pass
+            return
+
+        key = self._incident_key(alert)
+        res = self.store.upsert_alert_incident(key, alert['source'], alert['level'])
+        event = res['event']
+        if event == 'repeat':
+            # Suppress unless the last delivery failed — retries must not be
+            # silently swallowed, or a critical alert is lost.
+            if res['incident'].get('notify_state') != 'FAILED':
+                self._audit_suppressed(alert, key, res['incident'])
+                return
+        self._send_incident_email(key, alert, event)
+
+    def _audit_suppressed(
+        self, alert: Dict[str, Any], incident_key: str, incident: Dict[str, Any]
+    ) -> None:
+        try:
+            self.store.save_notification_history({
+                'timestamp': _now(),
+                'alert_id': 0,
+                'channel': 'incident_dedup',
+                'status': 'SUPPRESSED',
+                'content': json.dumps({
+                    'incident_key': incident_key,
+                    'level': alert['level'],
+                    'source': alert['source'],
+                    'message': alert['message'],
+                    'detection_count': incident.get('detection_count'),
+                }),
+            })
+        except Exception:
+            pass
+
+    def _claim_owner(self) -> str:
+        return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+    def _send_incident_email(
+        self, incident_key: str, alert: Dict[str, Any], event: str
+    ) -> None:
+        owner = self._claim_owner()
+        if not self.store.claim_incident_notification(incident_key, owner):
+            return  # another process/thread owns the pending send
+        subject = f"[{alert['level']}] {alert['source']}"
+        if event == 'escalated':
+            subject = f"[ESCALATED {alert['level']}] {alert['source']}"
+        elif event == 'reopened':
+            subject = f"[RECURRED {alert['level']}] {alert['source']}"
+        body = (
+            f"<html><body><p><b>{alert['source']}</b> — {alert['message']}</p>"
+            f"<p>Incident: <code>{incident_key}</code></p></body></html>"
+        )
+        # Bypass send_report's own subject-keyed dedup (EmailReporter._deliver)
+        # so distinct incidents sharing a subject are never merged here.
+        deliver = getattr(self.email, '_deliver', None) or self.email.send_report
+        try:
+            ok = bool(deliver(subject=subject, body=body))
+        except Exception:
+            ok = False
+        self.store.complete_incident_notification(incident_key, owner, ok)
+
+    def resolve_incident(self, incident_key: str, summary: str = '') -> None:
+        """Mark an incident recovered.  Sends exactly one recovery email.
+
+        Resolution is recorded even without an email sender, and the
+        recovery claim is attempted independently — so whichever process
+        (dashboard or orchestrator) has working email delivers it once.
+        """
+        if not hasattr(self.store, 'resolve_alert_incident'):
+            return
+        try:
+            self.store.resolve_alert_incident(incident_key)
+        except Exception:
+            return
+        if not (self.email and hasattr(self.email, 'send_report')):
+            return
+        owner = self._claim_owner()
+        try:
+            if not self.store.claim_incident_notification(
+                    incident_key, owner, kind='recovery'):
+                return
+        except Exception:
+            return
+        inc = {}
+        try:
+            inc = self.store.get_alert_incident(incident_key) or {}
+        except Exception:
+            pass
+        body = (
+            f"<html><body><p><b>{inc.get('source', incident_key)}</b> recovered"
+            f"{(' — ' + summary) if summary else ''}. "
+            f"Detections: {inc.get('detection_count', '?')}.</p>"
+            f"<p>Incident: <code>{incident_key}</code></p></body></html>"
+        )
+        try:
+            ok = bool(self.email.send_report(
+                subject=f"[RESOLVED] {inc.get('source', incident_key)}", body=body))
+        except Exception:
+            ok = False
+        try:
+            self.store.complete_incident_notification(
+                incident_key, owner, ok, kind='recovery')
+        except Exception:
+            pass
 
     # ── Monitoring checks ─────────────────────────────────────────────────
 
@@ -189,32 +298,55 @@ class EnterpriseAlertEngine:
         """Generate alerts from a monitor metrics snapshot."""
         sys = metrics.get('system', {})
         if sys.get('cpu_percent', 0) > 80:
-            self.alert('WARNING', 'CPU', f"CPU usage {sys['cpu_percent']}%", sys)
+            self.alert('WARNING', 'CPU', f"CPU usage {sys['cpu_percent']}%", sys,
+                       incident_key='system:cpu')
+        else:
+            self.resolve_incident('system:cpu')
         if sys.get('memory_percent', 0) > 85:
-            self.alert('WARNING', 'Memory', f"Memory usage {sys['memory_percent']}%", sys)
+            self.alert('WARNING', 'Memory', f"Memory usage {sys['memory_percent']}%", sys,
+                       incident_key='system:memory')
+        else:
+            self.resolve_incident('system:memory')
         if sys.get('disk_percent', 0) > 85:
-            self.alert('WARNING', 'Disk', f"Disk usage {sys['disk_percent']}%", sys)
+            self.alert('WARNING', 'Disk', f"Disk usage {sys['disk_percent']}%", sys,
+                       incident_key='system:disk')
+        else:
+            self.resolve_incident('system:disk')
 
         sql = metrics.get('sqlite', {})
         if not sql.get('ok'):
-            self.alert('CRITICAL', 'SQLite', 'SQLite health check failed', sql)
+            self.alert('CRITICAL', 'SQLite', 'SQLite health check failed', sql,
+                       incident_key='sqlite:health')
         elif sql.get('response_ms', 0) > 200:
-            self.alert('WARNING', 'SQLite', f"SQLite slow: {sql['response_ms']}ms", sql)
+            self.alert('WARNING', 'SQLite', f"SQLite slow: {sql['response_ms']}ms", sql,
+                       incident_key='sqlite:health')
+        else:
+            self.resolve_incident('sqlite:health')
 
         if metrics.get('api_latency_ms', 0) > 500:
-            self.alert('WARNING', 'API', f"API latency {metrics['api_latency_ms']}ms", metrics)
-        if not metrics.get('internet', True):
-            self.alert('CRITICAL', 'Internet', 'Internet unavailable', metrics)
+            self.alert('WARNING', 'API', f"API latency {metrics['api_latency_ms']}ms", metrics,
+                       incident_key='api:latency')
+        else:
+            self.resolve_incident('api:latency')
         if not metrics.get('kite', {}).get('ok', True) if isinstance(metrics.get('kite'), dict) else not metrics.get('kite', True):
-            self.alert('CRITICAL', 'Kite', 'Kite API unavailable', metrics)
+            self.alert('CRITICAL', 'Kite', 'Kite API unavailable', metrics,
+                       incident_key='kite:connectivity')
+        else:
+            self.resolve_incident('kite:connectivity')
 
         hb = metrics.get('scheduler_heartbeat', {})
         if not hb.get('ok', True):
-            self.alert('CRITICAL', 'Scheduler', 'Scheduler heartbeat missing', hb)
+            self.alert('CRITICAL', 'Scheduler', 'Scheduler heartbeat missing', hb,
+                       incident_key='scheduler:heartbeat')
+        else:
+            self.resolve_incident('scheduler:heartbeat')
 
         rh = metrics.get('reconciliation', {})
         if not rh.get('ok', True):
-            self.alert('CRITICAL', 'Reconciliation', 'Reconciliation health check failed', rh)
+            self.alert('CRITICAL', 'Reconciliation', 'Reconciliation health check failed', rh,
+                       incident_key='reconciliation:health')
+        else:
+            self.resolve_incident('reconciliation:health')
 
     # ── Event-driven convenience alerts ───────────────────────────────────
 

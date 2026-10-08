@@ -14,7 +14,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 logging.basicConfig(level=logging.INFO)
@@ -450,6 +450,23 @@ class TradingStore:
 
                 CREATE INDEX IF NOT EXISTS idx_notification_history_timestamp
                     ON notification_history (timestamp);
+
+                CREATE TABLE IF NOT EXISTS alert_incidents (
+                    incident_key TEXT PRIMARY KEY,
+                    source TEXT NOT NULL DEFAULT '',
+                    level TEXT NOT NULL DEFAULT 'INFO',
+                    max_level TEXT NOT NULL DEFAULT 'INFO',
+                    state TEXT NOT NULL DEFAULT 'OPEN',
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    detection_count INTEGER NOT NULL DEFAULT 0,
+                    notify_state TEXT NOT NULL DEFAULT 'PENDING',
+                    recovery_state TEXT NOT NULL DEFAULT 'NONE',
+                    claim_owner TEXT,
+                    claim_expires TEXT,
+                    notified_at TEXT,
+                    notify_attempts INTEGER NOT NULL DEFAULT 0
+                );
 
                 CREATE TABLE IF NOT EXISTS daily_health_reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2075,6 +2092,178 @@ class TradingStore:
                     }
                     for r in cur.fetchall()
                 ]
+
+    # ── Alert incident deduplication ─────────────────────────────────────
+
+    _INCIDENT_LEVEL_ORDER = {'INFO': 0, 'WARNING': 1, 'CRITICAL': 2}
+
+    def upsert_alert_incident(
+        self, incident_key: str, source: str, level: str
+    ) -> Dict[str, Any]:
+        """Record one detection for an incident.
+
+        Returns {'event': 'new'|'repeat'|'escalated'|'reopened',
+                 'incident': row-dict}.  'repeat' means an email was already
+        delivered/pending for the current severity — callers should not
+        notify again.
+        """
+        now = datetime.now().isoformat()
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM alert_incidents WHERE incident_key = ?",
+                    (incident_key,),
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO alert_incidents
+                        (incident_key, source, level, max_level, state,
+                         first_seen, last_seen, detection_count)
+                        VALUES (?, ?, ?, ?, 'OPEN', ?, ?, 1)
+                        """,
+                        (incident_key, source, level, level, now, now),
+                    )
+                    return {
+                        'event': 'new',
+                        'incident': self._get_incident_row(conn, incident_key),
+                    }
+
+                inc = dict(row)
+                updates = ["last_seen = ?", "detection_count = detection_count + 1",
+                           "level = ?"]
+                params: List[Any] = [now, level]
+                event = 'repeat'
+                if inc['state'] == 'RESOLVED':
+                    event = 'reopened'
+                    updates += ["state = 'OPEN'", "notify_state = 'PENDING'",
+                                "recovery_state = 'NONE'"]
+                elif (self._INCIDENT_LEVEL_ORDER.get(level, 0)
+                      > self._INCIDENT_LEVEL_ORDER.get(inc['max_level'], 0)):
+                    event = 'escalated'
+                    updates += ["notify_state = 'PENDING'", "max_level = ?"]
+                    params.append(level)
+                conn.execute(
+                    f"UPDATE alert_incidents SET {', '.join(updates)} "
+                    "WHERE incident_key = ?",
+                    tuple(params + [incident_key]),
+                )
+                return {
+                    'event': event,
+                    'incident': self._get_incident_row(conn, incident_key),
+                }
+
+    @staticmethod
+    def _get_incident_row(conn, incident_key: str) -> Dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM alert_incidents WHERE incident_key = ?",
+            (incident_key,),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def claim_incident_notification(
+        self,
+        incident_key: str,
+        owner: str,
+        ttl_seconds: int = 300,
+        kind: str = 'incident',
+    ) -> bool:
+        """Atomically claim the right to send one notification.
+
+        Exactly one caller across all processes wins.  Claims on 'SENDING'
+        rows whose lease expired are reclaimable so a crashed sender does
+        not permanently lose the notification.
+        """
+        now = datetime.now()
+        expiry = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._lock:
+            with self._conn() as conn:
+                if kind == 'recovery':
+                    cur = conn.execute(
+                        """
+                        UPDATE alert_incidents
+                        SET recovery_state = 'SENDING', claim_owner = ?,
+                            claim_expires = ?
+                        WHERE incident_key = ? AND state = 'RESOLVED'
+                          AND (recovery_state = 'PENDING'
+                               OR (recovery_state = 'SENDING' AND claim_expires < ?))
+                        """,
+                        (owner, expiry, incident_key, now.isoformat()),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        UPDATE alert_incidents
+                        SET notify_state = 'SENDING', claim_owner = ?,
+                            claim_expires = ?,
+                            notify_attempts = notify_attempts + 1
+                        WHERE incident_key = ?
+                          AND (notify_state IN ('PENDING', 'FAILED')
+                               OR (notify_state = 'SENDING' AND claim_expires < ?))
+                        """,
+                        (owner, expiry, incident_key, now.isoformat()),
+                    )
+                return cur.rowcount == 1
+
+    def complete_incident_notification(
+        self,
+        incident_key: str,
+        owner: str,
+        delivered: bool,
+        kind: str = 'incident',
+    ) -> None:
+        """Record the outcome of a claimed notification send."""
+        with self._lock:
+            with self._conn() as conn:
+                if kind == 'recovery':
+                    conn.execute(
+                        """
+                        UPDATE alert_incidents
+                        SET recovery_state = ?, claim_owner = NULL,
+                            claim_expires = NULL
+                        WHERE incident_key = ? AND claim_owner = ?
+                        """,
+                        ('SENT' if delivered else 'PENDING',
+                         incident_key, owner),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE alert_incidents
+                        SET notify_state = ?, notified_at = ?,
+                            claim_owner = NULL, claim_expires = NULL
+                        WHERE incident_key = ? AND claim_owner = ?
+                        """,
+                        ('DELIVERED' if delivered else 'FAILED',
+                         datetime.now().isoformat(), incident_key, owner),
+                    )
+
+    def resolve_alert_incident(self, incident_key: str) -> bool:
+        """OPEN -> RESOLVED.  True only on a real transition, so exactly one
+        recovery notification is ever queued per resolution."""
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE alert_incidents
+                    SET state = 'RESOLVED', last_seen = ?,
+                        recovery_state = CASE
+                            WHEN recovery_state = 'SENT' THEN recovery_state
+                            ELSE 'PENDING' END
+                    WHERE incident_key = ? AND state = 'OPEN'
+                    """,
+                    (datetime.now().isoformat(), incident_key),
+                )
+                return cur.rowcount == 1
+
+    def get_alert_incident(self, incident_key: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM alert_incidents WHERE incident_key = ?",
+                    (incident_key,),
+                ).fetchone()
+                return dict(row) if row else None
 
     def save_daily_health_report(self, snapshot: Dict[str, Any]) -> None:
         with self._lock:
