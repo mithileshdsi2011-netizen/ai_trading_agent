@@ -16,6 +16,12 @@ from config import config
 def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
                         market_open=True, should_stop_trading=False):
     """Wire deterministic test doubles into the orchestrator for run_once."""
+    # Prevent persisted broker_state (real trading.db) from overriding the
+    # mocked market-open status — treat any cached state as absent.
+    try:
+        orchestrator._store.get_broker_state = lambda *a, **k: {}
+    except Exception:
+        pass
     mock_market.is_market_open.return_value = market_open
     mock_market.kite = None
     mock_market.new_cycle.return_value = None
@@ -47,6 +53,7 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
         'paper_trading': True
     }
     mock_executor.monitor_positions.return_value = []
+    mock_executor.monitor_holdings.return_value = []
     mock_executor.get_execution_summary.return_value = {
         'position_summary': {
             'open_positions': 1,
@@ -73,7 +80,7 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
             'stop_loss': 2450.0,
             'target': 2600.0,
             'risk_reward_ratio': 2.0,
-            'confidence': 0.8,
+            'confidence': 80.0,
             'overall_score': 0.6
         }
     ]
@@ -99,6 +106,10 @@ def _stub_run_once_deps(orchestrator, mock_market, mock_signal, mock_executor,
     orchestrator.explainer = Mock()
     orchestrator.explainer.format_skip.return_value = ''
     orchestrator.explainer.format_buy.return_value = ''
+    orchestrator.position_sizing = Mock()
+    orchestrator.position_sizing.calculate.return_value = {
+        'qty': 2, 'investment_amount': 5000.0, 'budget': 5000.0, 'reason': 'test'
+    }
     orchestrator.telegram = Mock()
     orchestrator.email = Mock()
 

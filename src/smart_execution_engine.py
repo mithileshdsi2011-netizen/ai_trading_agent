@@ -328,33 +328,95 @@ class SmartExecutionEngine:
             return {}
 
     def get_dashboard_data(self) -> Dict[str, Any]:
-        """Data payload for the Smart Execution dashboard tab."""
-        m = self.recent_metrics()
-        orders = []
+        """Data payload for the Smart Execution dashboard tab.
+
+        "Today" statistics are computed from orders persisted on the current
+        local (IST) trading date — the metrics snapshot is cumulative and
+        must not be presented as today's numbers. `orders` contains only
+        today's rows; `recent_orders` keeps the last 20 all-time for history.
+        """
+        orders, recent, queue = [], [], []
+        today = datetime.now().strftime("%Y-%m-%d")
         if self.store is not None:
             try:
-                orders = self.store.get_execution_orders(limit=20)
+                recent = self.store.get_execution_orders(limit=20)
             except Exception:
                 pass
-        queue = []
-        if self.store is not None:
+            try:
+                orders = self.store.get_execution_orders(limit=500, on_date=today)
+            except TypeError:
+                # Stores without date filtering — fall back to timestamp prefix
+                orders = [o for o in recent
+                          if str(o.get("timestamp", ""))[:10] == today]
+            except Exception:
+                pass
             try:
                 queue = self.store.get_execution_queue(limit=20)
             except Exception:
                 pass
+        m = self._today_metrics(orders)
         return {
-            "today_orders": m.get("total_orders", 0),
-            "filled": m.get("filled_orders", 0),
-            "partial": m.get("partial_orders", 0),
-            "rejected": m.get("rejected_orders", 0),
-            "avg_slippage_pct": round(m.get("avg_slippage_pct", 0) * 100, 4),
-            "avg_fill_time_ms": int(m.get("avg_fill_time_ms", 0)),
-            "broker_latency_ms": int(m.get("avg_broker_latency_ms", 0)),
-            "success_rate_pct": round(m.get("success_rate", 0) * 100, 2),
-            "avg_retry_count": round(m.get("avg_retry_count", 0), 2),
+            "today_orders": m["total_orders"],
+            "filled": m["filled_orders"],
+            "partial": m["partial_orders"],
+            "rejected": m["rejected_orders"],
+            "avg_slippage_pct": round(m["avg_slippage_pct"], 4),
+            "avg_fill_time_ms": int(m["avg_fill_time_ms"]),
+            "broker_latency_ms": int(m["avg_broker_latency_ms"]),
+            "success_rate_pct": round(m["success_rate"], 2),
+            "avg_retry_count": round(m["avg_retry_count"], 2),
             "execution_quality_score": self.execution_quality_score(),
-            "orders": orders,
+            "orders": orders[:20],
+            "recent_orders": recent,
             "queue": queue,
+        }
+
+    @staticmethod
+    def _today_metrics(today_rows: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Compute today's execution stats from today's persisted orders."""
+        total = len(today_rows)
+        filled = sum(1 for o in today_rows if o.get("status") == STATUS_FILLED)
+        partial = sum(1 for o in today_rows if o.get("status") == STATUS_PARTIAL)
+        rejected = sum(1 for o in today_rows if o.get("status") == STATUS_REJECTED)
+
+        def _detail(o):
+            try:
+                raw = o.get("data_json") or "{}"
+                return json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                return {}
+
+        slips, times, latencies, retries = [], [], [], []
+        for o in today_rows:
+            d = _detail(o)
+            slip = d.get("slippage_pct")
+            if slip is None and o.get("signal_price") and o.get("avg_price"):
+                sp = float(o["signal_price"])
+                if sp > 0:
+                    slip = (float(o["avg_price"]) - sp) / sp
+                    if o.get("side") == SIDE_SELL:
+                        slip = -slip
+            if slip is not None:
+                slips.append(abs(float(slip)))
+            for field, bucket in (("execution_time_ms", times),
+                                  ("broker_latency_ms", latencies),
+                                  ("retry_count", retries)):
+                if d.get(field) is not None:
+                    bucket.append(float(d[field]))
+
+        def _avg(xs):
+            return sum(xs) / len(xs) if xs else 0.0
+
+        return {
+            "total_orders": total,
+            "filled_orders": filled,
+            "partial_orders": partial,
+            "rejected_orders": rejected,
+            "avg_slippage_pct": _avg(slips) * 100,
+            "avg_fill_time_ms": _avg(times),
+            "avg_broker_latency_ms": _avg(latencies),
+            "avg_retry_count": _avg(retries),
+            "success_rate": (filled / total * 100) if total else 0.0,
         }
 
     # ── Internal helpers ─────────────────────────────────────────────────────

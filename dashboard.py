@@ -6664,7 +6664,7 @@ async function loadSmartExecution(){
     const orders=document.getElementById('exec-orders');
     if(orders){
       const list=d.orders||[];
-      if(!list.length){orders.innerHTML='No orders';}
+      if(!list.length){orders.innerHTML='No orders today';}
       else{
         let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:right;color:#f9fafb">Filled</th><th style="padding:4px;text-align:right;color:#f9fafb">Avg</th><th style="padding:4px;text-align:left;color:#f9fafb">Type</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
         list.forEach(o=>{
@@ -6844,10 +6844,11 @@ async function loadIntradayData(){
     
     const tradingStatus=document.getElementById('intraday-trading-status');
     if(tradingStatus){
-      tradingStatus.textContent=d.trading_blocked?'BLOCKED':'ACTIVE';
-      tradingStatus.style.color=d.trading_blocked?'#ef4444':'#10b981';
+      const es=d.engine_state||(d.trading_blocked?'BLOCKED':'ACTIVE');
+      tradingStatus.textContent=es;
+      tradingStatus.style.color=es==='ACTIVE'?'#10b981':es==='SCANNING'?'#3b82f6':es==='MARKET CLOSED'?'#9ca3af':'#ef4444';
     }
-    
+
     const regimeEl=document.getElementById('intraday-regime');
     if(regimeEl){
       const regime=(d.market_regime||'—').replace('_',' ');

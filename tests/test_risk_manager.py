@@ -27,16 +27,16 @@ class TestRiskManager:
         return {
             'symbol': 'RELIANCE',
             'action': 'BUY',
-            'current_price': 2500.0,
+            'current_price': 4000.0,
             'position_size': 1,
-            'investment_amount': 2500.0,
-            'stop_loss': 2450.0,
-            'target': 2600.0,
+            'investment_amount': 4000.0,
+            'stop_loss': 3800.0,
+            'target': 4200.0,
             'risk_reward_ratio': 2.0,
-            'confidence': 0.8,
+            'confidence': 70,  # enterprise engine emits 0-100 confidence
             'overall_score': 0.6,
             '_research': {'sector': 'Energy'},
-            'market_regime': 'BULL'
+            'market_regime': 'SIDEWAYS'
         }
     
     def test_initialization(self, risk_manager):
@@ -76,7 +76,7 @@ class TestRiskManager:
     
     def test_can_open_position_low_confidence(self, risk_manager, sample_signal):
         """Test can open position with low confidence"""
-        sample_signal['confidence'] = 0.5
+        sample_signal['confidence'] = 50  # 0-100 scale; below BULL min of 55
         result = risk_manager.can_open_position(sample_signal)
         assert result is False
     

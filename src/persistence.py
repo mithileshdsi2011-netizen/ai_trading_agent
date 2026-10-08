@@ -2135,14 +2135,22 @@ class TradingStore:
                 )
                 return cur.lastrowid
 
-    def get_execution_orders(self, limit: int = 20, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_execution_orders(self, limit: int = 20, symbol: Optional[str] = None,
+                             on_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Recent execution orders. `on_date` (YYYY-MM-DD) scopes to that IST date."""
         with self._lock:
             with self._conn() as conn:
                 q = "SELECT * FROM execution_orders"
                 params: List[Any] = []
+                conds = []
                 if symbol:
-                    q += " WHERE symbol = ?"
+                    conds.append("symbol = ?")
                     params.append(symbol)
+                if on_date:
+                    conds.append("substr(timestamp, 1, 10) = ?")
+                    params.append(on_date)
+                if conds:
+                    q += " WHERE " + " AND ".join(conds)
                 q += " ORDER BY timestamp DESC LIMIT ?"
                 params.append(limit)
                 cur = conn.execute(q, tuple(params))

@@ -4,6 +4,7 @@ Unit tests for src/smart_execution_engine.py
 import os
 import sys
 import unittest
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -37,8 +38,13 @@ class FakeStore:
         self.execution_orders.append(r)
         return len(self.execution_orders)
 
-    def get_execution_orders(self, limit=20):
-        return self.execution_orders[-limit:][::-1]
+    def get_execution_orders(self, limit=20, symbol=None, on_date=None):
+        out = self.execution_orders
+        if symbol:
+            out = [o for o in out if o.get('symbol') == symbol]
+        if on_date:
+            out = [o for o in out if str(o.get('timestamp', ''))[:10] == on_date]
+        return out[-limit:][::-1]
 
     def save_execution_queue(self, r):
         self.execution_queue.append(r)
@@ -343,6 +349,48 @@ class TestSmartExecutionEngine(unittest.TestCase):
         eng = self._engine(store=store)
         d = eng.get_dashboard_data()
         self.assertEqual(len(d["queue"]), 1)
+
+    def test_dashboard_today_scoping(self):
+        """Historical orders must not appear under today's stats."""
+        store = FakeStore()
+        today = datetime.now().strftime("%Y-%m-%d")
+        # Yesterday: a REJECTED order — must not count as today
+        store.execution_orders.append({
+            "timestamp": "2000-08-04T13:47:42", "symbol": "OLD", "side": "BUY",
+            "quantity": 10, "filled_qty": 0, "status": "REJECTED",
+            "avg_price": 0, "signal_price": 450, "data_json": "{}"})
+        # Today: one FILLED, one REJECTED
+        for st in ("FILLED", "REJECTED"):
+            store.execution_orders.append({
+                "timestamp": f"{today}T10:15:00", "symbol": "REL", "side": "BUY",
+                "quantity": 10, "filled_qty": 10 if st == "FILLED" else 0,
+                "status": st, "avg_price": 451 if st == "FILLED" else 0,
+                "signal_price": 450,
+                "data_json": '{"slippage_pct": 0.002, "execution_time_ms": 120,'
+                             ' "broker_latency_ms": 45, "retry_count": 1}'})
+        eng = self._engine(store=store)
+        d = eng.get_dashboard_data()
+
+        self.assertEqual(d["today_orders"], 2)
+        self.assertEqual(d["filled"], 1)
+        self.assertEqual(d["rejected"], 1)
+        self.assertEqual(d["success_rate_pct"], 50.0)
+        # orders list contains only today's rows; history preserved separately
+        self.assertTrue(all(o["timestamp"].startswith(today) for o in d["orders"]))
+        self.assertEqual(len(d["recent_orders"]), 3)
+
+    def test_dashboard_empty_today(self):
+        """No orders today → all today metrics zero, not lifetime totals."""
+        store = FakeStore()
+        store.execution_orders.append({
+            "timestamp": "2000-08-04T13:47:42", "symbol": "OLD", "side": "BUY",
+            "quantity": 10, "filled_qty": 10, "status": "FILLED",
+            "avg_price": 450, "signal_price": 450, "data_json": "{}"})
+        eng = self._engine(store=store)
+        d = eng.get_dashboard_data()
+        self.assertEqual(d["today_orders"], 0)
+        self.assertEqual(d["success_rate_pct"], 0.0)
+        self.assertEqual(d["orders"], [])
 
 
 if __name__ == '__main__':

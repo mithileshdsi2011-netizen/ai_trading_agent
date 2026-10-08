@@ -98,6 +98,7 @@ class IntradayEngine:
 
         # Runtime state
         self._lock = threading.Lock()
+        self._cycle_running = False
         self._auth_state = "NOT CONFIGURED"
         self._auth_attempted = False
         self._auth_cooldown_until: Optional[datetime] = None
@@ -356,12 +357,23 @@ class IntradayEngine:
         self.state_store.save_positions([])
 
     def maybe_run_cycle(self):
-        """Run a cycle if the scan interval has elapsed (lazy scheduling)."""
-        if self._last_scan_time is None:
-            self.run_cycle()
+        """Kick off a background cycle if the scan interval has elapsed.
+        Never blocks the caller — a full scan can take minutes."""
+        due = (self._last_scan_time is None
+               or (datetime.now() - self._last_scan_time).total_seconds() >= self.scan_interval)
+        if not due or self._cycle_running:
             return
-        if (datetime.now() - self._last_scan_time).total_seconds() >= self.scan_interval:
-            self.run_cycle()
+
+        def _bg():
+            self._cycle_running = True
+            try:
+                self.run_cycle()
+            except Exception as e:
+                logger.error(f"[INTRADAY] Background cycle error: {e}")
+            finally:
+                self._cycle_running = False
+
+        threading.Thread(target=_bg, daemon=True, name="intraday-cycle").start()
 
     # ── kill switch ─────────────────────────────────────────────────
     def set_kill_switch(self, active: bool):
@@ -409,6 +421,30 @@ class IntradayEngine:
             'unrealized_pnl': pos.unrealized_pnl,
         }
 
+    def _engine_state(self) -> str:
+        """Human-readable engine state for the dashboard."""
+        if self.risk_manager.is_killed():
+            return "STOPPED (KILL SWITCH)"
+        if self.risk_manager.get_daily_state()['blocked']:
+            return "BLOCKED (RISK LIMIT)"
+        if not self.credentials_configured():
+            return "NOT CONFIGURED"
+        if self._auth_state not in ("CONNECTED",):
+            return self._auth_state
+        if self._cycle_running:
+            return "SCANNING"
+        if not self.validator.is_market_open():
+            return "MARKET CLOSED"
+        return "ACTIVE"
+
+    def _market_session(self) -> str:
+        """Current NSE session label."""
+        if not self.validator.is_market_open():
+            return "CLOSED"
+        if self.validator.is_square_off_time():
+            return "SQUARE-OFF WINDOW"
+        return "OPEN"
+
     def get_status(self) -> Dict[str, Any]:
         """Dashboard-facing engine status."""
         daily = self.risk_manager.get_daily_state()
@@ -419,7 +455,12 @@ class IntradayEngine:
             'market_data_status': self.market_data_status(),
             'market_data_available': self.market_data_status() == "LIVE",
             'mode': 'PAPER' if self.config.paper_trading else 'LIVE',
-            'market_regime': self._market_regime.value,
+            # Regime is only meaningful after a successful scan — never show
+            # SIDEWAYS when no fresh regime data exists.
+            'market_regime': self._market_regime.value if self._last_scan_time else 'UNKNOWN',
+            'market_session': self._market_session(),
+            'engine_state': self._engine_state(),
+            'cycle_running': self._cycle_running,
             'trading_blocked': daily['blocked'] or self.risk_manager.is_killed(),
             'kill_switch': self.risk_manager.is_killed(),
             'static_ip_status': self._static_ip_status(),
