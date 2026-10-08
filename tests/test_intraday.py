@@ -1241,6 +1241,45 @@ class TestDataFreshness:
         assert ok is False
         assert "stale" in reason.lower()
 
+    def _engine_with_quote_client(self, tmp_path, quotes_result):
+        from intraday.engine import IntradayEngine
+        from intraday.angel.market_data import AngelMarketData
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        client = MagicMock()
+        client.get_market_quotes.return_value = quotes_result
+        inst = MagicMock()
+        inst.get_instrument.return_value = MagicMock(symbol_token='1')
+        engine.market_data = AngelMarketData(client, inst)
+        return engine
+
+    def test_status_live_on_mid_scan_fetch(self, tmp_path):
+        """Dashboard status reflects a fresh quote even before cycle-end
+        stamps _last_data_time (the DISCONNECTED-during-scan symptom)."""
+        engine = self._engine_with_quote_client(tmp_path, {
+            'success': True,
+            'data': {'fetched': [{'symbolToken': '1', 'ltp': 100.0,
+                                  'tradingSymbol': 'RELIANCE-EQ', 'exchange': 'NSE'}]}
+        })
+        assert engine._last_data_time is None
+        engine.market_data.get_quotes(['RELIANCE'])
+        assert engine._last_data_time is None  # entry gate untouched
+        assert engine.market_data_status() == "LIVE"
+
+    def test_status_stale_when_fetch_older_than_30s(self, tmp_path):
+        engine = self._engine_with_quote_client(tmp_path, {'success': True, 'data': {'fetched': []}})
+        engine.market_data._last_update = datetime.now() - timedelta(seconds=60)
+        assert engine.market_data_status() == "STALE"
+
+    def test_status_disconnected_when_never_fetched(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        assert engine.market_data_status() == "DISCONNECTED"
+
+    def test_status_ignores_failed_fetch(self, tmp_path):
+        engine = self._engine_with_quote_client(tmp_path, {'success': False, 'error': 'down'})
+        engine.market_data.get_quotes(['RELIANCE'])
+        assert engine.market_data_status() == "DISCONNECTED"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

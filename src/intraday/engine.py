@@ -170,9 +170,10 @@ class IntradayEngine:
         """LIVE / STALE / DISCONNECTED."""
         if self.websocket.is_connected():
             return "STALE" if self.websocket.is_data_stale(self.config.max_data_age_seconds) else "LIVE"
-        if self._last_data_time is None:
+        last_fetch = self.market_data.last_update_time() or self._last_data_time
+        if last_fetch is None:
             return "DISCONNECTED"
-        if self.validator.is_data_fresh(self._last_data_time):
+        if self.validator.is_data_fresh(last_fetch):
             return "LIVE"
         return "STALE"
 
