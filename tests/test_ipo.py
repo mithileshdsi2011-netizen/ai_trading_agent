@@ -279,6 +279,49 @@ class TestRecommendation:
         assert result.recommendation in [Recommendation.HIGH_RISK, Recommendation.AVOID]
 
 
+class TestInsufficientData:
+    """LIMITED data quality must not produce a misleading verdict."""
+
+    def test_limited_data_gives_not_assessed(self):
+        """Missing fundamentals → NOT ASSESSED / INSUFFICIENT DATA, not LOW/HIGH RISK."""
+        ipo = IPO(
+            name="Sparse Co",
+            symbol="SPARSE",
+            status=IPOStatus.OPEN,
+            price_band_min=100,
+            price_band_max=100,
+        )
+        provider = MockIPODataProvider()
+        analyzer = IPOAnalyzer(provider)
+        result = analyzer.analyze_ipo(ipo)
+
+        assert result.data_quality == 'LIMITED'
+        assert result.risk_level == RiskLevel.NOT_ASSESSED
+        assert result.recommendation == Recommendation.INSUFFICIENT_DATA
+        assert 'Insufficient data' in result.risk_explanation
+
+    def test_partial_data_still_gets_verdict(self):
+        """PARTIAL data keeps the normal risk/recommendation path."""
+        ipo = IPO(
+            name="Partial Co",
+            symbol="PART",
+            status=IPOStatus.OPEN,
+            price_band_min=100,
+            price_band_max=120,
+            financials=IPOFinancials(
+                revenue=500, profit=60, pe_ratio=25, peer_pe=30),
+            subscription=IPOSubscription(qib=40, nii=20, retail=10),
+            promoter_holding=70,
+        )
+        provider = MockIPODataProvider()
+        analyzer = IPOAnalyzer(provider)
+        result = analyzer.analyze_ipo(ipo)
+
+        assert result.data_quality == 'PARTIAL'
+        assert result.risk_level != RiskLevel.NOT_ASSESSED
+        assert result.recommendation != Recommendation.INSUFFICIENT_DATA
+
+
 class TestProviderFailure:
     """Test provider failure handling."""
     
@@ -463,29 +506,29 @@ class TestNseIPOProvider:
         ])
         first = provider.get_open_ipos()
         second = provider.get_open_ipos()
-        assert first is second  # cached object returned
-        assert client_calls(provider) == 2  # bootstrap + one fetch
+        assert first == second  # cached object returned
+        assert client_calls(provider) == 4  # bootstrap + 3 endpoint fetches (one 'all' fetch)
 
     def test_upcoming_and_recent_endpoints(self):
         provider = self._provider(payloads=[
+            [],  # ipo-current-issue (fetched first inside _all_ipos)
             [{'companyName': 'Future Co', 'symbol': 'FUT',
               'issueStartDate': '01-01-2099', 'issueEndDate': '05-01-2099'}],
-            [],  # open-issues fetch made while deduping upcoming
             [{'companyName': 'Old Co', 'symbol': 'OLD',
               'issueStartDate': '01-01-2020', 'issueEndDate': '05-01-2020',
               'listingDate': '15-01-2020'}],
         ])
         upcoming = provider.get_upcoming_ipos()
         recent = provider.get_recent_ipos()
-        assert upcoming[0].status in (IPOStatus.UPCOMING, IPOStatus.OPEN)
+        assert upcoming[0].status == IPOStatus.UPCOMING
         assert recent[0].status == IPOStatus.LISTED
 
     def test_upcoming_excludes_already_open_symbols(self):
         """NSE's upcoming feed lists currently-open issues — dedupe by symbol."""
         provider = self._provider(payloads=[
+            [{'companyName': 'Dup Co', 'symbol': 'DUP'}],   # open feed (fetched first)
             [{'companyName': 'Dup Co', 'symbol': 'DUP'},
              {'companyName': 'New Co', 'symbol': 'NEW'}],   # upcoming feed
-            [{'companyName': 'Dup Co', 'symbol': 'DUP'}],   # open feed
         ])
         symbols = [i.symbol for i in provider.get_upcoming_ipos()]
         assert symbols == ['NEW']
@@ -505,6 +548,8 @@ class TestNseIPOProvider:
     def test_company_field_and_rs_price_parsed(self):
         """Past-issues schema: 'company' name + 'Rs.208 to Rs.220' priceRange."""
         provider = self._provider(payloads=[
+            [],  # current-issue feed
+            [],  # upcoming feed
             [{'company': 'Past Co', 'symbol': 'PAST', 'securityType': 'EQ',
               'ipoStartDate': '29-SEP-2026', 'ipoEndDate': '01-OCT-2026',
               'priceRange': 'Rs.208 to Rs.220', 'issuePrice': '220',
@@ -523,6 +568,32 @@ class TestNseIPOProvider:
         ])
         ipo = provider.get_open_ipos()[0]
         assert ipo.issue_size == 75.0  # 7.5M shares × ₹100 = ₹75 cr
+
+    def test_debt_issues_separated_from_equity(self):
+        """DEBT/NCD/ZCZP offerings excluded from equity lists, tracked separately."""
+        provider = self._provider(payloads=[
+            [{'companyName': 'Equity Co', 'symbol': 'EQCO', 'series': 'EQ',
+              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026'},
+             {'companyName': 'Bond Co', 'symbol': 'BOND', 'series': 'DEBT',
+              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026'}],
+            [], [],
+        ])
+        open_syms = [i.symbol for i in provider.get_open_ipos()]
+        assert open_syms == ['EQCO']
+        non_eq = provider.get_non_equity_ipos()
+        assert len(non_eq) == 1
+        assert non_eq[0].symbol == 'BOND'
+        assert non_eq[0].issue_type == 'DEBT'
+
+    def test_single_price_band_display(self):
+        """'Rs.10' (no range) displays as ₹10, not ₹10–₹10."""
+        provider = self._provider(payloads=[
+            [{'companyName': 'Solo Co', 'symbol': 'SOLO', 'issuePrice': 'Rs.10'}],
+            [], [],
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.price_band_min == 10.0
+        assert ipo.get_price_display() == '₹10'
 
     def test_fallback_contract_no_mixed_data(self):
         """Provider raises on transport failure; dashboard falls back to

@@ -3373,21 +3373,27 @@ tr:last-child td{border:none}
     </div>
     <div id="ipo-data-source" style="font-size:11px;color:#f59e0b;background:#f59e0b22;padding:6px 12px;border-radius:4px;font-weight:600">Demo IPO data</div>
   </div>
+  <div id="ipo-counts" style="font-size:12px;color:#9ca3af;margin-bottom:12px"></div>
 
   <!-- IPO Summary Table -->
   <div class="card mb-4">
-    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">IPO Summary</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">IPO Summary</div>
+      <div id="ipo-filter-bar" style="display:flex;gap:6px"></div>
+    </div>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="background:#1f2937">
           <th style="text-align:left;padding:10px 8px">IPO</th>
           <th style="text-align:left;padding:10px 8px">Price Band</th>
           <th style="text-align:center;padding:10px 8px">Score</th>
+          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
           <th style="text-align:center;padding:10px 8px">Risk</th>
           <th style="text-align:center;padding:10px 8px">Recommendation</th>
+          <th style="text-align:center;padding:10px 8px">Data Quality</th>
           <th style="text-align:center;padding:10px 8px">Status</th>
         </tr></thead>
-        <tbody id="ipo-summary-table"><tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
+        <tbody id="ipo-summary-table"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -3417,6 +3423,12 @@ tr:last-child td{border:none}
       <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">👁️ Post-Listing Watchlist</div>
       <div id="ipo-watchlist" style="font-size:13px;color:#4b5563">No IPOs in watchlist (READ-ONLY)</div>
     </div>
+  </div>
+
+  <!-- Non-Equity Offerings (DEBT/NCD/ZCZP) -->
+  <div class="card mb-4" id="ipo-nonequity-card" style="display:none">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🏦 Non-Equity Offerings (DEBT/NCD/ZCZP) — tracked separately, not scored</div>
+    <div id="ipo-nonequity-list" style="font-size:13px;color:#4b5563"></div>
   </div>
 
   <!-- IPO Detail View -->
@@ -6699,25 +6711,65 @@ async function loadIPOData(){
       sourceEl.title=d.is_demo_data&&d.live_error?('Live fetch failed: '+d.live_error):'';
     }
     
-    // Render summary table
+    // Counts header
+    const countsEl=document.getElementById('ipo-counts');
+    if(countsEl && d.all_ipos){
+      const c=s=>d.all_ipos.filter(i=>(i.status||'').toUpperCase()===s).length;
+      countsEl.textContent=`${c('OPEN')} Open • ${c('UPCOMING')} Upcoming • ${c('CLOSED')} Closed • ${c('LISTED')} Listed${d.non_equity_ipos&&d.non_equity_ipos.length?` • ${d.non_equity_ipos.length} Non-Equity`:''}`;
+    }
+
+    // Filter bar
+    const filterBar=document.getElementById('ipo-filter-bar');
+    if(filterBar){
+      const filters=['ALL','OPEN','UPCOMING','CLOSED','LISTED'];
+      filterBar.innerHTML=filters.map(f=>{
+        const active=(window._ipoFilter||'ALL')===f;
+        return `<button onclick="setIPOFilter('${f}')" style="background:${active?'#3b82f6':'#1f2937'};color:${active?'#fff':'#9ca3af'};border:none;padding:4px 12px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">${f}</button>`;
+      }).join('');
+    }
+
+    // Render summary table (filtered)
     const summaryTable=document.getElementById('ipo-summary-table');
-    if(summaryTable && d.all_ipos && d.all_ipos.length){
-      summaryTable.innerHTML=d.all_ipos.map(ipo=>{
-        const scoreColor=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
-        const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':'#ef4444';
-        const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':'#ef4444';
-        const statusColor=ipo.status==='OPEN'?'#22c55e':ipo.status==='UPCOMING'?'#3b82f6':ipo.status==='LISTED'?'#84cc16':'#6b7280';
+    const flt=window._ipoFilter||'ALL';
+    const rows=(d.all_ipos||[]).filter(i=>flt==='ALL'||(i.status||'').toUpperCase()===flt);
+    if(summaryTable && rows.length){
+      summaryTable.innerHTML=rows.map(ipo=>{
+        const prov=ipo.data_quality==='LIMITED';
+        const st=(ipo.status||'').toUpperCase();
+        const scoreColor=prov?'#9ca3af':ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
+        const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':ipo.risk_level==='NOT ASSESSED'?'#9ca3af':'#ef4444';
+        const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':ipo.recommendation==='INSUFFICIENT DATA'?'#9ca3af':'#ef4444';
+        const statusColor=st==='OPEN'?'#22c55e':st==='UPCOMING'?'#3b82f6':st==='LISTED'?'#84cc16':'#6b7280';
+        const dqColor=ipo.data_quality==='FULL'?'#22c55e':ipo.data_quality==='PARTIAL'?'#f59e0b':'#9ca3af';
+        const subTxt=ipo.subscription&&ipo.subscription.overall!=null?ipo.subscription.overall+'×':'—';
         return `<tr style="cursor:pointer;border-bottom:1px solid #1f293744" onclick="showIPODetails('${ipo.symbol}')">
           <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${ipo.name}</td>
           <td style="padding:10px 8px;color:#9ca3af">${ipo.price_band||'N/A'}</td>
-          <td style="padding:10px 8px;text-align:center"><span style="background:${scoreColor}33;color:${scoreColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score.toFixed(1)}</span></td>
+          <td style="padding:10px 8px;text-align:center"><span style="background:${scoreColor}33;color:${scoreColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score_display||ipo.score.toFixed(1)}</span></td>
+          <td style="padding:10px 8px;text-align:center;color:#9ca3af;font-size:12px">${subTxt}</td>
           <td style="padding:10px 8px;text-align:center"><span style="color:${riskColor};font-weight:600;font-size:12px">${ipo.risk_level}</span></td>
           <td style="padding:10px 8px;text-align:center"><span style="background:${recColor}33;color:${recColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px">${ipo.recommendation}</span></td>
-          <td style="padding:10px 8px;text-align:center"><span style="color:${statusColor};font-weight:600;font-size:12px">${ipo.status}</span></td>
+          <td style="padding:10px 8px;text-align:center;color:${dqColor};font-size:11px;font-weight:600">${ipo.data_quality||'—'}</td>
+          <td style="padding:10px 8px;text-align:center"><span style="color:${statusColor};font-weight:600;font-size:12px">${st}</span></td>
         </tr>`;
       }).join('');
     }else if(summaryTable){
-      summaryTable.innerHTML='<tr><td colspan="6" style="text-align:center;color:#4b5563;padding:20px">No IPO data available</td></tr>';
+      summaryTable.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No IPO data available</td></tr>';
+    }
+
+    // Render non-equity offerings (DEBT/NCD/ZCZP) — separate, not scored
+    const neCard=document.getElementById('ipo-nonequity-card');
+    const neList=document.getElementById('ipo-nonequity-list');
+    if(neCard && neList){
+      if(d.non_equity_ipos && d.non_equity_ipos.length){
+        neCard.style.display='block';
+        neList.innerHTML=d.non_equity_ipos.map(i=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744">
+          <div style="font-weight:600;color:#f9fafb">${i.name} <span style="background:#6b728033;color:#9ca3af;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">${i.issue_type||'DEBT'}</span></div>
+          <div style="font-size:11px;color:#9ca3af;margin-top:2px">${i.price_band||'N/A'} • ${i.open_date||'TBD'}–${i.close_date||'TBD'}${i.listing_date?` • Listed: ${i.listing_date}`:''}</div>
+        </div>`).join('');
+      }else{
+        neCard.style.display='none';
+      }
     }
     
     // Render open IPOs
@@ -6759,7 +6811,7 @@ async function loadIPOData(){
   }catch(e){
     console.error('IPO data load error:',e);
     const summaryTable=document.getElementById('ipo-summary-table');
-    if(summaryTable)summaryTable.innerHTML='<tr><td colspan="6" style="text-align:center;color:#ef4444;padding:20px">IPO data temporarily unavailable</td></tr>';
+    if(summaryTable)summaryTable.innerHTML='<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:20px">IPO data temporarily unavailable</td></tr>';
   }
 }
 
@@ -6920,6 +6972,8 @@ async function toggleIntradayKillSwitch(){
   }
 }
 
+function setIPOFilter(f){window._ipoFilter=f;loadIPOData();}
+
 // ─── IPO Detail View ───────────────────────────────────────────────────────────
 function showIPODetails(symbol){
   const ipo=window._ipoDetails[symbol];
@@ -6931,9 +6985,9 @@ function showIPODetails(symbol){
   if(!detailCard || !detailContent)return;
   
   const scoreColor=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
-  const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':'#ef4444';
-  const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':'#ef4444';
-  
+  const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':ipo.risk_level==='NOT ASSESSED'?'#9ca3af':'#ef4444';
+  const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':ipo.recommendation==='INSUFFICIENT DATA'?'#9ca3af':'#ef4444';
+
   detailContent.innerHTML=`
     <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
       <div class="card-sm">
@@ -6972,7 +7026,7 @@ function showIPODetails(symbol){
     <div class="grid grid-cols-3 gap-4 mb-4">
       <div class="card-sm">
         <div class="stat-label">IPO Score</div>
-        <div class="stat-value-sm" style="color:${scoreColor}">${ipo.score.toFixed(1)}/100</div>
+        <div class="stat-value-sm" style="color:${scoreColor}">${ipo.score_display||ipo.score.toFixed(1)}${ipo.data_quality!=='LIMITED'?'/100':''}</div>
       </div>
       <div class="card-sm">
         <div class="stat-label">Risk Level</div>
@@ -9203,11 +9257,14 @@ def api_ipo_data():
         # Convert to serializable format
         def serialize_analysis(result):
             ipo = result.ipo
+            sub = ipo.subscription
+            provisional = result.data_quality == 'LIMITED'
             return {
                 'name': ipo.name,
                 'symbol': ipo.symbol,
                 'sector': ipo.sector,
                 'status': ipo.status.value if hasattr(ipo.status, 'value') else str(ipo.status),
+                'issue_type': ipo.issue_type,
                 'price_band': ipo.get_price_display(),
                 'issue_size': ipo.issue_size,
                 'fresh_issue': ipo.fresh_issue,
@@ -9216,8 +9273,13 @@ def api_ipo_data():
                 'close_date': ipo.close_date,
                 'listing_date': ipo.listing_date,
                 'score': result.score,
+                'score_display': f"{result.score:.1f} (provisional)" if provisional else f"{result.score:.1f}",
                 'risk_level': result.risk_level.value if hasattr(result.risk_level, 'value') else str(result.risk_level),
                 'recommendation': result.recommendation.value if hasattr(result.recommendation, 'value') else str(result.recommendation),
+                'subscription': {
+                    'qib': sub.qib, 'nii': sub.nii,
+                    'retail': sub.retail, 'overall': sub.overall
+                } if sub else None,
                 'financial_score': result.financial_score,
                 'valuation_score': result.valuation_score,
                 'structure_score': result.structure_score,
@@ -9232,11 +9294,29 @@ def api_ipo_data():
                 'business_description': ipo.business_description
             }
         
+        # Non-equity offerings (DEBT/NCD/ZCZP) — separate list, not scored
+        non_equity = []
+        get_non_eq = getattr(provider, 'get_non_equity_ipos', None)
+        if get_non_eq:
+            try:
+                non_equity = [{
+                    'name': i.name,
+                    'symbol': i.symbol,
+                    'issue_type': i.issue_type,
+                    'price_band': i.get_price_display(),
+                    'open_date': i.open_date,
+                    'close_date': i.close_date,
+                    'listing_date': i.listing_date,
+                    'status': i.status.value if hasattr(i.status, 'value') else str(i.status)
+                } for i in get_non_eq()]
+            except Exception as ne_err:
+                logger.warning(f"Non-equity IPO list unavailable: {ne_err}")
+
         # Build response
         all_ipos = open_ipos + upcoming_ipos + recent_ipos
         serialized_all = [serialize_analysis(ipo) for ipo in all_ipos]
         ipo_details = {ipo['symbol']: ipo for ipo in serialized_all if ipo.get('symbol')}
-        
+
         return jsonify({
             'is_demo_data': provider.is_demo_data(),
             'data_source': provider.get_data_source_name(),
@@ -9245,6 +9325,7 @@ def api_ipo_data():
             'open_ipos': [serialize_analysis(ipo) for ipo in open_ipos],
             'upcoming_ipos': [serialize_analysis(ipo) for ipo in upcoming_ipos],
             'recent_ipos': [serialize_analysis(ipo) for ipo in recent_ipos],
+            'non_equity_ipos': non_equity,
             'all_ipos': serialized_all,
             'ipo_details': ipo_details
         })

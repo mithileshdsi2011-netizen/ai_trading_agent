@@ -45,18 +45,27 @@ class IPOAnalyzer:
         breakdown = score_result['breakdown']
         data_quality = score_result['data_quality']
         
-        # Assess risk level
-        risk_level = self._assess_risk_level(ipo, total_score, breakdown)
-        
-        # Generate recommendation
-        recommendation = self._generate_recommendation(total_score, risk_level, data_quality)
-        
+        # Assess risk level and recommendation.
+        # LIMITED data means risk cannot be evaluated reliably — report
+        # NOT ASSESSED / INSUFFICIENT DATA rather than a misleading verdict.
+        if data_quality == 'LIMITED':
+            risk_level = RiskLevel.NOT_ASSESSED
+            recommendation = Recommendation.INSUFFICIENT_DATA
+        else:
+            risk_level = self._assess_risk_level(ipo, total_score, breakdown)
+            recommendation = self._generate_recommendation(
+                total_score, risk_level, data_quality)
+
         # Generate explainable factors
         positive_factors = self._generate_positive_factors(ipo, breakdown)
         risk_factors = self._generate_risk_factors(ipo, breakdown)
-        
+
         # Generate risk explanation
-        risk_explanation = self._generate_risk_explanation(ipo, risk_factors)
+        if risk_level == RiskLevel.NOT_ASSESSED:
+            risk_explanation = ("Insufficient data to assess risk — "
+                                "fundamental and subscription inputs unavailable.")
+        else:
+            risk_explanation = self._generate_risk_explanation(ipo, risk_factors)
         
         return IPOAnalysisResult(
             ipo=ipo,

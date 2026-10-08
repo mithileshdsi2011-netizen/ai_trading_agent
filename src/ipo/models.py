@@ -23,6 +23,7 @@ class RiskLevel(Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+    NOT_ASSESSED = "NOT ASSESSED"  # Insufficient data — risk cannot be evaluated
 
 
 class Recommendation(Enum):
@@ -32,6 +33,7 @@ class Recommendation(Enum):
     WATCH = "WATCH"
     HIGH_RISK = "HIGH RISK"
     AVOID = "AVOID"
+    INSUFFICIENT_DATA = "INSUFFICIENT DATA"  # Data too limited for a verdict
 
 
 @dataclass
@@ -65,6 +67,7 @@ class IPO:
     symbol: Optional[str] = None
     sector: Optional[str] = None
     status: IPOStatus = IPOStatus.UPCOMING
+    issue_type: Optional[str] = None  # EQUITY, SME, DEBT — from NSE series/securityType
     
     # Issue details
     price_band_min: Optional[float] = None
@@ -93,9 +96,17 @@ class IPO:
     is_demo_data: bool = False  # Flag to indicate demo data
     data_source: Optional[str] = None  # Source of data
     
+    @property
+    def is_equity(self) -> bool:
+        """True for equity/SME IPOs; False for DEBT/NCD/ZCZP offerings.
+        Unknown issue types are treated as equity (do not hide data)."""
+        return (self.issue_type or 'EQUITY').upper() != 'DEBT'
+
     def get_price_display(self) -> str:
         """Get formatted price band display."""
         if self.price_band_min and self.price_band_max:
+            if self.price_band_min == self.price_band_max:
+                return f"₹{self.price_band_min:.0f}"
             return f"₹{self.price_band_min:.0f}–₹{self.price_band_max:.0f}"
         if self.price_band_min:
             return f"₹{self.price_band_min:.0f}"

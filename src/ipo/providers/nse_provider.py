@@ -173,6 +173,18 @@ class NseIPODataProvider(IPODataProvider):
             lo = hi = single
         return lo, hi
 
+    @staticmethod
+    def _issue_type(row) -> Optional[str]:
+        """Normalize NSE series/securityType into EQUITY | SME | DEBT."""
+        raw = str(row.get('series') or row.get('securityType') or '').upper()
+        if raw in ('EQ', 'EQUITY'):
+            return 'EQUITY'
+        if raw == 'SME':
+            return 'SME'
+        if 'DEBT' in raw or 'NCD' in raw or 'ZCZP' in raw:
+            return 'DEBT'
+        return raw or None
+
     @classmethod
     def _to_ipo(cls, row: Dict[str, Any], status: IPOStatus) -> IPO:
         lo, hi = cls._price_band(row)
@@ -183,6 +195,7 @@ class NseIPODataProvider(IPODataProvider):
             symbol=cls._pick(row, 'symbol', 'symbolName'),
             sector=cls._pick(row, 'industry', 'sector', 'industryNew'),
             status=status,
+            issue_type=cls._issue_type(row),
             price_band_min=lo,
             price_band_max=hi,
             issue_size=cls._issue_size_cr(row, lo, hi),
@@ -265,40 +278,53 @@ class NseIPODataProvider(IPODataProvider):
                 picked[sym] = r
         return [picked[s] for s in order]
 
+    def _all_ipos(self) -> List[IPO]:
+        """All issues (equity + non-equity) across open/upcoming/recent feeds."""
+        open_rows, up_rows, re_rows = [], [], []
+
+        data = self._get_json("/api/ipo-current-issue")
+        open_rows = self._dedup_rows(data if isinstance(data, list) else data.get('data', []))
+        open_syms = {str(r.get('symbol') or r.get('symbolName'))
+                     for r in open_rows}
+
+        data = self._get_json("/api/all-upcoming-issues?category=ipo")
+        up_rows = [r for r in self._dedup_rows(
+            data if isinstance(data, list)
+            else (data.get('data') or data.get('upcomingIpos') or []))
+            if str(r.get('symbol') or r.get('symbolName')) not in open_syms]
+
+        to_d = datetime.now()
+        from_d = to_d - timedelta(days=90)
+        data = self._get_json(
+            "/api/public-past-issues?from_date={}&to_date={}"
+            .format(from_d.strftime('%d-%m-%Y'), to_d.strftime('%d-%m-%Y')))
+        re_rows = self._dedup_rows(data if isinstance(data, list)
+                                   else (data.get('data') or []))
+
+        return ([self._to_ipo(r, self._status_for(r, IPOStatus.OPEN)) for r in open_rows]
+                + [self._to_ipo(r, self._status_for(r, IPOStatus.UPCOMING)) for r in up_rows]
+                + [self._to_ipo(r, self._status_for(r, IPOStatus.CLOSED)) for r in re_rows])
+
     def get_open_ipos(self) -> List[IPO]:
-        """Currently open issues."""
-        def fetch():
-            data = self._get_json("/api/ipo-current-issue")
-            rows = data if isinstance(data, list) else data.get('data', [])
-            return [self._to_ipo(r, self._status_for(r, IPOStatus.OPEN))
-                    for r in self._dedup_rows(rows)]
-        return self._cached('open', fetch)
+        """Currently open equity/SME issues (DEBT/NCD/ZCZP excluded)."""
+        return [i for i in self._cached('all', self._all_ipos)
+                if i.is_equity and i.status == IPOStatus.OPEN]
 
     def get_upcoming_ipos(self) -> List[IPO]:
-        """Announced upcoming issues — excludes symbols already open
+        """Announced upcoming equity/SME issues — excludes symbols already open
         (NSE's upcoming feed lists currently-open issues too)."""
-        def fetch():
-            data = self._get_json("/api/all-upcoming-issues?category=ipo")
-            rows = data if isinstance(data, list) else (
-                data.get('data') or data.get('upcomingIpos') or [])
-            open_syms = {i.symbol for i in self.get_open_ipos()}
-            return [self._to_ipo(r, self._status_for(r, IPOStatus.UPCOMING))
-                    for r in self._dedup_rows(rows)
-                    if (r.get('symbol') or r.get('symbolName')) not in open_syms]
-        return self._cached('upcoming', fetch)
+        return [i for i in self._cached('all', self._all_ipos)
+                if i.is_equity and i.status == IPOStatus.UPCOMING]
 
     def get_recent_ipos(self) -> List[IPO]:
-        """Recently closed/listed issues (last 90 days)."""
-        def fetch():
-            to_d = datetime.now()
-            from_d = to_d - timedelta(days=90)
-            path = ("/api/public-past-issues?from_date={}&to_date={}"
-                    .format(from_d.strftime('%d-%m-%Y'), to_d.strftime('%d-%m-%Y')))
-            data = self._get_json(path)
-            rows = data if isinstance(data, list) else (data.get('data') or [])
-            return [self._to_ipo(r, self._status_for(r, IPOStatus.CLOSED))
-                    for r in self._dedup_rows(rows)]
-        return self._cached('recent', fetch)
+        """Recently closed/listed equity/SME issues (last 90 days)."""
+        return [i for i in self._cached('all', self._all_ipos)
+                if i.is_equity and i.status in (IPOStatus.CLOSED, IPOStatus.LISTED)]
+
+    def get_non_equity_ipos(self) -> List[IPO]:
+        """Non-equity offerings (DEBT/NCD/ZCZP) — tracked separately,
+        excluded from equity IPO scoring."""
+        return [i for i in self._cached('all', self._all_ipos) if not i.is_equity]
 
     def get_ipo_details(self, ipo_id: str) -> Optional[IPO]:
         """Per-issue detail; falls back to cached lists on miss."""
