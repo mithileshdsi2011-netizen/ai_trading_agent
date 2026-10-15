@@ -207,9 +207,25 @@ class AngelAuth:
             logger.error(f"[ANGEL AUTH] Logout error: {e}")
             return False
     
+    def mark_session_invalid(self):
+        """Invalidate the session after an auth-related API failure.
+
+        The next engine cycle will then run a controlled re-login.
+        """
+        self.authenticated = False
+        self.jwt_token = None
+
     def is_authenticated(self) -> bool:
-        """Check if currently authenticated."""
-        return self.authenticated and self.jwt_token is not None
+        """Check if currently authenticated.
+
+        Beyond the in-memory flag, a session whose auth_time is from a
+        previous day is dead — SmartAPI JWTs expire each morning (~5 AM).
+        """
+        if not (self.authenticated and self.jwt_token):
+            return False
+        if self.auth_time and self.auth_time.date() < datetime.now().date():
+            return False
+        return True
     
     def get_auth_status(self) -> Dict[str, Any]:
         """Get current authentication status."""

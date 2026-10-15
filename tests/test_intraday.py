@@ -1333,5 +1333,114 @@ class TestDataFreshness:
         assert 'stale' in signal.rejection_reason.lower()
 
 
+class TestAngelSessionExpiry:
+    """Session-expiry detection from API responses + controlled re-auth."""
+
+    def _client_with_auth(self):
+        from intraday.angel.client import AngelClient
+        auth = AngelAuth('k', 'c', 'p', 's')
+        auth.authenticated = True
+        auth.jwt_token = 'jwt'
+        auth.refresh_token = 'rt'
+        auth.auth_time = datetime.now()
+        client = AngelClient(auth)
+        api = MagicMock()
+        auth._smartapi = api
+        return client, auth, api
+
+    def test_token_expired_response_invalidates_session(self):
+        client, auth, api = self._client_with_auth()
+        api.getProfile.return_value = {
+            'status': False, 'errorcode': 'AG8002', 'message': 'Token Expired'}
+        result = client.get_profile()
+        assert result['success'] is False
+        assert auth.is_authenticated() is False
+        # A dead session must not be retried MAX_RETRIES times
+        assert api.getProfile.call_count == 1
+
+    def test_invalid_token_exception_invalidates_session(self):
+        client, auth, api = self._client_with_auth()
+        api.getProfile.side_effect = Exception('InvalidTokenError: token expired')
+        result = client.get_profile()
+        assert result['success'] is False
+        assert auth.is_authenticated() is False
+        assert api.getProfile.call_count == 1
+
+    def test_generic_error_does_not_invalidate(self, monkeypatch):
+        monkeypatch.setattr('intraday.angel.client.time.sleep', lambda *_: None)
+        client, auth, api = self._client_with_auth()
+        api.getProfile.side_effect = Exception('connection reset')
+        result = client.get_profile()
+        assert result['success'] is False
+        assert auth.is_authenticated() is True
+        assert api.getProfile.call_count == client.MAX_RETRIES
+
+    def test_rate_limit_still_retries(self, monkeypatch):
+        monkeypatch.setattr('intraday.angel.client.time.sleep', lambda *_: None)
+        client, auth, api = self._client_with_auth()
+        api.getProfile.side_effect = [
+            {'status': False, 'errorcode': 'AB1004',
+             'message': 'Access denied because of exceeding access rate'},
+            {'status': True, 'data': {'name': 'U'}}]
+        result = client.get_profile()
+        assert result['success'] is True
+        assert api.getProfile.call_count == 2
+        assert auth.is_authenticated() is True
+
+    def test_stale_day_token_not_authenticated(self):
+        _, auth, _ = self._client_with_auth()
+        auth.auth_time = datetime.now() - timedelta(days=1)
+        assert auth.is_authenticated() is False
+
+    def _credentialed_engine(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        config = IntradayConfig(
+            angel_api_key="k", angel_client_code="c",
+            angel_password_or_mpin="p", angel_totp_secret="s")
+        return IntradayEngine(config=config, state_dir=str(tmp_path))
+
+    def test_relogin_after_session_invalidated(self, tmp_path, monkeypatch):
+        """Invalidated session triggers controlled re-auth on next cycle."""
+        engine = self._credentialed_engine(tmp_path)
+        engine.auth.mark_session_invalid()
+        calls = []
+        def fake_auth():
+            calls.append(1)
+            return {'success': True, 'authenticated': True}
+        monkeypatch.setattr(engine.auth, 'authenticate', fake_auth)
+        assert engine.authenticate() is True
+        assert len(calls) == 1
+        assert engine.get_status()['auth_status'] == "CONNECTED"
+
+    def test_failed_relogin_is_bounded_by_cooldown(self, tmp_path, monkeypatch):
+        """Repeated auth failures must not spin into a login loop."""
+        engine = self._credentialed_engine(tmp_path)
+        engine.auth.mark_session_invalid()
+        calls = []
+        def fake_auth():
+            calls.append(1)
+            return {'success': False, 'error': 'bad credentials'}
+        monkeypatch.setattr(engine.auth, 'authenticate', fake_auth)
+        assert engine.authenticate() is False
+        assert engine.get_status()['auth_status'] == "ANGEL AUTHENTICATION FAILED"
+        # Subsequent attempts within the 5-minute cooldown do not re-login
+        assert engine.authenticate() is False
+        assert engine.authenticate() is False
+        assert len(calls) == 1
+
+    def test_stale_day_session_relogins(self, tmp_path, monkeypatch):
+        """Yesterday's session triggers re-login without an API failure."""
+        engine = self._credentialed_engine(tmp_path)
+        engine.auth.authenticated = True
+        engine.auth.jwt_token = 'jwt'
+        engine.auth.auth_time = datetime.now() - timedelta(days=1)
+        calls = []
+        monkeypatch.setattr(
+            engine.auth, 'authenticate',
+            lambda: calls.append(1) or {'success': True, 'authenticated': True})
+        assert engine.authenticate() is True
+        assert len(calls) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

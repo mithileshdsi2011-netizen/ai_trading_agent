@@ -35,6 +35,19 @@ class AngelClient:
     MAX_RETRIES = 3
     RETRY_BASE_SECONDS = 2.0
 
+    # SmartAPI session/auth error codes (per official errorcode list).
+    # Retrying these is pointless — the session is dead. Invalidate it so
+    # the next engine cycle performs a controlled re-authentication.
+    AUTH_ERROR_CODES = {
+        'AG8001',  # Invalid Token
+        'AG8002',  # Token Expired
+        'AG8003',  # Token missing
+        'AB8050',  # Invalid Refresh Token
+        'AB8051',  # Refresh Token Expired
+        'AB1010',  # AMX Session Expired
+        'AB1011',  # Client not login
+    }
+
     def __init__(self, auth: AngelAuth):
         """
         Initialize Angel client.
@@ -73,13 +86,25 @@ class AngelClient:
                 # SmartAPI returns {'status': False, 'errorcode': ...} on errors
                 if isinstance(result, dict) and result.get('status') is False:
                     code = str(result.get('errorcode', ''))
-                    if code in ('AG8001', 'AB1010') or 'rate' in str(result.get('message', '')).lower():
+                    msg = str(result.get('message', '')).lower()
+                    if code in self.AUTH_ERROR_CODES:
+                        logger.error(f"[ANGEL CLIENT] {group} rejected: session invalid ({code}) — re-auth on next cycle")
+                        self.auth.mark_session_invalid()
+                        return result
+                    if 'rate' in msg:
                         delay = self.RETRY_BASE_SECONDS * (2 ** (attempt - 1))
                         logger.warning(f"[ANGEL CLIENT] Rate limited ({group}), retry {attempt}/{self.MAX_RETRIES} in {delay}s")
                         time.sleep(delay)
                         continue
                 return result
             except Exception as e:
+                ename = type(e).__name__.lower()
+                emsg = str(e).lower()
+                if 'token' in ename or 'invalid token' in emsg \
+                        or 'token expired' in emsg or 'session expired' in emsg:
+                    logger.error(f"[ANGEL CLIENT] {group} failed: session invalid ({e}) — re-auth on next cycle")
+                    self.auth.mark_session_invalid()
+                    return {'status': False, 'message': f'{group} call failed: session expired'}
                 delay = self.RETRY_BASE_SECONDS * (2 ** (attempt - 1))
                 logger.error(f"[ANGEL CLIENT] {group} call error (attempt {attempt}): {e}")
                 if attempt < self.MAX_RETRIES:
