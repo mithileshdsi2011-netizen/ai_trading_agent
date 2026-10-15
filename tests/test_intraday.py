@@ -1280,6 +1280,58 @@ class TestDataFreshness:
         engine.market_data.get_quotes(['RELIANCE'])
         assert engine.market_data_status() == "DISCONNECTED"
 
+    # ── Per-symbol freshness for entry validation ──────────────────────
+
+    def _engine_with_symbol_tokens(self, tmp_path, fetched_tokens):
+        """Engine whose AngelMarketData maps RELIANCE->1, INFY->2 and
+        returns `fetched_tokens` in the batch response."""
+        from intraday.engine import IntradayEngine
+        from intraday.angel.market_data import AngelMarketData
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        client = MagicMock()
+        client.get_market_quotes.return_value = {
+            'success': True,
+            'data': {'fetched': [
+                {'symbolToken': t, 'ltp': 100.0, 'tradingSymbol': 'X-EQ',
+                 'exchange': 'NSE'} for t in fetched_tokens]}
+        }
+        inst = MagicMock()
+        inst.get_instrument.side_effect = lambda s: MagicMock(
+            symbol_token={'RELIANCE': '1', 'INFY': '2'}.get(s))
+        engine.market_data = AngelMarketData(client, inst)
+        return engine
+
+    def test_symbol_stamp_only_for_returned_symbols(self, tmp_path):
+        """A batch fetch stamps only symbols actually returned."""
+        engine = self._engine_with_symbol_tokens(tmp_path, ['1'])
+        engine.market_data.get_quotes(['RELIANCE', 'INFY'])
+        assert engine.market_data.symbol_last_update('RELIANCE') is not None
+        assert engine.market_data.symbol_last_update('INFY') is None
+
+    def test_entry_gate_accepts_fresh_symbol_stamp(self, tmp_path, monkeypatch):
+        """Signal whose symbol was fetched mid-scan passes freshness even
+        when the previous cycle-end stamp is stale — the reported bug."""
+        engine = self._engine_with_symbol_tokens(tmp_path, ['1'])
+        mid_session = IST.localize(datetime(2026, 10, 5, 11, 0))
+        monkeypatch.setattr('intraday.validators.ist_now', lambda: mid_session)
+        engine._last_data_time = datetime.now() - timedelta(minutes=5)
+        engine.market_data.get_quotes(['RELIANCE'])  # fresh stamp for RELIANCE
+        signal = make_signal()
+        engine._try_enter(signal)
+        assert signal.rejection_reason is None or \
+            'stale' not in signal.rejection_reason.lower()
+
+    def test_entry_gate_rejects_unfetched_symbol(self, tmp_path, monkeypatch):
+        """Signal whose symbol was never fetched stays rejected."""
+        engine = self._engine_with_symbol_tokens(tmp_path, ['1'])
+        mid_session = IST.localize(datetime(2026, 10, 5, 11, 0))
+        monkeypatch.setattr('intraday.validators.ist_now', lambda: mid_session)
+        engine._last_data_time = datetime.now() - timedelta(minutes=5)
+        engine.market_data.get_quotes(['RELIANCE'])  # INFY not returned
+        signal = make_signal(symbol='INFY')
+        engine._try_enter(signal)
+        assert 'stale' in signal.rejection_reason.lower()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -29,6 +29,7 @@ class AngelMarketData:
         self._cache_expiry = {}
         self._cache_ttl_seconds = 30
         self._last_update: Optional[datetime] = None
+        self._symbol_updates: Dict[str, datetime] = {}
 
     @staticmethod
     def _map_quote(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,6 +78,7 @@ class AngelMarketData:
                     datetime.now() + timedelta(seconds=self._cache_ttl_seconds)
                 )
                 self._last_update = datetime.now()
+                self._symbol_updates[symbol] = self._last_update
                 return quote
             return None
 
@@ -117,7 +119,10 @@ class AngelMarketData:
                     quotes[base] = self._map_quote(item)
 
             if quotes:
-                self._last_update = datetime.now()
+                now = datetime.now()
+                self._last_update = now
+                for base in quotes:
+                    self._symbol_updates[base] = now
             return quotes
 
         except Exception as e:
@@ -166,6 +171,12 @@ class AngelMarketData:
     def last_update_time(self) -> Optional[datetime]:
         """Time of the last successful market-data fetch."""
         return self._last_update
+
+    def symbol_last_update(self, symbol: str) -> Optional[datetime]:
+        """Time of the last successful fetch that returned this symbol's
+        quote — the per-symbol freshness stamp (a batch fetch does not
+        imply every requested symbol was actually returned)."""
+        return self._symbol_updates.get(symbol)
 
     def _is_cache_valid(self, key: str) -> bool:
         """Check if cache entry is still valid."""

@@ -282,8 +282,19 @@ class IntradayEngine:
         """Run hard validation + risk gates, then paper-execute."""
         key = signal_idempotency_key(signal)
 
+        # Freshness gate: use this symbol's own successful-fetch stamp —
+        # _last_data_time is only written at cycle end and a batch stamp
+        # does not prove this symbol's quote was returned. Fall back to
+        # the cycle stamp when the per-symbol stamp is unavailable.
+        data_time = self._last_data_time
+        try:
+            sym_ts = self.market_data.symbol_last_update(signal.symbol)
+            if isinstance(sym_ts, datetime):
+                data_time = sym_ts
+        except Exception:
+            pass
         ok, reason = self.validator.validate_entry_conditions(
-            signal, self._last_data_time
+            signal, data_time
         )
         if not ok:
             signal.validation_passed = False

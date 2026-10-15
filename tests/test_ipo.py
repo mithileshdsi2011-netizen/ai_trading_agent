@@ -464,11 +464,16 @@ class TestNseIPOProvider:
         return NseIPODataProvider(session=session, cache_ttl=60)
 
     def test_maps_open_ipo_fields(self):
+        from datetime import date, timedelta
+        start = date.today() - timedelta(days=3)
+        end = date.today() + timedelta(days=3)
+        listing = date.today() + timedelta(days=7)
+        fmt = '%d-%m-%Y'
         provider = self._provider(payloads=[
             [{'companyName': 'Acme Industries Ltd', 'symbol': 'ACME',
-              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026',
+              'issueStartDate': start.strftime(fmt), 'issueEndDate': end.strftime(fmt),
               'priceBand': '₹95 to ₹100', 'issueSizeCr': '250.5',
-              'listingDate': '15-10-2026'}],
+              'listingDate': listing.strftime(fmt)}],
         ])
         ipos = provider.get_open_ipos()
         assert len(ipos) == 1
@@ -478,9 +483,9 @@ class TestNseIPOProvider:
         assert ipo.price_band_min == 95.0
         assert ipo.price_band_max == 100.0
         assert ipo.issue_size == 250.5
-        assert ipo.open_date == '2026-10-05'
-        assert ipo.close_date == '2026-10-08'
-        assert ipo.listing_date == '2026-10-15'
+        assert ipo.open_date == start.isoformat()
+        assert ipo.close_date == end.isoformat()
+        assert ipo.listing_date == listing.isoformat()
         assert ipo.is_demo_data is False
         assert provider.is_demo_data() is False
         assert 'NSE' in provider.get_data_source_name()
@@ -571,11 +576,14 @@ class TestNseIPOProvider:
 
     def test_debt_issues_separated_from_equity(self):
         """DEBT/NCD/ZCZP offerings excluded from equity lists, tracked separately."""
+        from datetime import date, timedelta
+        start = (date.today() - timedelta(days=3)).strftime('%d-%m-%Y')
+        end = (date.today() + timedelta(days=3)).strftime('%d-%m-%Y')
         provider = self._provider(payloads=[
             [{'companyName': 'Equity Co', 'symbol': 'EQCO', 'series': 'EQ',
-              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026'},
+              'issueStartDate': start, 'issueEndDate': end},
              {'companyName': 'Bond Co', 'symbol': 'BOND', 'series': 'DEBT',
-              'issueStartDate': '05-10-2026', 'issueEndDate': '08-10-2026'}],
+              'issueStartDate': start, 'issueEndDate': end}],
             [], [],
         ])
         open_syms = [i.symbol for i in provider.get_open_ipos()]
