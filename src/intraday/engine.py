@@ -338,13 +338,20 @@ class IntradayEngine:
         symbols = [p.symbol for p in positions]
         quotes = self.market_data.get_quotes(symbols)
         prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
-        if prices:
-            self.paper_executor.update_positions(prices)
-            self._record_data_time()
-            for pos in positions:
-                self.risk_manager.update_position(pos)
+        if not prices:
+            logger.warning(
+                f"[INTRADAY] No fresh quotes for {len(positions)} open position(s) "
+                f"— exits deferred, positions preserved")
+            return 0
 
-        exited = self.position_manager.check_all_exits()
+        self.paper_executor.update_positions(prices)
+        self._record_data_time()
+        for pos in positions:
+            self.risk_manager.update_position(pos)
+
+        # Exit checks only on symbols with fresh prices — a stale
+        # current_price must never trigger SL/target.
+        exited = self.position_manager.check_all_exits(fresh_symbols=set(prices))
         for trade in exited:
             self.trade_manager.add_trade(trade)
             self.journal.log_exit({
@@ -361,6 +368,21 @@ class IntradayEngine:
             return
         if not self.validator.is_square_off_time() and self.validator.is_market_open():
             return
+        # Refresh prices once more so EOD exits use live data where possible
+        try:
+            open_syms = [p.symbol for p in self.paper_executor.get_open_positions()]
+            quotes = self.market_data.get_quotes(open_syms)
+            prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
+            if prices:
+                self.paper_executor.update_positions(prices)
+            else:
+                logger.warning(
+                    "[INTRADAY] EOD square-off: no fresh quotes — "
+                    "exiting at last known prices")
+        except Exception as e:
+            logger.warning(
+                f"[INTRADAY] EOD square-off: quote refresh failed ({e}) — "
+                "exiting at last known prices")
         trades = self.paper_executor.eod_square_off()
         for trade in trades:
             self.trade_manager.add_trade(trade)

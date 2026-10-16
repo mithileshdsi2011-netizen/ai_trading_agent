@@ -1442,5 +1442,144 @@ class TestAngelSessionExpiry:
         assert len(calls) == 1
 
 
+class TestPositionRefresh:
+    """Batch-quote refresh drives current_price and exit evaluation."""
+
+    def _engine(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        return IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+
+    def _open(self, engine, symbol='RELIANCE'):
+        sig = make_signal(symbol=symbol)
+        pos = engine.paper_executor.execute_entry(sig)
+        assert pos is not None
+        return pos
+
+    def _client(self):
+        from intraday.angel.client import AngelClient
+        auth = AngelAuth('k', 'c', 'p', 's')
+        auth.authenticated = True
+        auth.jwt_token = 'j'
+        auth.auth_time = datetime.now()
+        client = AngelClient(auth)
+        api = MagicMock()
+        auth._smartapi = api
+        return client, api
+
+    # ── SDK method compatibility ────────────────────────────────────
+
+    def test_batch_quotes_use_getMarketData(self):
+        """Current smartapi-python exposes getMarketData(mode, tokens)."""
+        client, api = self._client()
+        api.getMarketData.return_value = {
+            'status': True,
+            'data': {'fetched': [{'symbolToken': '2885', 'ltp': 2500.0,
+                                  'tradingSymbol': 'RELIANCE-EQ', 'exchange': 'NSE'}]}}
+        del api.marketData  # installed SDK has no marketData attr
+        res = client.get_market_quotes({'NSE': ['2885']})
+        assert res['success'] is True
+        assert res['data']['fetched'][0]['ltp'] == 2500.0
+        api.getMarketData.assert_called_once_with('FULL', {'NSE': ['2885']})
+
+    def test_batch_quotes_fallback_to_marketData(self):
+        """Older SDKs that only have marketData(params) still work."""
+        client, api = self._client()
+        api.marketData.return_value = {
+            'status': True,
+            'data': {'fetched': [{'symbolToken': '2885', 'ltp': 2500.0}]}}
+        del api.getMarketData
+        res = client.get_market_quotes({'NSE': ['2885']})
+        assert res['success'] is True
+        api.marketData.assert_called_once_with(
+            {'mode': 'FULL', 'exchangeTokens': {'NSE': ['2885']}})
+
+    # ── position refresh + exits ────────────────────────────────────
+
+    def test_refresh_updates_current_price(self, tmp_path):
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2510.0}}
+        exited = engine._refresh_positions()
+        pos = engine.paper_executor.get_open_positions()[0]
+        assert pos.current_price == 2510.0
+        assert pos.unrealized_pnl > 0
+        assert exited == 0
+
+    def test_stop_loss_exit_on_fresh_price(self, tmp_path):
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2400.0}}
+        assert engine._refresh_positions() == 1
+        trade = engine.trade_manager.get_trades()[0]
+        assert trade.exit_reason == 'STOP_LOSS'
+        assert trade.exit_price == 2400.0
+        assert engine.paper_executor.get_open_positions() == []
+
+    def test_target_exit_on_fresh_price(self, tmp_path):
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2560.0}}
+        assert engine._refresh_positions() == 1
+        trade = engine.trade_manager.get_trades()[0]
+        assert trade.exit_reason == 'TARGET_HIT'
+        assert trade.exit_price == 2560.0
+
+    def test_missing_symbol_exit_deferred(self, tmp_path):
+        """A symbol absent from fresh quotes keeps its position untouched."""
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        self._open(engine, symbol='INFY')
+        # INFY's stored price below its SL — stale data must not exit it
+        infy = [p for p in engine.paper_executor.get_open_positions()
+                if p.symbol == 'INFY'][0]
+        infy.current_price = 2400.0
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2510.0}}
+        exited = engine._refresh_positions()
+        remaining = {p.symbol for p in engine.paper_executor.get_open_positions()}
+        assert exited == 0
+        assert remaining == {'RELIANCE', 'INFY'}
+        assert infy.current_price == 2400.0  # preserved, not fabricated
+
+    def test_no_quotes_preserves_positions(self, tmp_path):
+        engine = self._engine(tmp_path)
+        pos = self._open(engine)
+        pos.current_price = 2400.0  # stale, below SL — must not exit
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {}
+        exited = engine._refresh_positions()
+        assert exited == 0
+        assert len(engine.paper_executor.get_open_positions()) == 1
+        assert engine._last_data_time is None
+
+    def test_eod_square_off_refreshes_prices(self, tmp_path, monkeypatch):
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        monkeypatch.setattr(engine.validator, 'is_square_off_time', lambda *a, **k: True)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2530.0}}
+        engine._maybe_square_off()
+        assert engine.paper_executor.get_open_positions() == []
+        trade = engine.trade_manager.get_trades()[0]
+        assert trade.exit_reason == 'EOD_SQUARE_OFF'
+        assert trade.exit_price == 2530.0
+
+    def test_eod_square_off_without_quotes_warns_and_exits(self, tmp_path, monkeypatch):
+        """EOD still closes positions but surfaces missing data clearly."""
+        engine = self._engine(tmp_path)
+        self._open(engine)
+        monkeypatch.setattr(engine.validator, 'is_square_off_time', lambda *a, **k: True)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {}
+        engine._maybe_square_off()
+        assert engine.paper_executor.get_open_positions() == []
+        trade = engine.trade_manager.get_trades()[0]
+        assert trade.exit_reason == 'EOD_SQUARE_OFF'
+        assert trade.exit_price == 2500.0  # last known price, not fabricated
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

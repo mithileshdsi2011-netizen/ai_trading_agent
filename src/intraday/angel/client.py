@@ -185,7 +185,14 @@ class AngelClient:
         try:
             smartapi = self._get_smartapi()
             params = {"mode": mode, "exchangeTokens": exchange_tokens}
-            result = self._call('quote', smartapi.marketData, params)
+            # SDK naming differs across versions: current smartapi-python
+            # exposes getMarketData(mode, exchangeTokens); some builds name
+            # it marketData(params). Prefer whichever exists.
+            market_fn = getattr(smartapi, 'getMarketData', None)
+            if market_fn is not None:
+                result = self._call('quote', market_fn, mode, exchange_tokens)
+            else:
+                result = self._call('quote', smartapi.marketData, params)
             if result.get('status') is False:
                 return {'success': False, 'error': result.get('message', 'marketData failed')}
             return {'success': True, 'data': result.get('data', {})}

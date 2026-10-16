@@ -45,16 +45,25 @@ class IntradayPositionManager:
         """
         self.paper_executor.update_positions(market_data)
     
-    def check_all_exits(self) -> List:
+    def check_all_exits(self, fresh_symbols: Optional[set] = None) -> List:
         """
         Check exit conditions for all positions.
-        
+
+        Args:
+            fresh_symbols: when provided, positions whose symbol has no
+                freshly-fetched price are skipped — a stale price must
+                never trigger a stop-loss or target exit.
+
         Returns:
             List of trades that were exited
         """
         exited_trades = []
-        
+
         for position in self.get_open_positions():
+            if fresh_symbols is not None and position.symbol not in fresh_symbols:
+                logger.warning(
+                    f"[INTRADAY] Skipping exit check for {position.symbol} — no fresh price")
+                continue
             exit_result = self.paper_executor.check_exit_conditions(position)
             if exit_result:
                 should_exit, exit_price, exit_reason = exit_result
