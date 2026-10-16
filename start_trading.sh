@@ -22,6 +22,26 @@ echo -e "${CYAN}  $(date '+%A, %d %B %Y  %I:%M %p')${NC}"
 echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
 echo ""
 
+# ─── SINGLE-INSTANCE GUARD ─────────────────────────────────────────────────
+# Never start a second copy: the watchdogs auto-recover processes, so a live
+# orchestrator/dashboard means there is nothing to start. Prevents duplicate
+# LIVE orchestrators (duplicate orders) if the script is launched twice.
+LOCKDIR="$PWD/.start_trading.lock"
+EXISTING=$(pgrep -f "start_trading\.sh" | grep -vx $$ || true)
+RUNNING=$(pgrep -f "trading_orchestrator\.py|dashboard\.py" || true)
+if [ -n "$EXISTING" ] || [ -n "$RUNNING" ]; then
+    echo -e "${RED}  ✗ Trading system already running (PIDs:${EXISTING} ${RUNNING})${NC}"
+    echo -e "${YELLOW}  → Watchdogs keep it alive — no action needed.${NC}"
+    echo -e "${YELLOW}  → To fully restart: pkill -TERM -f start_trading.sh, wait 5s, re-run.${NC}"
+    exit 0
+fi
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo -e "${RED}  ✗ Stale lock at $LOCKDIR but no trading processes found.${NC}"
+    echo -e "${YELLOW}  → Verify nothing is running, then: rmdir '$LOCKDIR'${NC}"
+    exit 1
+fi
+echo $$ > "$LOCKDIR/pid"
+
 # Activate virtual environment
 if [ -f "../venv/bin/activate" ]; then
     source ../venv/bin/activate
@@ -160,6 +180,9 @@ cleanup() {
     # Kill watchdog loops by killing this whole process group
     kill -- -$$ 2>/dev/null || true
     kill $DASH_PID $BOT_PID 2>/dev/null || true
+    # Release the single-instance lock
+    rm -f "$LOCKDIR/pid" 2>/dev/null || true
+    rmdir "$LOCKDIR" 2>/dev/null || true
     echo -e "${GREEN}  ✓ Dashboard stopped${NC}"
     echo -e "${GREEN}  ✓ Trading bot stopped${NC}"
     echo -e "${GREEN}  All done. See you tomorrow! 👋${NC}"
