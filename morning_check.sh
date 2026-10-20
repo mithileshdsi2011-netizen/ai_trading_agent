@@ -94,14 +94,16 @@ SWING_N=$(./venv/bin/python -c "
 import json
 try:
     d = json.load(open('data/positions.json'))
-    print(len(d) if isinstance(d, list) else len([p for p in d.values() if p]))
+    items = d.get('positions', []) if isinstance(d, dict) else d
+    print(len(items) if isinstance(items, list) else len(items))
 except Exception:
     print('0')" 2>/dev/null)
 PAPER_N=$(./venv/bin/python -c "
 import json
 try:
     d = json.load(open('data/intraday/positions.json'))
-    print(len(d) if isinstance(d, list) else len(d.get('positions', d)))
+    items = d.get('positions', []) if isinstance(d, dict) else d
+    print(len(items) if isinstance(items, list) else len(items))
 except Exception:
     print('0')" 2>/dev/null)
 ok "Swing LIVE positions: ${SWING_N:-0} • Angel PAPER positions: ${PAPER_N:-0}"
