@@ -54,13 +54,45 @@ logger = logging.getLogger(__name__)
 # How often a lazy scan cycle may run when the dashboard polls
 DEFAULT_SCAN_INTERVAL_SECONDS = 60
 
+# Quote-refresh failure monitoring — after this many consecutive failed
+# refresh cycles with open PAPER positions, one deduplicated incident
+# notification is raised via the shared alert store.
+QUOTE_FAIL_ALERT_THRESHOLD = 3
+QUOTE_INCIDENT_KEY = 'intraday:angel:quote_refresh_failure'
+EOD_QUOTE_INCIDENT_KEY = 'intraday:angel:eod_quote_failure'
+
+
+def _production_incident(action: str, incident_key: str, detail: str) -> None:
+    """Default incident sink — deduplicated email via the shared store.
+
+    'notify' sends one email per incident (persistent dedup suppresses
+    repeats); 'resolve' clears the incident and emits a single recovery
+    note. Never called under pytest (engine gates on PYTEST_CURRENT_TEST).
+    """
+    from email_reports import EmailReporter
+    if action == 'resolve':
+        from persistence import get_store
+        if get_store().resolve_alert_incident(incident_key):
+            EmailReporter().send_report(
+                "Angel PAPER: market-data quotes recovered",
+                "Quote refresh recovered — intraday exit monitoring is live "
+                "again. Fresh prices resume driving SL/target evaluation.")
+        return
+    EmailReporter().send_report(
+        "Angel PAPER: market-data quote failure",
+        f"Intraday PAPER quote refresh failure.\n\n{detail}\n\n"
+        "Positions are preserved and exits deferred — SL/target "
+        "evaluation requires fresh prices and will not use stale data.",
+        incident_key=incident_key)
+
 
 class IntradayEngine:
     """Orchestrates the isolated Angel One intraday engine."""
 
     def __init__(self, config: Optional[IntradayConfig] = None,
                  state_dir: Optional[str] = None,
-                 scan_interval_seconds: int = DEFAULT_SCAN_INTERVAL_SECONDS):
+                 scan_interval_seconds: int = DEFAULT_SCAN_INTERVAL_SECONDS,
+                 alert_hook=None):
         self.config = config or get_intraday_config()
         self.state_store = IntradayStateStore(state_dir)
         self.scan_interval = scan_interval_seconds
@@ -98,6 +130,8 @@ class IntradayEngine:
 
         # Runtime state
         self._lock = threading.Lock()
+        self._alert_hook = alert_hook
+        self._quote_fail_streak = 0
         self._cycle_running = False
         self._auth_state = "AUTH PENDING" if self.credentials_configured() else "NOT CONFIGURED"
         self._auth_attempted = False
@@ -329,6 +363,20 @@ class IntradayEngine:
         else:
             self.risk_manager.release_pending(key)
 
+    def _incident(self, action: str, incident_key: str, detail: str) -> None:
+        """Raise or clear an operational incident. Fail-safe: notification
+        errors never propagate into the trading loop. Under pytest the
+        production sink is bypassed entirely (alert_hook or nothing)."""
+        hook = self._alert_hook
+        if hook is None:
+            if os.environ.get('PYTEST_CURRENT_TEST'):
+                return  # never notify from automated tests
+            hook = _production_incident
+        try:
+            hook(action, incident_key, detail)
+        except Exception as e:
+            logger.warning(f"[INTRADAY] incident {action} failed: {e}")
+
     def _refresh_positions(self) -> int:
         """Update open positions with fresh quotes and process exits."""
         positions = self.paper_executor.get_open_positions()
@@ -339,10 +387,23 @@ class IntradayEngine:
         quotes = self.market_data.get_quotes(symbols)
         prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
         if not prices:
+            self._quote_fail_streak += 1
             logger.warning(
                 f"[INTRADAY] No fresh quotes for {len(positions)} open position(s) "
-                f"— exits deferred, positions preserved")
+                f"— exits deferred, positions preserved "
+                f"(failure {self._quote_fail_streak}/{QUOTE_FAIL_ALERT_THRESHOLD})")
+            if self._quote_fail_streak >= QUOTE_FAIL_ALERT_THRESHOLD:
+                self._incident(
+                    'notify', QUOTE_INCIDENT_KEY,
+                    f"{len(positions)} open PAPER position(s); "
+                    f"{self._quote_fail_streak} consecutive quote-refresh failures.")
             return 0
+
+        # Success — even if prices are identical to the previous values,
+        # a non-empty quote response is a healthy refresh, not a failure.
+        if self._quote_fail_streak:
+            self._incident('resolve', QUOTE_INCIDENT_KEY, '')
+            self._quote_fail_streak = 0
 
         self.paper_executor.update_positions(prices)
         self._record_data_time()
@@ -379,10 +440,18 @@ class IntradayEngine:
                 logger.warning(
                     "[INTRADAY] EOD square-off: no fresh quotes — "
                     "exiting at last known prices")
+                self._incident(
+                    'notify', EOD_QUOTE_INCIDENT_KEY,
+                    "EOD square-off executed at last-known prices — live "
+                    "quotes unavailable at close.")
         except Exception as e:
             logger.warning(
                 f"[INTRADAY] EOD square-off: quote refresh failed ({e}) — "
                 "exiting at last known prices")
+            self._incident(
+                'notify', EOD_QUOTE_INCIDENT_KEY,
+                f"EOD square-off executed at last-known prices — quote "
+                f"refresh raised {e!r} at close.")
         trades = self.paper_executor.eod_square_off()
         for trade in trades:
             self.trade_manager.add_trade(trade)

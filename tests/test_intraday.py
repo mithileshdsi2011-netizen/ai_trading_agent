@@ -1592,5 +1592,102 @@ class TestPositionRefresh:
         assert trade.exit_price == 2500.0  # last known price, not fabricated
 
 
+class TestQuoteFailureMonitoring:
+    """Consecutive empty-quote cycles raise one deduplicated incident;
+    recovery clears it. The alert hook is injected — no real
+    store/email is touched under pytest (production sink is also
+    gated on PYTEST_CURRENT_TEST)."""
+
+    def _engine(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        events = []
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path),
+                                alert_hook=lambda *a: events.append(a))
+        return engine, events
+
+    def _open(self, engine):
+        sig = make_signal(symbol='RELIANCE')
+        pos = engine.paper_executor.execute_entry(sig)
+        assert pos is not None
+        return pos
+
+    def _fail_cycle(self, engine):
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {}
+        return engine._refresh_positions()
+
+    def test_no_notify_below_threshold(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        self._open(engine)
+        self._fail_cycle(engine)
+        self._fail_cycle(engine)
+        assert [e for e in events if e[0] == 'notify'] == []
+
+    def test_notify_after_three_failures(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        self._open(engine)
+        for _ in range(3):
+            assert self._fail_cycle(engine) == 0
+        notifies = [e for e in events if e[0] == 'notify']
+        assert len(notifies) == 1
+        assert notifies[0][1] == 'intraday:angel:quote_refresh_failure'
+        assert '3 consecutive' in notifies[0][2]
+
+    def test_recovery_resolves_incident_and_resets_streak(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        self._open(engine)
+        for _ in range(3):
+            self._fail_cycle(engine)
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2510.0}}
+        engine._refresh_positions()
+        assert ('resolve', 'intraday:angel:quote_refresh_failure', '') in events
+        assert engine._quote_fail_streak == 0
+
+    def test_unchanged_prices_count_as_success(self, tmp_path):
+        """Quotes identical to current prices are still a healthy refresh —
+        only a missing/empty response counts as a failure."""
+        engine, events = self._engine(tmp_path)
+        current = self._open(engine).current_price
+        self._fail_cycle(engine)
+        self._fail_cycle(engine)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': current}}
+        engine._refresh_positions()
+        assert engine._quote_fail_streak == 0
+        self._fail_cycle(engine)  # streak restarts — 1/3 again
+        assert [e for e in events if e[0] == 'notify'] == []
+
+    def test_no_incident_without_open_positions(self, tmp_path):
+        """Refresh only runs with open positions — no positions, no streak."""
+        engine, events = self._engine(tmp_path)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {}
+        assert engine._refresh_positions() == 0
+        assert engine._quote_fail_streak == 0
+        assert events == []
+
+    def test_eod_quote_failure_notifies_immediately(self, tmp_path, monkeypatch):
+        """EOD is terminal — a missing quote fires the incident at once."""
+        engine, events = self._engine(tmp_path)
+        self._open(engine)
+        monkeypatch.setattr(engine.validator, 'is_square_off_time',
+                            lambda *a, **k: True)
+        engine.market_data = MagicMock()
+        engine.market_data.get_quotes.return_value = {}
+        engine._maybe_square_off()
+        notifies = [e for e in events if e[0] == 'notify']
+        assert [n[1] for n in notifies] == ['intraday:angel:eod_quote_failure']
+
+    def test_stale_prices_never_exit_while_incident_open(self, tmp_path):
+        """The stale-price exit guard stays intact during a quote incident."""
+        engine, events = self._engine(tmp_path)
+        pos = self._open(engine)
+        pos.current_price = 100.0  # deep below SL — must not fire on stale data
+        for _ in range(3):
+            assert self._fail_cycle(engine) == 0
+        assert engine.paper_executor.get_open_positions()  # still open
+        assert engine.trade_manager.get_trades() == []     # no exits
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
