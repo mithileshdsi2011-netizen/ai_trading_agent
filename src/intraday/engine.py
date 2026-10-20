@@ -99,7 +99,7 @@ class IntradayEngine:
         # Runtime state
         self._lock = threading.Lock()
         self._cycle_running = False
-        self._auth_state = "NOT CONFIGURED"
+        self._auth_state = "AUTH PENDING" if self.credentials_configured() else "NOT CONFIGURED"
         self._auth_attempted = False
         self._auth_cooldown_until: Optional[datetime] = None
         self._last_scan_time: Optional[datetime] = None

@@ -63,6 +63,13 @@ class EnterpriseAlertEngine:
         self._popup_queue: List[Dict[str, Any]] = []
         self._email_cooldowns: Dict[str, datetime] = {}  # Track email cooldowns per source
         self._lock = threading.Lock()
+        # Prune resolved incidents older than 30 days — prevents unbounded
+        # growth of the dedup table. OPEN incidents are never removed.
+        try:
+            if hasattr(self.store, 'prune_alert_incidents'):
+                self.store.prune_alert_incidents()
+        except Exception:
+            pass
 
     # ── Core alert lifecycle ──────────────────────────────────────────────
 

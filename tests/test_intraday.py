@@ -1084,6 +1084,17 @@ class TestIntradayEngineIsolation:
         assert summary['skipped_reason'] == "ANGEL AUTHENTICATION FAILED"
         assert engine.get_status()['auth_status'] == "ANGEL AUTHENTICATION FAILED"
 
+    def test_auth_pending_when_configured(self, tmp_path):
+        """Configured-but-not-yet-attempted auth must read AUTH PENDING,
+        not NOT CONFIGURED (which means credentials are absent)."""
+        from intraday.engine import IntradayEngine
+        config = IntradayConfig(
+            angel_api_key="k", angel_client_code="c",
+            angel_password_or_mpin="p", angel_totp_secret="s",
+        )
+        engine = IntradayEngine(config=config, state_dir=str(tmp_path))
+        assert engine.get_status()['auth_status'] == "AUTH PENDING"
+
     def test_market_closed_skips_cycle(self, tmp_path, monkeypatch):
         from intraday.engine import IntradayEngine
         config = IntradayConfig(

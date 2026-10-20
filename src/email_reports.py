@@ -10,7 +10,7 @@ import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, date
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from config import config
 
@@ -83,17 +83,19 @@ class EmailReporter:
             logger.error(f"Email report failed: {e}")
             return False
 
-    def send_report(self, subject: str, body: str) -> bool:
+    def send_report(self, subject: str, body: str,
+                    incident_key: Optional[str] = None) -> bool:
         if not self.enabled or not self.username or not self.password or not self.to_email:
             logger.info("Email reports disabled or not configured")
             return False
 
         # Persistent incident dedup — survives restarts and coordinates
         # across dashboard/orchestrator processes via the shared store.
-        # Key keeps the existing semantics: same-day, same-subject dedup.
+        # Default key keeps the existing semantics: same-day, same-subject
+        # dedup; callers may pass a stable cross-path incident key instead.
         store = self._incident_store()
         if store is not None:
-            incident_key = f"email:{date.today().isoformat()}:{subject[:60]}"
+            incident_key = incident_key or f"email:{date.today().isoformat()}:{subject[:60]}"
             try:
                 res = store.upsert_alert_incident(incident_key, 'EmailReporter', 'INFO')
                 if (res['event'] == 'repeat'

@@ -266,3 +266,16 @@ def test_no_real_smtp_anywhere(engine, email):
     """Belt-and-suspenders: smtplib is a mock everywhere under pytest."""
     engine.alert('CRITICAL', 'Kite', 'Kite API unavailable')
     assert isinstance(smtplib.SMTP, type(smtplib.SMTP))  # mocked class, not real
+
+
+def test_prune_removes_only_old_resolved(store):
+    import datetime as _dt
+    store.upsert_alert_incident('old:resolved', 'X', 'WARNING')
+    store.resolve_alert_incident('old:resolved')
+    store.upsert_alert_incident('old:open', 'X', 'CRITICAL')
+    old = (_dt.datetime.now() - _dt.timedelta(days=40)).isoformat()
+    with store._conn() as conn:
+        conn.execute("UPDATE alert_incidents SET last_seen = ?", (old,))
+    assert store.prune_alert_incidents(days=30) == 1
+    assert store.get_alert_incident('old:resolved') is None
+    assert store.get_alert_incident('old:open') is not None  # OPEN never pruned

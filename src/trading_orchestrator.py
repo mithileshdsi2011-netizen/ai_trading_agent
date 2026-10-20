@@ -1321,11 +1321,13 @@ class TradingOrchestrator:
         except Exception:
             pass
 
-    def _alert(self, subject: str, body: str) -> None:
+    def _alert(self, subject: str, body: str, incident_key: str = None) -> None:
         """
         Send a critical alert via BOTH Telegram and email.
         Either channel failing does not block the other.
         `body` is plain text for Telegram; HTML is auto-wrapped for email.
+        `incident_key` optionally supplies a stable dedup key shared with
+        the alert engine so one incident emails once across both paths.
         """
         # Telegram (plain text, strip HTML tags for readability)
         try:
@@ -1337,7 +1339,7 @@ class TradingOrchestrator:
             html_body = "<html><body><pre style='font-family:Arial'>" \
                         + body.replace("&", "&amp;").replace("<b>", "<b>").replace("</b>", "</b>") \
                         + "</pre></body></html>"
-            self.email.send_report(subject, html_body)
+            self.email.send_report(subject, html_body, incident_key=incident_key)
         except Exception as _ee:
             logger.warning(f"Email alert failed: {_ee}")
 

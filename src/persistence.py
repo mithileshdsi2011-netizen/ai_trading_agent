@@ -2265,6 +2265,19 @@ class TradingStore:
                 ).fetchone()
                 return dict(row) if row else None
 
+    def prune_alert_incidents(self, days: int = 30) -> int:
+        """Delete resolved incidents older than `days`. Returns rows removed.
+        OPEN incidents are never pruned."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._lock:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    "DELETE FROM alert_incidents "
+                    "WHERE state = 'RESOLVED' AND last_seen < ?",
+                    (cutoff,),
+                )
+                return cur.rowcount
+
     def save_daily_health_report(self, snapshot: Dict[str, Any]) -> None:
         with self._lock:
             with self._conn() as conn:
