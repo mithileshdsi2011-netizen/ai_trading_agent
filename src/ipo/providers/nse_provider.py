@@ -188,11 +188,25 @@ class NseIPODataProvider(IPODataProvider):
     @classmethod
     def _to_ipo(cls, row: Dict[str, Any], status: IPOStatus) -> IPO:
         lo, hi = cls._price_band(row)
+        real_name = cls._pick(row, 'companyName', 'company', 'company_name', 'name',
+                              'issueName', 'htmSym')
+        symbol = cls._pick(row, 'symbol', 'symbolName')
+        open_date = cls._date(cls._pick(row, 'issueStartDate', 'ipoStartDate',
+                                        'biddingStartDate',
+                                        'openDate', 'startDate', 'issueOpenDate'))
+        close_date = cls._date(cls._pick(row, 'issueEndDate', 'ipoEndDate',
+                                         'biddingEndDate',
+                                         'closeDate', 'endDate', 'issueCloseDate'))
+        listing_date = cls._date(cls._pick(row, 'listingDate', 'dateOfListing',
+                                           't1ModStartDate'))
+        # VERIFIED only when the source row actually provides a real company
+        # name, a symbol and at least one authoritative date — nothing
+        # synthesized. Anything less is displayed as UNVERIFIED.
+        verified = bool(real_name and symbol and (open_date or close_date or listing_date))
+        lot = cls._num_field(row, 'lotSize', 'marketLot', 'minBidLot')
         return IPO(
-            name=str(cls._pick(row, 'companyName', 'company', 'company_name', 'name',
-                               'issueName', 'htmSym')
-                     or cls._pick(row, 'symbol', 'symbolName') or 'Unknown'),
-            symbol=cls._pick(row, 'symbol', 'symbolName'),
+            name=str(real_name or symbol or 'Unknown'),
+            symbol=symbol,
             sector=cls._pick(row, 'industry', 'sector', 'industryNew'),
             status=status,
             issue_type=cls._issue_type(row),
@@ -201,19 +215,18 @@ class NseIPODataProvider(IPODataProvider):
             issue_size=cls._issue_size_cr(row, lo, hi),
             fresh_issue=cls._num_field(row, 'freshIssueCr', 'fresh_issue'),
             offer_for_sale=cls._num_field(row, 'ofsCr', 'offerForSale', 'offer_for_sale'),
-            open_date=cls._date(cls._pick(row, 'issueStartDate', 'ipoStartDate',
-                                          'biddingStartDate',
-                                          'openDate', 'startDate', 'issueOpenDate')),
-            close_date=cls._date(cls._pick(row, 'issueEndDate', 'ipoEndDate',
-                                           'biddingEndDate',
-                                           'closeDate', 'endDate', 'issueCloseDate')),
-            listing_date=cls._date(cls._pick(row, 'listingDate', 'dateOfListing',
-                                             't1ModStartDate')),
+            open_date=open_date,
+            close_date=close_date,
+            listing_date=listing_date,
+            lot_size=int(lot) if lot is not None else None,
+            min_investment=cls._num_field(row, 'minInvestment', 'minInvest',
+                                          'minApplicationAmt'),
             subscription=cls._subscription(row),
             business_description=cls._pick(row, 'aboutCompany', 'companyDescription',
                                            'businessDescription'),
             is_demo_data=False,
             data_source=cls.SOURCE_NAME,
+            verified=verified,
         )
 
     @classmethod

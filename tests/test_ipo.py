@@ -616,6 +616,73 @@ class TestNseIPOProvider:
         assert all(i.is_demo_data for i in mock.get_open_ipos())
 
 
+class TestNseVerificationAndOptionalFields:
+    """Verified/unverified flagging + lot-size/min-investment passthrough.
+
+    Records may only display VERIFIED when the NSE row itself supplies a
+    real company name, a symbol and at least one authoritative date.
+    Optional fields are passed through when present and left None (→ N/A)
+    when absent — never synthesized.
+    """
+
+    _provider = TestNseIPOProvider._provider
+
+    def _single(self, row):
+        return self._provider(payloads=[row]).get_open_ipos()[0]
+
+    def test_lot_size_and_min_investment_mapped_when_present(self):
+        ipo = self._single([{'companyName': 'Lot Co', 'symbol': 'LOT',
+                             'issueStartDate': '01-01-2099',
+                             'issueEndDate': '05-01-2099',
+                             'lotSize': '75', 'minInvestment': '15000'}])
+        assert ipo.lot_size == 75
+        assert ipo.min_investment == 15000.0
+
+    def test_lot_and_min_investment_none_when_absent(self):
+        ipo = self._single([{'companyName': 'NoLot Co', 'symbol': 'NOLOT',
+                             'issueStartDate': '01-01-2099'}])
+        assert ipo.lot_size is None
+        assert ipo.min_investment is None
+
+    def test_verified_when_name_symbol_and_date_present(self):
+        ipo = self._single([{'companyName': 'Real Co', 'symbol': 'REAL',
+                             'issueStartDate': '01-01-2099',
+                             'issueEndDate': '05-01-2099'}])
+        assert ipo.verified is True
+
+    def test_unverified_when_no_real_name(self):
+        """Symbol-fallback names cannot be VERIFIED."""
+        ipo = self._single([{'symbol': 'NONAME',
+                             'issueStartDate': '01-01-2099'}])
+        assert ipo.verified is False
+
+    def test_unverified_when_no_authoritative_dates(self):
+        ipo = self._single([{'companyName': 'NoDates Co', 'symbol': 'NOD'}])
+        assert ipo.verified is False
+
+    def test_rows_without_symbol_are_dropped(self):
+        """A row with no symbol cannot form a record at all — dedup drops it."""
+        ipos = self._provider(payloads=[
+            [{'companyName': 'NoSym Co', 'issueStartDate': '01-01-2099'}],
+        ]).get_open_ipos()
+        assert ipos == []
+
+    def test_zero_subscription_preserved_not_nulled(self):
+        """A legitimate 0.0× subscription must stay 0.0 — display turns it
+        into '0.00×', never N/A."""
+        ipo = self._single([{'companyName': 'ZeroSub Co', 'symbol': 'ZSUB',
+                             'issueStartDate': '01-01-2099',
+                             'issueEndDate': '05-01-2099',
+                             'noOfTime': '0'}])
+        assert ipo.subscription is not None
+        assert ipo.subscription.overall == 0.0
+
+    def test_demo_data_not_verified(self):
+        """Mock/demo rows must never claim authoritative-source verification."""
+        mock = MockIPODataProvider()
+        assert all(i.verified is False for i in mock.get_open_ipos())
+
+
 def client_calls(provider):
     """Count session.get invocations on the stubbed session."""
     return provider._session.get.call_count

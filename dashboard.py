@@ -3385,17 +3385,46 @@ tr:last-child td{border:none}
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="background:#1f2937">
           <th style="text-align:left;padding:10px 8px">IPO</th>
-          <th style="text-align:left;padding:10px 8px">Price Band</th>
-          <th style="text-align:center;padding:10px 8px">Score</th>
-          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
-          <th style="text-align:center;padding:10px 8px">Risk</th>
-          <th style="text-align:center;padding:10px 8px">Recommendation</th>
-          <th style="text-align:center;padding:10px 8px">Data Quality</th>
           <th style="text-align:center;padding:10px 8px">Status</th>
+          <th style="text-align:left;padding:10px 8px">Dates</th>
+          <th style="text-align:left;padding:10px 8px">Price Band</th>
+          <th style="text-align:center;padding:10px 8px">Lot</th>
+          <th style="text-align:center;padding:10px 8px">Min Invest</th>
+          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
+          <th style="text-align:center;padding:10px 8px">Data Quality</th>
+          <th style="text-align:center;padding:10px 8px">Verified</th>
+          <th style="text-align:center;padding:10px 8px">Score</th>
         </tr></thead>
-        <tbody id="ipo-summary-table"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
+        <tbody id="ipo-summary-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
       </table>
     </div>
+  </div>
+
+  <!-- IPO History (Closed + Listed) — separate view with search & pagination -->
+  <div class="card mb-4" id="ipo-history-card" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">📜 IPO History (Closed &amp; Listed)</div>
+      <input id="ipo-history-search" type="text" placeholder="Search IPO name/symbol…" oninput="ipoHistSearch(this.value)"
+        style="background:#1f2937;color:#f9fafb;border:1px solid #374151;border-radius:4px;padding:5px 10px;font-size:12px;width:240px">
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="background:#1f2937">
+          <th style="text-align:left;padding:10px 8px">IPO</th>
+          <th style="text-align:center;padding:10px 8px">Status</th>
+          <th style="text-align:left;padding:10px 8px">Dates</th>
+          <th style="text-align:left;padding:10px 8px">Price Band</th>
+          <th style="text-align:center;padding:10px 8px">Lot</th>
+          <th style="text-align:center;padding:10px 8px">Min Invest</th>
+          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
+          <th style="text-align:center;padding:10px 8px">Data Quality</th>
+          <th style="text-align:center;padding:10px 8px">Verified</th>
+          <th style="text-align:center;padding:10px 8px">Score</th>
+        </tr></thead>
+        <tbody id="ipo-history-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No history</td></tr></tbody>
+      </table>
+    </div>
+    <div id="ipo-history-pager" style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px;font-size:12px;color:#9ca3af"></div>
   </div>
 
   <!-- IPO Sections -->
@@ -3410,12 +3439,6 @@ tr:last-child td{border:none}
     <div class="card">
       <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📅 Upcoming IPOs</div>
       <div id="ipo-upcoming-list" style="font-size:13px;color:#4b5563">Loading...</div>
-    </div>
-
-    <!-- Recently Listed -->
-    <div class="card">
-      <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Recently Listed</div>
-      <div id="ipo-recent-list" style="font-size:13px;color:#4b5563">Loading...</div>
     </div>
 
     <!-- Post-Listing Watchlist -->
@@ -6718,44 +6741,76 @@ async function loadIPOData(){
       countsEl.textContent=`${c('OPEN')} Open • ${c('UPCOMING')} Upcoming • ${c('CLOSED')} Closed • ${c('LISTED')} Listed${d.non_equity_ipos&&d.non_equity_ipos.length?` • ${d.non_equity_ipos.length} Non-Equity`:''}`;
     }
 
-    // Filter bar
+    // Display helpers — explicit null checks so legitimate 0 never becomes N/A
+    const naTxt=v=>(v===null||v===undefined||v==='')?'N/A':v;
+    const fmtSub=s=>(s&&s.overall!=null)?Number(s.overall).toFixed(2)+'×':'N/A';
+    const scoreChip=ipo=>{
+      if(ipo.data_quality==='LIMITED')
+        return '<span style="background:#4b556333;color:#9ca3af;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">NOT ASSESSED</span>';
+      const sc=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
+      return `<span style="background:${sc}33;color:${sc};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score_display||ipo.score.toFixed(1)}</span>`;
+    };
+    const verChip=ipo=>ipo.verified===true
+      ?'<span style="color:#22c55e;font-size:11px;font-weight:600">VERIFIED</span>'
+      :'<span style="color:#f59e0b;font-size:11px;font-weight:600">UNVERIFIED</span>';
+    const datesTxt=ipo=>{
+      if(ipo.open_date||ipo.close_date)return `${ipo.open_date||'TBD'} → ${ipo.close_date||'TBD'}`;
+      if(ipo.listing_date)return `Listed ${ipo.listing_date}`;
+      return 'N/A';
+    };
+    const ipoRow=ipo=>{
+      const st=(ipo.status||'').toUpperCase();
+      const stColor=st==='OPEN'?'#22c55e':st==='UPCOMING'?'#3b82f6':st==='LISTED'?'#84cc16':'#6b7280';
+      const dqColor=ipo.data_quality==='FULL'?'#22c55e':ipo.data_quality==='PARTIAL'?'#f59e0b':'#9ca3af';
+      return `<tr style="cursor:pointer;border-bottom:1px solid #1f293744" onclick="showIPODetails('${ipo.symbol}')">
+        <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${ipo.name}</td>
+        <td style="padding:10px 8px;text-align:center"><span style="color:${stColor};font-weight:600;font-size:12px">${st}</span></td>
+        <td style="padding:10px 8px;color:#9ca3af;white-space:nowrap">${datesTxt(ipo)}</td>
+        <td style="padding:10px 8px;color:#9ca3af">${ipo.price_band||'N/A'}</td>
+        <td style="padding:10px 8px;text-align:center;color:#9ca3af">${naTxt(ipo.lot_size)}</td>
+        <td style="padding:10px 8px;text-align:center;color:#9ca3af">${ipo.min_investment!=null?'₹'+Number(ipo.min_investment).toLocaleString('en-IN'):'N/A'}</td>
+        <td style="padding:10px 8px;text-align:center;color:#9ca3af;font-size:12px">${fmtSub(ipo.subscription)}</td>
+        <td style="padding:10px 8px;text-align:center;color:${dqColor};font-size:11px;font-weight:600">${ipo.data_quality||'—'}</td>
+        <td style="padding:10px 8px;text-align:center">${verChip(ipo)}</td>
+        <td style="padding:10px 8px;text-align:center">${scoreChip(ipo)}</td>
+      </tr>`;
+    };
+
+    // Filter bar — main view prioritises Open + Upcoming; HISTORY is a separate view
+    const flt=window._ipoFilter||'CURRENT';
     const filterBar=document.getElementById('ipo-filter-bar');
     if(filterBar){
-      const filters=['ALL','OPEN','UPCOMING','CLOSED','LISTED'];
+      const filters=['CURRENT','OPEN','UPCOMING','ALL','HISTORY'];
       filterBar.innerHTML=filters.map(f=>{
-        const active=(window._ipoFilter||'ALL')===f;
+        const active=flt===f;
         return `<button onclick="setIPOFilter('${f}')" style="background:${active?'#3b82f6':'#1f2937'};color:${active?'#fff':'#9ca3af'};border:none;padding:4px 12px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">${f}</button>`;
       }).join('');
     }
 
-    // Render summary table (filtered)
+    // Toggle main view vs History view
+    const isHistory=flt==='HISTORY';
     const summaryTable=document.getElementById('ipo-summary-table');
-    const flt=window._ipoFilter||'ALL';
-    const rows=(d.all_ipos||[]).filter(i=>flt==='ALL'||(i.status||'').toUpperCase()===flt);
-    if(summaryTable && rows.length){
-      summaryTable.innerHTML=rows.map(ipo=>{
-        const prov=ipo.data_quality==='LIMITED';
-        const st=(ipo.status||'').toUpperCase();
-        const scoreColor=prov?'#9ca3af':ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
-        const riskColor=ipo.risk_level==='LOW'?'#22c55e':ipo.risk_level==='MEDIUM'?'#f59e0b':ipo.risk_level==='NOT ASSESSED'?'#9ca3af':'#ef4444';
-        const recColor=ipo.recommendation==='STRONG CANDIDATE'?'#22c55e':ipo.recommendation==='CONSIDER'?'#84cc16':ipo.recommendation==='WATCH'?'#f97316':ipo.recommendation==='HIGH RISK'?'#f59e0b':ipo.recommendation==='INSUFFICIENT DATA'?'#9ca3af':'#ef4444';
-        const statusColor=st==='OPEN'?'#22c55e':st==='UPCOMING'?'#3b82f6':st==='LISTED'?'#84cc16':'#6b7280';
-        const dqColor=ipo.data_quality==='FULL'?'#22c55e':ipo.data_quality==='PARTIAL'?'#f59e0b':'#9ca3af';
-        const subTxt=ipo.subscription&&ipo.subscription.overall!=null?ipo.subscription.overall+'×':'—';
-        return `<tr style="cursor:pointer;border-bottom:1px solid #1f293744" onclick="showIPODetails('${ipo.symbol}')">
-          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${ipo.name}</td>
-          <td style="padding:10px 8px;color:#9ca3af">${ipo.price_band||'N/A'}</td>
-          <td style="padding:10px 8px;text-align:center"><span style="background:${scoreColor}33;color:${scoreColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score_display||ipo.score.toFixed(1)}</span></td>
-          <td style="padding:10px 8px;text-align:center;color:#9ca3af;font-size:12px">${subTxt}</td>
-          <td style="padding:10px 8px;text-align:center"><span style="color:${riskColor};font-weight:600;font-size:12px">${ipo.risk_level}</span></td>
-          <td style="padding:10px 8px;text-align:center"><span style="background:${recColor}33;color:${recColor};padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px">${ipo.recommendation}</span></td>
-          <td style="padding:10px 8px;text-align:center;color:${dqColor};font-size:11px;font-weight:600">${ipo.data_quality||'—'}</td>
-          <td style="padding:10px 8px;text-align:center"><span style="color:${statusColor};font-weight:600;font-size:12px">${st}</span></td>
-        </tr>`;
-      }).join('');
-    }else if(summaryTable){
-      summaryTable.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">No IPO data available</td></tr>';
+    const summaryCard=summaryTable&&summaryTable.closest('.card');
+    const historyCard=document.getElementById('ipo-history-card');
+    if(summaryCard)summaryCard.style.display=isHistory?'none':'';
+    if(historyCard)historyCard.style.display=isHistory?'':'none';
+
+    // Summary table — CURRENT = Open + Upcoming only
+    const rows=(d.all_ipos||[]).filter(i=>{
+      const s=(i.status||'').toUpperCase();
+      if(flt==='CURRENT')return s==='OPEN'||s==='UPCOMING';
+      return flt==='ALL'||s===flt;
+    });
+    if(summaryTable){
+      summaryTable.innerHTML=rows.length?rows.map(ipoRow).join('')
+        :'<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No IPOs match this filter</td></tr>';
     }
+
+    // History view — Closed + Listed, listing-date desc; rendered by renderIPOHistory()
+    window._ipoHistData=(d.all_ipos||[]).filter(i=>['CLOSED','LISTED'].includes((i.status||'').toUpperCase()))
+      .sort((a,b)=>(b.listing_date||b.close_date||'').localeCompare(a.listing_date||a.close_date||''));
+    window._ipoHistRow=ipoRow;
+    if(isHistory)renderIPOHistory();
 
     // Render non-equity offerings (DEBT/NCD/ZCZP) — separate, not scored
     const neCard=document.getElementById('ipo-nonequity-card');
@@ -6777,32 +6832,21 @@ async function loadIPOData(){
     if(openList && d.open_ipos && d.open_ipos.length){
       openList.innerHTML=d.open_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
         <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
-        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Score: ${ipo.score.toFixed(1)} • ${ipo.recommendation}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • ${ipo.open_date||'TBD'} → ${ipo.close_date||'TBD'} • Sub: ${fmtSub(ipo.subscription)} • ${ipo.data_quality==='LIMITED'?'NOT ASSESSED':'Score: '+ipo.score.toFixed(1)}</div>
       </div>`).join('');
     }else if(openList){
       openList.innerHTML='<div style="color:#6b7280">No open IPOs</div>';
     }
-    
+
     // Render upcoming IPOs
     const upcomingList=document.getElementById('ipo-upcoming-list');
     if(upcomingList && d.upcoming_ipos && d.upcoming_ipos.length){
       upcomingList.innerHTML=d.upcoming_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
         <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
-        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Open: ${ipo.open_date||'TBD'} • Score: ${ipo.score.toFixed(1)}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Open: ${ipo.open_date||'TBD'} • Sub: ${fmtSub(ipo.subscription)} • ${ipo.data_quality==='LIMITED'?'NOT ASSESSED':'Score: '+ipo.score.toFixed(1)}</div>
       </div>`).join('');
     }else if(upcomingList){
       upcomingList.innerHTML='<div style="color:#6b7280">No upcoming IPOs</div>';
-    }
-    
-    // Render recent IPOs
-    const recentList=document.getElementById('ipo-recent-list');
-    if(recentList && d.recent_ipos && d.recent_ipos.length){
-      recentList.innerHTML=d.recent_ipos.map(ipo=>`<div style="padding:8px 0;border-bottom:1px solid #1f293744;cursor:pointer" onclick="showIPODetails('${ipo.symbol}')">
-        <div style="font-weight:600;color:#f9fafb">${ipo.name}</div>
-        <div style="font-size:11px;color:#9ca3af;margin-top:2px">${ipo.price_band||'N/A'} • Listed: ${ipo.listing_date||'TBD'} • Score: ${ipo.score.toFixed(1)}</div>
-      </div>`).join('');
-    }else if(recentList){
-      recentList.innerHTML='<div style="color:#6b7280">No recent IPOs</div>';
     }
     
     // Store IPO details for detail view
@@ -6811,7 +6855,7 @@ async function loadIPOData(){
   }catch(e){
     console.error('IPO data load error:',e);
     const summaryTable=document.getElementById('ipo-summary-table');
-    if(summaryTable)summaryTable.innerHTML='<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:20px">IPO data temporarily unavailable</td></tr>';
+    if(summaryTable)summaryTable.innerHTML='<tr><td colspan="10" style="text-align:center;color:#ef4444;padding:20px">IPO data temporarily unavailable</td></tr>';
   }
 }
 
@@ -6973,7 +7017,32 @@ async function toggleIntradayKillSwitch(){
   }
 }
 
-function setIPOFilter(f){window._ipoFilter=f;loadIPOData();}
+function setIPOFilter(f){window._ipoFilter=f;if(f==='HISTORY'){window._ipoHistPage=1;}loadIPOData();}
+
+// IPO History — client-side search + pagination (25/page) over Closed + Listed
+function renderIPOHistory(){
+  const data=(window._ipoHistData||[]);
+  const q=(window._ipoHistQ||'').toLowerCase();
+  const filtered=q?data.filter(i=>((i.name||'')+' '+(i.symbol||'')).toLowerCase().includes(q)):data;
+  const per=25,total=filtered.length,pages=Math.max(1,Math.ceil(total/per));
+  const page=Math.min(Math.max(1,window._ipoHistPage||1),pages);
+  window._ipoHistPage=page;
+  const slice=filtered.slice((page-1)*per,page*per);
+  const row=window._ipoHistRow;
+  const tbody=document.getElementById('ipo-history-table');
+  if(tbody){
+    tbody.innerHTML=slice.length?slice.map(row).join('')
+      :'<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No matching records</td></tr>';
+  }
+  const pager=document.getElementById('ipo-history-pager');
+  if(pager){
+    pager.innerHTML=`<span>${total} record${total===1?'':'s'} • Page ${page} of ${pages}</span>
+      <button onclick="ipoHistPage(-1)" ${page<=1?'disabled':''} style="background:#1f2937;color:${page<=1?'#4b5563':'#e5e7eb'};border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">‹ Prev</button>
+      <button onclick="ipoHistPage(1)" ${page>=pages?'disabled':''} style="background:#1f2937;color:${page>=pages?'#4b5563':'#e5e7eb'};border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Next ›</button>`;
+  }
+}
+function ipoHistPage(d){window._ipoHistPage=(window._ipoHistPage||1)+d;renderIPOHistory();}
+function ipoHistSearch(v){window._ipoHistQ=v;window._ipoHistPage=1;renderIPOHistory();}
 
 // ─── IPO Detail View ───────────────────────────────────────────────────────────
 function showIPODetails(symbol){
@@ -7012,22 +7081,26 @@ function showIPODetails(symbol){
       </div>
       <div class="card-sm">
         <div class="stat-label">Issue Size</div>
-        <div class="stat-value-sm">₹${(ipo.issue_size||0).toFixed(0)} Cr</div>
+        <div class="stat-value-sm">${ipo.issue_size!=null?'₹'+ipo.issue_size.toFixed(0)+' Cr':'N/A'}</div>
       </div>
       <div class="card-sm">
-        <div class="stat-label">Fresh Issue</div>
-        <div class="stat-value-sm">₹${(ipo.fresh_issue||0).toFixed(0)} Cr</div>
+        <div class="stat-label">Lot Size</div>
+        <div class="stat-value-sm">${ipo.lot_size!=null?ipo.lot_size:'N/A'}</div>
       </div>
       <div class="card-sm">
-        <div class="stat-label">OFS</div>
-        <div class="stat-value-sm">₹${(ipo.offer_for_sale||0).toFixed(0)} Cr</div>
+        <div class="stat-label">Min Investment</div>
+        <div class="stat-value-sm">${ipo.min_investment!=null?'₹'+Number(ipo.min_investment).toLocaleString('en-IN'):'N/A'}</div>
+      </div>
+      <div class="card-sm">
+        <div class="stat-label">Verified</div>
+        <div class="stat-value-sm" style="color:${ipo.verified===true?'#22c55e':'#f59e0b'}">${ipo.verified===true?'VERIFIED':'UNVERIFIED'}</div>
       </div>
     </div>
-    
+
     <div class="grid grid-cols-3 gap-4 mb-4">
       <div class="card-sm">
         <div class="stat-label">IPO Score</div>
-        <div class="stat-value-sm" style="color:${scoreColor}">${ipo.score_display||ipo.score.toFixed(1)}${ipo.data_quality!=='LIMITED'?'/100':''}</div>
+        <div class="stat-value-sm" style="color:${ipo.data_quality==='LIMITED'?'#9ca3af':scoreColor}">${ipo.data_quality==='LIMITED'?'NOT ASSESSED':(ipo.score_display||ipo.score.toFixed(1))+'/100'}</div>
       </div>
       <div class="card-sm">
         <div class="stat-label">Risk Level</div>
@@ -7042,12 +7115,7 @@ function showIPODetails(symbol){
     <div class="card mb-4">
       <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:8px">Score Breakdown</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">
-        <div><span style="color:#6b7280">Financial:</span> ${ipo.financial_score.toFixed(1)}</div>
-        <div><span style="color:#6b7280">Valuation:</span> ${ipo.valuation_score.toFixed(1)}</div>
-        <div><span style="color:#6b7280">Structure:</span> ${ipo.structure_score.toFixed(1)}</div>
-        <div><span style="color:#6b7280">Subscription:</span> ${ipo.subscription_score.toFixed(1)}</div>
-        <div><span style="color:#6b7280">Business:</span> ${ipo.business_score.toFixed(1)}</div>
-        <div><span style="color:#6b7280">Market:</span> ${ipo.market_score.toFixed(1)}</div>
+        ${['financial','valuation','structure','subscription','business','market'].map(k=>`<div><span style="color:#6b7280">${k[0].toUpperCase()+k.slice(1)}:</span> ${ipo[k+'_score']!=null?ipo[k+'_score'].toFixed(1):'N/A'}</div>`).join('')}
       </div>
     </div>
     
@@ -9270,6 +9338,9 @@ def api_ipo_data():
                 'issue_size': ipo.issue_size,
                 'fresh_issue': ipo.fresh_issue,
                 'offer_for_sale': ipo.offer_for_sale,
+                'lot_size': getattr(ipo, 'lot_size', None),
+                'min_investment': getattr(ipo, 'min_investment', None),
+                'verified': bool(getattr(ipo, 'verified', False)),
                 'open_date': ipo.open_date,
                 'close_date': ipo.close_date,
                 'listing_date': ipo.listing_date,

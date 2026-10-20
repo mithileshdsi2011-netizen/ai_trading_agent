@@ -84,17 +84,22 @@ class IPO:
     # Financials
     financials: Optional[IPOFinancials] = None
     
+    # Lot / investment
+    lot_size: Optional[int] = None  # Shares per lot, when the source provides it
+    min_investment: Optional[float] = None  # Minimum application amount (₹)
+
     # Subscription
     subscription: Optional[IPOSubscription] = None
-    
+
     # Additional info
     promoter_holding: Optional[float] = None  # Promoter holding percentage post-IPO
     use_of_proceeds: Optional[str] = None  # Brief description of use of proceeds
     business_description: Optional[str] = None  # Brief business description
-    
+
     # Metadata
     is_demo_data: bool = False  # Flag to indicate demo data
     data_source: Optional[str] = None  # Source of data
+    verified: bool = False  # True only when core fields came from the authoritative source
     
     @property
     def is_equity(self) -> bool:
