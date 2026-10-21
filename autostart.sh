@@ -93,21 +93,20 @@ fi
 
 echo "$(date '+%H:%M:%S')  Token valid — starting services" >> "$LOG"
 
-# ── Start dashboard ───────────────────────────────────────────
-"$PYTHON" "$PROJ/dashboard.py" >> "$PROJ/logs/dashboard.log" 2>&1 &
-DASH_PID=$!
-echo $DASH_PID > "$PROJ/data/dash.pid"
-sleep 2
-echo "$(date '+%H:%M:%S')  Dashboard started (PID $DASH_PID)" >> "$LOG"
+# ── Start the supervised stack via start_trading.sh ───────────
+# Delegating to start_trading.sh keeps ONE lifecycle: watchdog
+# supervision + .start_trading.lock single-instance protection.
+# A stale lock can survive a killed master script — clear it only
+# when no trading process is actually running.
+if ! pgrep -f "trading_orchestrator\.py|dashboard\.py" >/dev/null 2>&1; then
+    rmdir "$PROJ/.start_trading.lock" 2>/dev/null || true
+fi
 
-# ── Start trading bot ─────────────────────────────────────────
-"$PYTHON" "$PROJ/src/trading_orchestrator.py" scheduled 15 >> "$PROJ/logs/trading.log" 2>&1 &
-BOT_PID=$!
-echo $BOT_PID > "$PROJ/data/bot.pid"
-sleep 2
+nohup bash "$PROJ/start_trading.sh" >> "$LOG" 2>&1 &
+sleep 8
 
-if kill -0 $BOT_PID 2>/dev/null; then
-    echo "$(date '+%H:%M:%S')  Bot started (PID $BOT_PID)" >> "$LOG"
+if pgrep -f "trading_orchestrator\.py" >/dev/null 2>&1; then
+    echo "$(date '+%H:%M:%S')  Supervised stack started (orchestrator + watchdogs up)" >> "$LOG"
     osascript -e 'display notification "Dashboard: http://localhost:5001 | Logs: logs/trading.log" with title "✅ AI Trading Agent Started"' 2>/dev/null || true
 else
     echo "$(date '+%H:%M:%S')  ERROR: Bot failed to start" >> "$LOG"
@@ -116,4 +115,3 @@ else
 fi
 
 echo "$(date '+%H:%M:%S')  All systems running" >> "$LOG"
-wait
