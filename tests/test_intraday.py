@@ -1178,6 +1178,41 @@ class TestPendingKeyRelease:
         assert "Duplicate" in reason
 
 
+class TestQuantitySerialization:
+    """Dashboard Qty column: quantity must flow verbatim from the
+    position/trade records into get_status() — never recomputed."""
+
+    def test_position_dict_includes_quantity(self):
+        from intraday.engine import IntradayEngine
+        pos = make_position(quantity=44)
+        d = IntradayEngine._position_to_dict(pos)
+        assert d['quantity'] == 44
+
+    def test_history_includes_executed_quantity(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        trade = IntradayTrade(
+            id="t1", symbol="ONGC", direction=SignalDirection.LONG,
+            entry_price=225.49, exit_price=230.0, quantity=44,
+            entry_time=datetime.now(), exit_time=datetime.now(),
+            exit_reason="TARGET_HIT", gross_pnl=198.0, charges=4.0,
+            net_pnl=194.0, pnl_pct=2.0, stop_loss=220.0, target=230.0,
+            risk_reward=2.0, signal_score=80.0,
+            signal_classification=SignalClassification.GOOD_SETUP,
+            strategy="ORB", is_paper=True)
+        engine.trade_manager.get_today_trades = MagicMock(return_value=[trade])
+        hist = engine._history()
+        assert hist[0]['quantity'] == 44
+
+    def test_get_status_positions_carry_quantity(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        pos = make_position(quantity=44)
+        engine.paper_executor.get_open_positions = MagicMock(return_value=[pos])
+        status = engine.get_status()
+        assert status['positions'][0]['quantity'] == 44
+
+
 class TestDataFreshness:
     """Fix #3: last-data timestamp only advances on real fetch success."""
 

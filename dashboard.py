@@ -3568,6 +3568,7 @@ tr:last-child td{border:none}
           <tr style="background:#374151">
             <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Side</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Qty</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">Entry</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">Current</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">SL</th>
@@ -3576,7 +3577,7 @@ tr:last-child td{border:none}
           </tr>
         </thead>
         <tbody id="intraday-positions-body">
-          <tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>
+          <tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>
         </tbody>
       </table>
     </div>
@@ -3590,6 +3591,7 @@ tr:last-child td{border:none}
         <thead>
           <tr style="background:#374151">
             <th style="padding:8px;text-align:left;color:#f9fafb">Symbol</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Qty</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">Entry</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">Exit</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">P&L</th>
@@ -3598,7 +3600,7 @@ tr:last-child td{border:none}
           </tr>
         </thead>
         <tbody id="intraday-history-body">
-          <tr><td colspan="6" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>
+          <tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>
         </tbody>
       </table>
     </div>
@@ -6966,6 +6968,7 @@ async function loadIntradayData(){
         return `<tr style="border-bottom:1px solid #1f293744">
           <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${pos.symbol}</td>
           <td style="padding:10px 8px;color:${dirColor};font-weight:600">${pos.direction}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">${pos.quantity ?? '—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.entry_price.toFixed(2)}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.current_price.toFixed(2)}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.stop_loss.toFixed(2)}</td>
@@ -6974,7 +6977,7 @@ async function loadIntradayData(){
         </tr>`;
       }).join('');
     }else if(posBody){
-      posBody.innerHTML='<tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>';
+      posBody.innerHTML='<tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">No open positions</td></tr>';
     }
     
     // Render history
@@ -6983,6 +6986,7 @@ async function loadIntradayData(){
       histBody.innerHTML=d.history.map(trade=>{
         return `<tr style="border-bottom:1px solid #1f293744">
           <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">${trade.quantity ?? '—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.entry_price.toFixed(2)}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.exit_price.toFixed(2)}</td>
           <td style="padding:10px 8px;text-align:right;color:${pnlClass(trade.net_pnl)}">${pnlStr(trade.net_pnl)}</td>
@@ -6991,7 +6995,7 @@ async function loadIntradayData(){
         </tr>`;
       }).join('');
     }else if(histBody){
-      histBody.innerHTML='<tr><td colspan="6" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>';
+      histBody.innerHTML='<tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>';
     }
     
   }catch(e){
