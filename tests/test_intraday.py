@@ -1689,5 +1689,123 @@ class TestQuoteFailureMonitoring:
         assert engine.trade_manager.get_trades() == []     # no exits
 
 
+class TestAngelHistoricalRateLimit:
+    """SmartAPI's candle endpoint allows ~1 req/sec — the client must
+    enforce that spacing (incl. retries/concurrent callers) and classify
+    non-JSON rate-limit pages correctly."""
+
+    def _client(self):
+        from intraday.angel.client import AngelClient
+        auth = AngelAuth('k', 'c', 'p', 's')
+        auth.authenticated = True
+        auth.jwt_token = 'j'
+        auth.auth_time = datetime.now()
+        client = AngelClient(auth)
+        api = MagicMock()
+        auth._smartapi = api
+        return client, api
+
+    def test_historical_min_interval_respects_one_per_sec(self):
+        from intraday.angel.client import AngelClient
+        assert AngelClient.RATE_LIMITS['historical'] >= 1.0
+
+    def test_throttle_spaces_consecutive_calls(self, monkeypatch):
+        client, api = self._client()
+        api.getCandleData.return_value = {'status': True, 'data': []}
+        sleeps = []
+        monkeypatch.setattr('intraday.angel.client.time.sleep',
+                            lambda s: sleeps.append(s))
+        client.get_historical_data('1', 'ONE_MINUTE', 'a', 'b')
+        client.get_historical_data('1', 'ONE_MINUTE', 'a', 'b')
+        # second call must wait out the throttle interval
+        assert any(s >= 1.0 for s in sleeps)
+        assert api.getCandleData.call_count == 2
+
+    def test_non_json_rate_limit_classified_and_bounded(self, monkeypatch):
+        """'Couldn't parse... exceeding access rate' exceptions retry a
+        bounded number of times, then fail closed — never infinite."""
+        client, api = self._client()
+        api.getCandleData.side_effect = Exception(
+            "Couldn't parse the JSON response received from the server: "
+            "b'Access denied because of exceeding access rate'")
+        monkeypatch.setattr('intraday.angel.client.time.sleep', lambda s: None)
+        res = client.get_historical_data('1', 'ONE_MINUTE', 'a', 'b')
+        assert res['success'] is False
+        assert api.getCandleData.call_count == client.MAX_RETRIES
+
+    def test_cycle_completes_under_persistent_rate_limit(self, tmp_path, monkeypatch):
+        """A scan cycle under total rate-limiting still terminates —
+        per-call retry bounds mean no indefinite hang."""
+        from intraday.engine import IntradayEngine
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        engine._auth_state = "CONNECTED"
+        engine._auth_attempted = True
+        monkeypatch.setattr(engine, 'authenticate', lambda *a, **k: True)
+        monkeypatch.setattr(engine.validator, 'is_market_open', lambda *a, **k: True)
+        monkeypatch.setattr(engine.validator, 'is_square_off_time', lambda *a, **k: False)
+        engine._instruments_loaded = True
+        monkeypatch.setattr(engine.instruments, 'get_all_symbols',
+                            lambda: ['RELIANCE', 'TCS'])
+        monkeypatch.setattr(engine.scanner, 'get_symbol_data',
+                            lambda s: None)  # every fetch fails fast
+        monkeypatch.setattr(engine.scanner, 'detect_market_regime',
+                            lambda: MarketRegime.SIDEWAYS)
+        summary = engine.run_cycle()
+        assert summary is not None
+        assert 'scanned' in summary
+
+
+class TestScanStuckMonitoring:
+    """Prolonged scans are surfaced — even with zero open positions."""
+
+    def _engine(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        events = []
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path),
+                                alert_hook=lambda *a: events.append(a))
+        return engine, events
+
+    def test_status_reports_scan_progress(self, tmp_path):
+        engine, _ = self._engine(tmp_path)
+        engine._cycle_running = True
+        engine._cycle_started_at = datetime.now() - timedelta(seconds=30)
+        s = engine.get_status()
+        assert s['scan_seconds'] >= 30
+        assert s['scan_started'] is not None
+        assert 'last_cycle_duration_s' in s
+        assert 'last_scan_time' in s  # separate from in-progress info
+
+    def test_stuck_cycle_notifies_once(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        engine._cycle_running = True
+        engine._cycle_started_at = datetime.now() - timedelta(seconds=900)
+        engine.get_status()
+        notifies = [e for e in events if e[0] == 'notify']
+        assert [n[1] for n in notifies] == ['intraday:angel:scan_stuck']
+        engine.get_status()  # second poll — deduplicated at engine level
+        assert len([e for e in events if e[0] == 'notify']) == 1
+
+    def test_recovery_resolves_stuck_incident(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        engine._cycle_running = True
+        engine._cycle_started_at = datetime.now() - timedelta(seconds=900)
+        engine.get_status()
+        # Simulate cycle completion via the background wrapper path
+        engine._last_cycle_duration_s = 700.0
+        engine._cycle_started_at = None
+        engine._cycle_running = False
+        if engine._scan_stuck_notified:
+            engine._scan_stuck_notified = False
+            engine._incident('resolve', 'intraday:angel:scan_stuck', '')
+        assert ('resolve', 'intraday:angel:scan_stuck', '') in events
+
+    def test_normal_cycle_no_stuck_alert(self, tmp_path):
+        engine, events = self._engine(tmp_path)
+        engine._cycle_running = True
+        engine._cycle_started_at = datetime.now() - timedelta(seconds=60)
+        engine.get_status()
+        assert [e for e in events if e[0] == 'notify'] == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

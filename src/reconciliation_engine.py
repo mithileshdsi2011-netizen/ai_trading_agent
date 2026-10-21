@@ -40,49 +40,83 @@ def _safe_float(value) -> float:
         return 0.0
 
 
-def _kite_orders(broker) -> List[Dict[str, Any]]:
+_AUTH_ERR_MARKERS = ('api_key', 'access_token', 'invalid token',
+                     'token expired', 'unauthorized', 'permission')
+
+
+def _is_auth_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return any(m in s for m in _AUTH_ERR_MARKERS)
+
+
+def _reload_broker_token(broker) -> bool:
+    """Reload kite_token.json and apply it to the broker's KiteConnect.
+
+    Self-heals a stale in-memory session after an external
+    re-authentication (dashboard 'Re-authenticate Kite'), without
+    requiring a process restart."""
+    try:
+        with open(data_path('kite_token.json')) as f:
+            token = json.load(f).get('access_token', '')
+        if token and getattr(broker, 'kite', None):
+            broker.kite.set_access_token(token)
+            logger.info("Kite token reloaded from disk into broker session")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _kite_call(broker, name: str, fn, errors: Optional[List[str]] = None):
+    """One Kite fetch with a single token-reload retry on auth errors.
+
+    Returns None on failure and records the error so reconciliation can
+    mark itself unhealthy — a failed fetch must never look like empty
+    broker state (which would vacuously pass health checks)."""
+    try:
+        return fn()
+    except Exception as e:
+        if _is_auth_error(e) and _reload_broker_token(broker):
+            try:
+                return fn()
+            except Exception as e2:
+                e = e2
+        logger.error(f"Could not fetch Kite {name}: {e}")
+        if errors is not None:
+            errors.append(f'{name}: {e}')
+        return None
+
+
+def _kite_orders(broker, errors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Return a normalized list of Kite/broker orders."""
     if broker.paper_trading:
         return list(broker.paper_portfolio.get('orders', []))
     if not broker.kite:
         return []
-    try:
-        return broker.kite.orders()
-    except Exception as e:
-        logger.error(f"Could not fetch Kite orders: {e}")
-        return []
+    return _kite_call(broker, 'orders', broker.kite.orders, errors) or []
 
 
-def _kite_positions(broker) -> List[Dict[str, Any]]:
+def _kite_positions(broker, errors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Return a normalized list of Kite/broker positions."""
     if broker.paper_trading:
         return broker._get_paper_positions()
     if not broker.kite:
         return []
-    try:
-        # Include day and net positions
-        data = broker.kite.positions()
-        positions = []
-        for key in ('day', 'net'):
-            for p in data.get(key, []):
-                if p.get('quantity', 0) > 0:
-                    positions.append(p)
-        return positions
-    except Exception as e:
-        logger.error(f"Could not fetch Kite positions: {e}")
+    data = _kite_call(broker, 'positions', broker.kite.positions, errors)
+    if data is None:
         return []
+    return [p for key in ('day', 'net') for p in data.get(key, [])
+            if p.get('quantity', 0) > 0]
 
 
-def _kite_holdings(broker) -> List[Dict[str, Any]]:
+def _kite_holdings(broker, errors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Return a normalized list of Kite holdings."""
     if broker.paper_trading:
         return broker._get_paper_positions()
     if not broker.kite:
         return []
-    try:
-        data = broker.kite.holdings()
-    except Exception as e:
-        logger.error(f"Could not fetch Kite holdings: {e}")
+    data = _kite_call(broker, 'holdings', broker.kite.holdings, errors)
+    if data is None:
         return []
 
     # CNC T1 delivery: 'quantity' = settled, 't1_quantity' = not yet settled.
@@ -120,6 +154,9 @@ class ReconciliationEngine:
         self._last_status: Optional[Dict[str, Any]] = None
         self._last_healthy: bool = True
         self._lock = threading.Lock()
+        # Broker-fetch failures from the current reconcile run — populated
+        # in reconcile_all; consulted by the healthy gate.
+        self._fetch_errors: List[str] = []
         # Track completed Kite orders that are not yet reflected in the journal
         self._missing_journal_retries: Dict[str, Dict[str, Any]] = {}
 
@@ -179,6 +216,10 @@ class ReconciliationEngine:
             raise RuntimeError("No SQLite store available for reconciliation")
 
         try:
+            # Broker-fetch failures are collected here — a failed Kite call
+            # must make reconciliation unhealthy (empty results could
+            # otherwise pass vacuously and unblock LIVE orders).
+            self._fetch_errors: List[str] = []
             if self.broker:
                 mismatches.extend(self._reconcile_holdings())
                 mismatches.extend(self._reconcile_open_positions())
@@ -193,7 +234,7 @@ class ReconciliationEngine:
             duration_ms = int((time.time() - start) * 1000)
             has_unrepaired = any(m.repair == 'detected' for m in mismatches)
             has_source = (self.broker is not None or self.market_data_fetcher is not None)
-            healthy = not has_unrepaired and has_source
+            healthy = not has_unrepaired and has_source and not self._fetch_errors
 
             status = {
                 'healthy': healthy,
@@ -205,6 +246,8 @@ class ReconciliationEngine:
                 'last_repair': mismatches[-1].type_ if mismatches and mismatches[-1].repair == 'repaired' else None,
                 'details': [asdict(m) for m in mismatches]
             }
+            if self._fetch_errors:
+                status['broker_fetch_errors'] = self._fetch_errors
 
             self._store.save_broker_state('reconciliation', status)
             with self._lock:
@@ -287,7 +330,7 @@ class ReconciliationEngine:
         if not self.broker:
             return mismatches
 
-        kite_holdings = _kite_holdings(self.broker)
+        kite_holdings = _kite_holdings(self.broker, self._fetch_errors)
         sqlite_positions = {p.get('symbol'): p for p in self._store.load_positions()}
 
         for h in kite_holdings:
@@ -363,7 +406,7 @@ class ReconciliationEngine:
         if not self.broker:
             return mismatches
 
-        kite_positions = _kite_positions(self.broker)
+        kite_positions = _kite_positions(self.broker, self._fetch_errors)
         sqlite_positions = {p.get('symbol'): p for p in self._store.load_positions(status='OPEN')}
 
         kite_by_sym = {p.get('tradingsymbol', p.get('symbol')): p for p in kite_positions if p.get('quantity', 0) > 0}
@@ -411,7 +454,7 @@ class ReconciliationEngine:
         # Do not close an open position just because it is absent from Kite
         # positions (settlement delays can make a CNC position briefly disappear).
         # Close only if we actually see a completed SELL order for the symbol.
-        kite_orders = _kite_orders(self.broker) if self.broker else []
+        kite_orders = _kite_orders(self.broker, self._fetch_errors) if self.broker else []
         completed_sell_symbols = {
             ko.get('tradingsymbol', ko.get('symbol'))
             for ko in kite_orders
@@ -472,7 +515,7 @@ class ReconciliationEngine:
         if not self.broker:
             return mismatches
 
-        kite_orders = _kite_orders(self.broker)
+        kite_orders = _kite_orders(self.broker, self._fetch_errors)
         sqlite_orders = {o.get('order_id'): o for o in self._store.get_orders()}
 
         for ko in kite_orders:
@@ -511,7 +554,7 @@ class ReconciliationEngine:
 
         state = self._store.load_daily_state()
         pending = state.get('pending_sells', {})
-        kite_orders = _kite_orders(self.broker)
+        kite_orders = _kite_orders(self.broker, self._fetch_errors)
         open_sell_ids = {o.get('order_id') for o in kite_orders if o.get('transaction_type') == 'SELL' and o.get('status') in ('OPEN', 'PENDING', 'AMO', 'UPDATE_PENDING')}
 
         # Remove pending sells where the actual order is completed/rejected/cancelled
@@ -595,7 +638,7 @@ class ReconciliationEngine:
         # order-execution / journaling bugs. Instead, we retry for several
         # reconciliation cycles and raise a CRITICAL alert so the issue is
         # surfaced and fixed at the source.
-        kite_orders = _kite_orders(self.broker)
+        kite_orders = _kite_orders(self.broker, self._fetch_errors)
         current_missing: set = set()
         for ko in kite_orders:
             if ko.get('status') != 'COMPLETE':

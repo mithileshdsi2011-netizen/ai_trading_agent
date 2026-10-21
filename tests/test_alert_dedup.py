@@ -268,6 +268,33 @@ def test_no_real_smtp_anywhere(engine, email):
     assert isinstance(smtplib.SMTP, type(smtplib.SMTP))  # mocked class, not real
 
 
+def test_smtp_delivery_bounded_by_timeout(monkeypatch):
+    """SMTP must carry a socket timeout — an untimed SMTP call once froze
+    run_once mid-alert and silently killed the trading scheduler."""
+    from email_reports import EmailReporter
+    r = EmailReporter()
+    captured = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            captured['timeout'] = timeout
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def starttls(self):
+            pass
+        def login(self, u, p):
+            pass
+        def send_message(self, m):
+            pass
+
+    monkeypatch.setattr('email_reports.smtplib.SMTP', FakeSMTP)
+    r._deliver('subject', 'body')
+    assert captured['timeout'] is not None
+    assert 5 <= captured['timeout'] <= 60
+
+
 def test_prune_removes_only_old_resolved(store):
     import datetime as _dt
     store.upsert_alert_incident('old:resolved', 'X', 'WARNING')

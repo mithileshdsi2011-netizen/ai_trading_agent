@@ -61,6 +61,12 @@ QUOTE_FAIL_ALERT_THRESHOLD = 3
 QUOTE_INCIDENT_KEY = 'intraday:angel:quote_refresh_failure'
 EOD_QUOTE_INCIDENT_KEY = 'intraday:angel:eod_quote_failure'
 
+# A scan cycle running longer than this is surfaced as a stuck-scan
+# incident (deduplicated) — rate-limit storms can stretch cycles far
+# beyond their normal duration even with zero open positions.
+SCAN_STUCK_ALERT_SECONDS = 600
+SCAN_STUCK_INCIDENT_KEY = 'intraday:angel:scan_stuck'
+
 
 def _production_incident(action: str, incident_key: str, detail: str) -> None:
     """Default incident sink — deduplicated email via the shared store.
@@ -133,6 +139,9 @@ class IntradayEngine:
         self._alert_hook = alert_hook
         self._quote_fail_streak = 0
         self._cycle_running = False
+        self._cycle_started_at: Optional[datetime] = None
+        self._last_cycle_duration_s: Optional[float] = None
+        self._scan_stuck_notified = False
         self._auth_state = "AUTH PENDING" if self.credentials_configured() else "NOT CONFIGURED"
         self._auth_attempted = False
         self._auth_cooldown_until: Optional[datetime] = None
@@ -469,12 +478,19 @@ class IntradayEngine:
 
         def _bg():
             self._cycle_running = True
+            self._cycle_started_at = datetime.now()
             try:
                 self.run_cycle()
             except Exception as e:
                 logger.error(f"[INTRADAY] Background cycle error: {e}")
             finally:
+                self._last_cycle_duration_s = (
+                    datetime.now() - self._cycle_started_at).total_seconds()
+                self._cycle_started_at = None
                 self._cycle_running = False
+                if self._scan_stuck_notified:
+                    self._scan_stuck_notified = False
+                    self._incident('resolve', SCAN_STUCK_INCIDENT_KEY, '')
 
         threading.Thread(target=_bg, daemon=True, name="intraday-cycle").start()
 
@@ -552,6 +568,21 @@ class IntradayEngine:
         """Dashboard-facing engine status."""
         daily = self.risk_manager.get_daily_state()
         status = self.state_store.load_engine_status()
+
+        # Stuck-scan detection — fires once per episode, from the caller's
+        # thread, so it works even while the cycle itself is grinding.
+        scan_seconds = None
+        if self._cycle_running and self._cycle_started_at:
+            scan_seconds = (datetime.now() - self._cycle_started_at).total_seconds()
+            if scan_seconds >= SCAN_STUCK_ALERT_SECONDS and not self._scan_stuck_notified:
+                self._scan_stuck_notified = True
+                self._incident(
+                    'notify', SCAN_STUCK_INCIDENT_KEY,
+                    f"Scan cycle running {scan_seconds:.0f}s "
+                    f"(threshold {SCAN_STUCK_ALERT_SECONDS}s); last completed "
+                    f"scan {self._last_scan_time}. Likely rate-limit storm or "
+                    "stalled API calls.")
+
         return {
             'auth_status': self._auth_state if self.credentials_configured() else "NOT CONFIGURED",
             'auth_configured': self.credentials_configured() and self.auth.is_authenticated(),
@@ -574,6 +605,9 @@ class IntradayEngine:
             'metrics': self.metrics.calculate_metrics(self.trade_manager.get_trades()),
             'websocket': self.websocket.get_status(),
             'last_scan_time': status.get('last_scan_time'),
+            'scan_started': self._cycle_started_at.isoformat() if self._cycle_started_at else None,
+            'scan_seconds': scan_seconds,
+            'last_cycle_duration_s': self._last_cycle_duration_s,
         }
 
     def _static_ip_status(self) -> str:

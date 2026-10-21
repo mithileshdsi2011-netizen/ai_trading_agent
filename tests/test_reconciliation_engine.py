@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -308,6 +309,109 @@ class TestReconciliationEngine(unittest.TestCase):
         self.assertIsNotNone(self.store.get_broker_state('status'))
         self.assertIsNotNone(self.store.get_broker_state('reconciliation'))
         self.assertTrue(status['healthy'])
+
+
+class TestBrokerFetchSafety(unittest.TestCase):
+    """Auth-failure handling in broker fetches.
+
+    A failed Kite call must (a) self-heal by reloading the token file,
+    and (b) mark reconciliation unhealthy so the orchestrator's order
+    gate blocks new LIVE BUYs — an empty fetch must never pass as
+    empty broker state."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.store = TradingStore(self.db_path)
+        self._token_dir = tempfile.TemporaryDirectory()
+        self._token_path = os.path.join(self._token_dir.name, 'kite_token.json')
+        self._patcher = unittest.mock.patch(
+            'reconciliation_engine.data_path',
+            lambda name: os.path.join(self._token_dir.name, name))
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self._token_dir.cleanup()
+        try:
+            os.remove(self.db_path)
+        except Exception:
+            pass
+
+    def _write_token(self, token='FRESH_TOKEN'):
+        with open(self._token_path, 'w') as f:
+            json.dump({'access_token': token}, f)
+
+    def _live_broker(self):
+        b = FakeBroker()
+        b.paper_trading = False
+        b.kite = MagicMock()
+        return b
+
+    def test_auth_error_reloads_token_and_retries(self):
+        """First call rejected → token file reloaded → retry succeeds."""
+        from reconciliation_engine import _kite_holdings
+        broker = self._live_broker()
+        broker.kite.holdings.side_effect = [
+            Exception("Incorrect `api_key` or `access_token`."),
+            [{'symbol': 'X', 'quantity': 1, 't1_quantity': 0}],
+        ]
+        self._write_token('ROTATED_TOKEN')
+        errors = []
+        res = _kite_holdings(broker, errors)
+        self.assertEqual(len(res), 1)
+        broker.kite.set_access_token.assert_called_once_with('ROTATED_TOKEN')
+        self.assertEqual(errors, [])
+
+    def test_persistent_auth_failure_records_error(self):
+        """Reload doesn't help (stale file) → error recorded, empty list."""
+        from reconciliation_engine import _kite_holdings
+        broker = self._live_broker()
+        broker.kite.holdings.side_effect = Exception(
+            "Incorrect `api_key` or `access_token`.")
+        self._write_token('STILL_BAD')
+        errors = []
+        self.assertEqual(_kite_holdings(broker, errors), [])
+        self.assertEqual(len(errors), 1)
+
+    def test_non_auth_error_skips_reload(self):
+        """Network blips don't trigger token reload — different failure mode."""
+        from reconciliation_engine import _kite_orders
+        broker = self._live_broker()
+        broker.kite.orders.side_effect = ConnectionError("remote closed")
+        self._write_token()
+        errors = []
+        self.assertEqual(_kite_orders(broker, errors), [])
+        broker.kite.set_access_token.assert_not_called()
+        self.assertEqual(len(errors), 1)
+
+    def test_fetch_failures_make_reconciliation_unhealthy(self):
+        """Failed broker fetches → healthy=False → orchestrator blocks BUYs."""
+        broker = self._live_broker()
+        auth_err = Exception("Incorrect `api_key` or `access_token`.")
+        broker.kite.holdings.side_effect = auth_err
+        broker.kite.positions.side_effect = auth_err
+        broker.kite.orders.side_effect = auth_err
+        self._write_token('STILL_BAD')
+        engine = ReconciliationEngine(broker=broker, store=self.store)
+        status = engine.reconcile_all()
+        self.assertFalse(status['healthy'])
+        self.assertTrue(status.get('broker_fetch_errors'))
+
+    def test_successful_fetch_after_reload_restores_health(self):
+        """Token reload mid-reconcile recovers and stays healthy."""
+        broker = self._live_broker()
+        broker.kite.holdings.side_effect = [
+            Exception("Incorrect `api_key` or `access_token`."),
+            [],  # succeeds after reload
+        ]
+        broker.kite.positions.return_value = {'day': [], 'net': []}
+        broker.kite.orders.return_value = []
+        self._write_token('ROTATED_TOKEN')
+        engine = ReconciliationEngine(broker=broker, store=self.store)
+        status = engine.reconcile_all()
+        self.assertTrue(status['healthy'])
+        broker.kite.set_access_token.assert_called_with('ROTATED_TOKEN')
 
 
 if __name__ == '__main__':

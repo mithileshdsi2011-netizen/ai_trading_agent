@@ -72,7 +72,9 @@ class EmailReporter:
             msg["Subject"] = subject
             msg.attach(MIMEText(body, "html"))
 
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+            # timeout is mandatory: a stalled SMTP socket once froze
+            # run_once mid-alert and silently killed the trading scheduler.
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=15) as server:
                 server.starttls()
                 server.login(self.username, self.password)
                 server.send_message(msg)

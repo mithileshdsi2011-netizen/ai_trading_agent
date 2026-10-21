@@ -29,7 +29,7 @@ class AngelClient:
     RATE_LIMITS = {
         'quote': 0.15,       # official 10/s — we stay well below
         'ltp': 0.15,
-        'historical': 0.35,  # candle API is heavier
+        'historical': 1.1,   # SmartAPI candle API allows ~1 req/sec
         'account': 1.1,      # profile/positions/order book ~1/s
     }
     MAX_RETRIES = 3
@@ -106,7 +106,13 @@ class AngelClient:
                     self.auth.mark_session_invalid()
                     return {'status': False, 'message': f'{group} call failed: session expired'}
                 delay = self.RETRY_BASE_SECONDS * (2 ** (attempt - 1))
-                logger.error(f"[ANGEL CLIENT] {group} call error (attempt {attempt}): {e}")
+                # Non-JSON rate-limit pages arrive as SDK parse exceptions
+                # ("Couldn't parse the JSON response... exceeding access rate")
+                # — classify them so throttling is visible, not generic errors.
+                if 'access rate' in emsg or 'rate limit' in emsg or 'too many' in emsg:
+                    logger.warning(f"[ANGEL CLIENT] Rate limited ({group}), retry {attempt}/{self.MAX_RETRIES} in {delay}s")
+                else:
+                    logger.error(f"[ANGEL CLIENT] {group} call error (attempt {attempt}): {e}")
                 if attempt < self.MAX_RETRIES:
                     time.sleep(delay)
         return {'status': False, 'message': f'{group} call failed after {self.MAX_RETRIES} attempts'}
