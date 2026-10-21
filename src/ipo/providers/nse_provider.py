@@ -27,7 +27,7 @@ from typing import List, Optional, Dict, Any
 import requests
 
 from .base import IPODataProvider
-from ..models import IPO, IPOStatus, IPOFinancials, IPOSubscription
+from ..models import IPO, IPOStatus, IPOFinancials, IPOSubscription, MarketSentiment
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,11 @@ class NseIPODataProvider(IPODataProvider):
         self._lock = threading.Lock()
         self._serving_stale = False   # True when returning expired cache after a failed refresh
         self.last_success_at: Optional[float] = None  # last successful NSE fetch (epoch)
+        # Subscription trend: {symbol: [(epoch, overall_multiple)]}, in-memory,
+        # one point per successful refresh cycle (~every cache TTL).
+        self._sub_history: Dict[str, List] = {}
+        self._sentiment_cache: Dict[str, Any] = {}
+        self._sentiment_expiry: float = 0.0
 
     # ── transport ───────────────────────────────────────────────────
     def _bootstrap_cookies(self):
@@ -382,6 +387,12 @@ class NseIPODataProvider(IPODataProvider):
                     setattr(sub, k, v)
             ipo.subscription = sub
 
+        # 'Objects of the Issue' — official use-of-proceeds prose
+        if ipo.use_of_proceeds is None:
+            objects = kv.get('Objects of the Issue')
+            if objects:
+                ipo.use_of_proceeds = str(objects).strip()[:500]
+
         return ipo
 
     @staticmethod
@@ -439,7 +450,62 @@ class NseIPODataProvider(IPODataProvider):
                     self._enrich_from_detail(ipo)
                 except Exception as e:
                     logger.warning(f"IPO detail enrichment failed for {ipo.symbol}: {e}")
+        self._record_subscription_snapshots(ipos)
         return ipos
+
+    def _record_subscription_snapshots(self, ipos: List[IPO]):
+        """Snapshot overall subscription per symbol once per refresh cycle
+        so the dashboard can show a demand trend (rising/flat/falling).
+        In-memory only — history resets on process restart."""
+        now = time.time()
+        for ipo in ipos:
+            overall = ipo.subscription.overall if ipo.subscription else None
+            if ipo.symbol and overall is not None:
+                hist = self._sub_history.setdefault(ipo.symbol, [])
+                hist.append((now, overall))
+                del hist[:-50]
+                ipo.subscription_trend = self._trend_of(hist)
+                ipo.subscription_as_of = datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S')
+
+    @staticmethod
+    def _trend_of(hist: List) -> Optional[str]:
+        if len(hist) < 2:
+            return None
+        first, last = hist[0][1], hist[-1][1]
+        if first <= 0:
+            return 'rising' if last > 0 else None
+        if last > first * 1.05:
+            return 'rising'
+        if last < first * 0.95:
+            return 'falling'
+        return 'flat'
+
+    # ── market sentiment (official NSE index data) ──────────────────
+    def get_market_sentiment(self) -> Optional[MarketSentiment]:
+        """NIFTY 50 + INDIA VIX from /api/allIndices. Separate 5-min cache;
+        a sentiment failure never poisons the IPO-data stale flag and
+        returns None instead of raising."""
+        now = time.time()
+        if self._sentiment_cache and now < self._sentiment_expiry:
+            return self._sentiment_cache.get('value')
+        try:
+            data = self._get_json("/api/allIndices")
+            rows = data.get('data', data) if isinstance(data, dict) else data
+            sent = MarketSentiment(
+                as_of=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            for row in (rows or []):
+                idx = str(row.get('index', '')).upper()
+                if idx == 'NIFTY 50':
+                    sent.nifty_last = self._num(row.get('last'))
+                    sent.nifty_change_pct = self._num(row.get('percentChange'))
+                elif idx == 'INDIA VIX':
+                    sent.india_vix = self._num(row.get('last'))
+            self._sentiment_cache = {'value': sent}
+            self._sentiment_expiry = now + 300
+            return sent
+        except Exception as e:
+            logger.warning(f"NSE market sentiment unavailable: {e}")
+            return self._sentiment_cache.get('value')  # last-known-good or None
 
     def get_open_ipos(self) -> List[IPO]:
         """Currently open equity/SME issues (DEBT/NCD/ZCZP excluded)."""

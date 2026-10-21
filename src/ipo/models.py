@@ -49,6 +49,21 @@ class IPOFinancials:
     pe_ratio: Optional[float] = None  # P/E ratio
     pb_ratio: Optional[float] = None  # Price-to-book ratio
     peer_pe: Optional[float] = None  # Peer P/E ratio for comparison
+    eps: Optional[float] = None  # Earnings per share (₹) — enables implied P/E
+    roe: Optional[float] = None  # Return on equity %
+    roce: Optional[float] = None  # Return on capital employed %
+    debt_to_equity: Optional[float] = None  # Debt-to-equity ratio
+
+
+@dataclass
+class MarketSentiment:
+    """Broad market backdrop for IPO assessment — from official NSE index
+    data only. GMP is intentionally absent: no reliable official source
+    exists, so it is never fetched or invented."""
+    nifty_last: Optional[float] = None      # NIFTY 50 level
+    nifty_change_pct: Optional[float] = None  # NIFTY 50 daily change %
+    india_vix: Optional[float] = None       # INDIA VIX level
+    as_of: Optional[str] = None             # fetch timestamp
 
 
 @dataclass
@@ -90,6 +105,8 @@ class IPO:
 
     # Subscription
     subscription: Optional[IPOSubscription] = None
+    subscription_trend: Optional[str] = None   # rising | flat | falling (provider snapshots)
+    subscription_as_of: Optional[str] = None   # timestamp of latest observed multiple
 
     # Additional info
     promoter_holding: Optional[float] = None  # Promoter holding percentage post-IPO

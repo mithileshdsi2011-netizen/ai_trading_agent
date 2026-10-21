@@ -6857,7 +6857,7 @@ async function loadIPOData(){
     
     // Store IPO details for detail view + source freshness metadata
     window._ipoDetails=d.ipo_details||{};
-    window._ipoMeta={source:d.data_source, fetchedAt:d.data_fetched_at, stale:!!d.stale};
+    window._ipoMeta={source:d.data_source, fetchedAt:d.data_fetched_at, stale:!!d.stale, sentiment:d.market_sentiment||null};
     
   }catch(e){
     console.error('IPO data load error:',e);
@@ -7054,6 +7054,76 @@ function ipoHistPage(d){window._ipoHistPage=(window._ipoHistPage||1)+d;renderIPO
 function ipoHistSearch(v){window._ipoHistQ=v;window._ipoHistPage=1;renderIPOHistory();}
 
 // ─── IPO Detail View ───────────────────────────────────────────────────────────
+// Two-horizon investment analysis block (evidence-based, neutral styling
+// for incomplete analysis — CONSIDER APPLYING is green only at MED+ confidence)
+function ipoDecisionBlock(ipo){
+  const dec=ipo.decision;
+  if(!dec)return'';
+  const conf=dec.confidence||'LOW';
+  const recColor=r=>r==='CONSIDER APPLYING'?(conf==='LOW'?'#9ca3af':'#22c55e')
+    :r==='WAIT'?'#f59e0b':r==='AVOID'?'#ef4444':'#9ca3af';
+  const riskColor=dec.risk_level==='LOW'?'#22c55e':dec.risk_level==='MODERATE'?'#f59e0b':dec.risk_level==='HIGH'?'#ef4444':'#9ca3af';
+  const chip=(l,v,c)=>`<div style="text-align:center;padding:10px 6px;background:#111827;border-radius:6px">
+      <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em">${l}</div>
+      <div style="font-size:14px;font-weight:700;color:${c};margin-top:4px">${v}</div></div>`;
+  const score=v=>v!=null?v.toFixed(1)+'/100':'N/A';
+  const comp=dec.components||{};
+  const wts=dec.weights?dec.weights.listing:{};
+  const compRows=Object.keys(comp).map(k=>{
+    const v=comp[k];
+    return `<div><span style="color:#6b7280">${k[0].toUpperCase()+k.slice(1)}
+      ${wts[k]!=null?`(${(wts[k]*100).toFixed(0)}%)`:''}:</span>
+      <span style="color:${v!=null?'#f9fafb':'#6b7280'}">${v!=null?v.toFixed(0)+'/100':'— no data'}</span></div>`;
+  }).join('');
+  const sent=window._ipoMeta&&window._ipoMeta.sentiment;
+  const sentTxt=sent?`NIFTY 50: ${sent.nifty_last!=null?Number(sent.nifty_last).toLocaleString('en-IN'):'—'}
+    (${sent.nifty_change_pct!=null?(sent.nifty_change_pct>=0?'+':'')+sent.nifty_change_pct.toFixed(2)+'%':'—'})
+    • India VIX: ${sent.india_vix!=null?sent.india_vix.toFixed(1):'—'} • As of: ${sent.as_of||'—'}`:'Market sentiment unavailable';
+  const sub=ipo.subscription||{};
+  const subTxt=`Overall ${sub.overall!=null?sub.overall.toFixed(2)+'x':'N/A'} • QIB ${sub.qib!=null?sub.qib.toFixed(2)+'x':'N/A'}
+    • NII ${sub.nii!=null?sub.nii.toFixed(2)+'x':'N/A'} • RII ${sub.retail!=null?sub.retail.toFixed(2)+'x':'N/A'}
+    • Trend: ${ipo.subscription_trend||'n/a'} • As of: ${ipo.subscription_as_of||'—'}
+    ${ipo.days_remaining!=null?` • ${ipo.days_remaining}d to close`:''}`;
+  const sec=(title,body)=>`<details style="margin-top:8px;border:1px solid #1f2937;border-radius:6px">
+      <summary style="padding:8px 10px;cursor:pointer;font-size:12px;font-weight:600;color:#9ca3af">${title}</summary>
+      <div style="padding:4px 10px 10px;font-size:12px;color:#d1d5db;line-height:1.6">${body}</div></details>`;
+  return `
+  <div class="card" style="margin-bottom:12px;border:1px solid #374151">
+    <div style="font-size:13px;font-weight:700;color:#f9fafb;margin-bottom:10px">IPO Investment Analysis
+      <span style="font-size:10px;font-weight:400;color:#6b7280"> — informational, not investment advice</span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px">
+      ${chip('Listing Gains',dec.listing_recommendation,recColor(dec.listing_recommendation))}
+      ${chip('Long-Term',dec.longterm_recommendation,recColor(dec.longterm_recommendation))}
+      ${chip('Valuation',dec.valuation_class||'UNKNOWN','#9ca3af')}
+      ${chip('Risk',dec.risk_level||'UNKNOWN',riskColor)}
+      ${chip('Confidence',conf,conf==='HIGH'?'#22c55e':conf==='MEDIUM'?'#f59e0b':'#9ca3af')}
+    </div>
+    <div style="font-size:11px;color:#9ca3af;margin-top:8px">Scores — listing: ${score(dec.listing_score)}
+      (coverage ${(dec.listing_coverage*100).toFixed(0)}%) • long-term: ${score(dec.longterm_score)}
+      (coverage ${(dec.longterm_coverage*100).toFixed(0)}%)</div>
+    <div style="font-size:12px;color:#d1d5db;margin-top:10px"><span style="color:#9ca3af;font-weight:600">Why:</span>
+      <ul style="margin:4px 0 0;padding-left:18px">${(dec.rationale||[]).map(r=>`<li>${r}</li>`).join('')||'<li>No rationale available</li>'}</ul></div>
+    ${(dec.key_risks||[]).length?`<div style="font-size:12px;color:#f59e0b;margin-top:8px"><span style="font-weight:600">Key risks:</span>
+      <ul style="margin:4px 0 0;padding-left:18px;color:#d1d5db">${dec.key_risks.map(r=>`<li>${r}</li>`).join('')}</ul></div>`:''}
+    ${(dec.missing||[]).length?`<div style="font-size:12px;margin-top:8px"><span style="color:#9ca3af;font-weight:600">Missing:</span>
+      <span style="color:#6b7280"> ${dec.missing.join(' • ')}</span></div>`:''}
+    ${(dec.notes||[]).length?`<div style="font-size:11px;color:#f59e0b;margin-top:6px">${dec.notes.map(n=>'⚠ '+n).join('<br>')}</div>`:''}
+    ${sec('Fundamental Analysis',(dec.missing||[]).some(m=>m.includes('Revenue'))
+        ?'No verified financial disclosures (RHP/SEBI data not retrievable in this feed) — assessment marked INSUFFICIENT DATA rather than estimated.'
+        :'Financial inputs present — see component scores.')}
+    ${sec('Valuation & Peer Comparison',comp.valuation!=null
+        ?`Valuation component: ${comp.valuation.toFixed(0)}/100. Classification: ${dec.valuation_class||'UNKNOWN'}.`
+        :'No EPS or peer P/E available — valuation UNKNOWN. P/E not applied to loss-making issuers.')}
+    ${sec('Subscription Analysis',subTxt)}
+    ${sec('Market Sentiment',sentTxt+'<br>GMP: N/A (UNOFFICIAL — no reliable source; never assumed)')}
+    ${sec('Score Components (listing weights)',`<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:4px">${compRows}</div>`)}
+    ${sec('Risk Factors',(ipo.risk_factors||[]).map(r=>'• '+r).join('<br>')||'No specific risk factors identified')}
+    ${sec('Data Sources & Evidence',`Source: ${window._ipoMeta?window._ipoMeta.source:'—'} • Fetched: ${window._ipoMeta?window._ipoMeta.fetchedAt||'—':'—'}
+      • Analysis: ${dec.analyzed_at||'—'} • Analyzed fields come from official NSE endpoints only; absent data is reported, never estimated.`)}
+    <div style="font-size:11px;color:#6b7280;margin-top:8px">Last Updated: ${dec.analyzed_at||'—'}</div>
+  </div>`;
+}
+
 function showIPODetails(symbol){
   const ipo=window._ipoDetails[symbol];
   if(!ipo)return;
@@ -7082,7 +7152,9 @@ function showIPODetails(symbol){
         <div class="stat-value-sm" style="color:${ipo.status==='OPEN'?'#22c55e':ipo.status==='UPCOMING'?'#3b82f6':'#6b7280'}">${ipo.status}</div>
       </div>
     </div>
-    
+
+    ${ipoDecisionBlock(ipo)}
+
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
       <div class="card-sm">
         <div class="stat-label">Price Band</div>
@@ -9312,9 +9384,11 @@ def api_ipo_data():
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
         from ipo.analyzer import IPOAnalyzer
+        from ipo.decision import IPODecisionEngine
+        from ipo.models import IPOStatus
         from ipo.providers.mock_provider import MockIPODataProvider
         from ipo.providers.nse_provider import get_live_ipo_provider
-        
+
         # Live first; flagged mock fallback on failure — never mixed
         live_error = None
         try:
@@ -9326,8 +9400,20 @@ def api_ipo_data():
             live_error = str(live_err)[:200]
             logger.warning(f"IPO live provider unavailable ({live_error}); using flagged demo data")
             provider = MockIPODataProvider()
-        
+
         analyzer = IPOAnalyzer(provider)
+        decision_engine = IPODecisionEngine()
+        data_stale = bool(getattr(provider, '_serving_stale', False))
+
+        # Market sentiment (NIFTY/VIX) — optional input; failure degrades
+        # the decision layer, never the IPO list.
+        sentiment = None
+        get_sentiment = getattr(provider, 'get_market_sentiment', None)
+        if get_sentiment:
+            try:
+                sentiment = get_sentiment()
+            except Exception as se:
+                logger.warning(f"IPO market sentiment unavailable: {se}")
         
         # Get analyzed IPOs
         open_ipos = analyzer.get_open_ipos_analysis()
@@ -9339,6 +9425,23 @@ def api_ipo_data():
             ipo = result.ipo
             sub = ipo.subscription
             provisional = result.data_quality == 'LIMITED'
+            actionable = (ipo.is_equity and
+                          ipo.status in (IPOStatus.OPEN, IPOStatus.UPCOMING))
+            decision = None
+            if actionable:
+                try:
+                    decision = decision_engine.decide(
+                        ipo, sentiment=sentiment, stale=data_stale)
+                except Exception as de:
+                    logger.warning(f"IPO decision failed for {ipo.symbol}: {de}")
+            days_remaining = None
+            if ipo.close_date:
+                try:
+                    days_remaining = max(0, (datetime.strptime(
+                        ipo.close_date, '%Y-%m-%d').date()
+                        - datetime.now().date()).days)
+                except ValueError:
+                    pass
             return {
                 'name': ipo.name,
                 'symbol': ipo.symbol,
@@ -9364,6 +9467,11 @@ def api_ipo_data():
                     'qib': sub.qib, 'nii': sub.nii,
                     'retail': sub.retail, 'overall': sub.overall
                 } if sub else None,
+                'subscription_trend': getattr(ipo, 'subscription_trend', None),
+                'subscription_as_of': getattr(ipo, 'subscription_as_of', None),
+                'days_remaining': days_remaining,
+                'decision': decision,
+                'use_of_proceeds': getattr(ipo, 'use_of_proceeds', None),
                 'financial_score': result.financial_score,
                 'valuation_score': result.valuation_score,
                 'structure_score': result.structure_score,
@@ -9406,9 +9514,15 @@ def api_ipo_data():
             'data_source': provider.get_data_source_name(),
             'live_data_available': live_error is None,
             'live_error': live_error,
-            'stale': bool(getattr(provider, '_serving_stale', False)),
+            'stale': data_stale,
             'data_fetched_at': (datetime.fromtimestamp(provider.last_success_at).strftime('%Y-%m-%d %H:%M:%S')
                                 if getattr(provider, 'last_success_at', None) else None),
+            'market_sentiment': ({
+                'nifty_last': sentiment.nifty_last,
+                'nifty_change_pct': sentiment.nifty_change_pct,
+                'india_vix': sentiment.india_vix,
+                'as_of': sentiment.as_of,
+            } if sentiment else None),
             'open_ipos': [serialize_analysis(ipo) for ipo in open_ipos],
             'upcoming_ipos': [serialize_analysis(ipo) for ipo in upcoming_ipos],
             'recent_ipos': [serialize_analysis(ipo) for ipo in recent_ipos],
