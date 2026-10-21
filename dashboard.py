@@ -7099,8 +7099,9 @@ function ipoDecisionBlock(ipo){
       ${chip('Confidence',conf,conf==='HIGH'?'#22c55e':conf==='MEDIUM'?'#f59e0b':'#9ca3af')}
     </div>
     <div style="font-size:11px;color:#9ca3af;margin-top:8px">Scores — listing: ${score(dec.listing_score)}
-      (coverage ${(dec.listing_coverage*100).toFixed(0)}%) • long-term: ${score(dec.longterm_score)}
-      (coverage ${(dec.longterm_coverage*100).toFixed(0)}%)</div>
+      (coverage ${(dec.listing_coverage*100).toFixed(0)}%${dec.listing_coverage<0.7?' — provisional':''})
+      • long-term: ${score(dec.longterm_score)}
+      (coverage ${(dec.longterm_coverage*100).toFixed(0)}%${dec.longterm_coverage<0.7?' — provisional':''})</div>
     <div style="font-size:12px;color:#d1d5db;margin-top:10px"><span style="color:#9ca3af;font-weight:600">Why:</span>
       <ul style="margin:4px 0 0;padding-left:18px">${(dec.rationale||[]).map(r=>`<li>${r}</li>`).join('')||'<li>No rationale available</li>'}</ul></div>
     ${(dec.key_risks||[]).length?`<div style="font-size:12px;color:#f59e0b;margin-top:8px"><span style="font-weight:600">Key risks:</span>
