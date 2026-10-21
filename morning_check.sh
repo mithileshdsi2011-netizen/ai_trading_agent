@@ -12,6 +12,12 @@ warn() { printf "  \033[33m!\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31m✗\033[0m %s\n" "$1"; ISSUES=$((ISSUES+1)); }
 hdr()  { printf "\n\033[1m%s\033[0m\n" "$1"; }
 
+# Staleness checks only apply during market hours (Mon–Fri 09:15–15:30):
+# a quiet overnight scheduler must never raise ACTION NEEDED.
+DAY=$(date +%u); HM=$(date +%H%M)
+IN_MARKET=0
+[ "$DAY" -le 5 ] && [ "$HM" -ge 915 ] && [ "$HM" -le 1530 ] && IN_MARKET=1
+
 echo "════════════════════════════════════════════════"
 echo " ai_trading_agent — Morning Health Check"
 echo " $(date '+%Y-%m-%d %H:%M %Z')"
@@ -59,8 +65,35 @@ esac
 if [ -n "$HEALTH" ]; then
   echo "$HEALTH" | grep -q '"kite_ok":true' && ok "Kite API responding" || fail "kite_ok=false — Kite auth needed"
   echo "$HEALTH" | grep -q '"circuit_open":true' && fail "Circuit breaker OPEN — check drawdown state" || ok "Circuit breaker closed"
-  SCAN=$(echo "$HEALTH" | ./venv/bin/python -c "import json,sys; print(json.load(sys.stdin).get('last_scan') or 'never')" 2>/dev/null)
-  ok "Last Swing scan: $SCAN"
+  SCAN_AGE=$(echo "$HEALTH" | ./venv/bin/python -c "
+import json,sys,datetime as dt
+try:
+    s=json.load(sys.stdin).get('last_scan')
+    if not s: print(-1); raise SystemExit
+    t=dt.datetime.fromisoformat(str(s))
+    now=dt.datetime.now(t.tzinfo) if t.tzinfo else dt.datetime.now()
+    print(int((now-t).total_seconds()))
+except SystemExit: pass
+except Exception: print(-1)" 2>/dev/null)
+  if [ -n "$SCAN_AGE" ] && [ "$SCAN_AGE" -ge 0 ] 2>/dev/null; then
+    if [ "$IN_MARKET" = "1" ] && [ "$SCAN_AGE" -gt 1200 ]; then
+      fail "Swing scheduler NOT advancing — last scan $((SCAN_AGE/60))min ago (frozen?)"
+    else
+      ok "Scheduler advancing — last scan $((SCAN_AGE/60))min ago"
+    fi
+  else
+    [ "$IN_MARKET" = "1" ] && warn "No Swing scan timestamp" || ok "Last Swing scan: none yet"
+  fi
+  # Reconcile thread writes reconciliation.log ~every 60s — its mtime is
+  # the liveness probe that would have caught the frozen scheduler.
+  if [ -f logs/reconciliation.log ]; then
+    RECON_AGE=$(( $(date +%s) - $(stat -f %m logs/reconciliation.log 2>/dev/null || echo 0) ))
+    if [ "$IN_MARKET" = "1" ] && [ "$RECON_AGE" -gt 300 ]; then
+      fail "Broker reconciliation STALLED — last write $((RECON_AGE/60))min ago"
+    else
+      ok "Reconciliation fresh — last write $((RECON_AGE/60))min ago"
+    fi
+  fi
 else
   [ -n "$DASH_PID" ] && fail "Dashboard up but /api/health unreachable" || warn "Skipped API checks (dashboard down)"
 fi
@@ -79,11 +112,40 @@ if [ -n "$INTRADAY" ]; then
 fi
 
 if [ -f data/intraday/engine_status.json ]; then
-  MD=$(./venv/bin/python -c "import json;print(json.load(open('data/intraday/engine_status.json')).get('market_data_status',''))" 2>/dev/null)
-  KILL=$(./venv/bin/python -c "import json;print(json.load(open('data/intraday/engine_status.json')).get('kill_switch'))" 2>/dev/null)
-  LAST_SCAN=$(./venv/bin/python -c "import json;print(json.load(open('data/intraday/engine_status.json')).get('last_scan_time','never'))" 2>/dev/null)
+  ISTAT=$(./venv/bin/python - <<'PYEOF' 2>/dev/null
+import json, datetime as dt
+d = json.load(open('data/intraday/engine_status.json'))
+s = d.get('last_scan_time')
+age = -1
+if s:
+    try:
+        t = dt.datetime.fromisoformat(str(s))
+        now = dt.datetime.now(t.tzinfo) if t.tzinfo else dt.datetime.now()
+        age = int((now - t).total_seconds())
+    except Exception:
+        pass
+print(f"{d.get('market_data_status','')}|{d.get('kill_switch')}|{age}|{d.get('last_data_time') or ''}")
+PYEOF
+)
+  MD=${ISTAT%%|*}; REST=${ISTAT#*|}; KILL=${REST%%|*}; REST=${REST#*|}; LSCAN_AGE=${REST%%|*}
   [ "$KILL" = "True" ] && fail "Intraday KILL SWITCH is ON" || ok "Kill switch off"
-  ok "Market data: ${MD:-unknown} • last scan: $LAST_SCAN"
+  case "$MD" in
+    LIVE) ok "Market data: LIVE" ;;
+    DISCONNECTED) warn "Market data DISCONNECTED (may be mid-cycle)" ;;
+    *) [ -n "$MD" ] && ok "Market data: $MD" || warn "Market data status unknown" ;;
+  esac
+  # In-flight stuck scan (incident fires >600s; surface it here too)
+  SCAN_S=$(echo "$INTRADAY" | ./venv/bin/python -c "import json,sys;d=json.load(sys.stdin);print(int(d.get('scan_seconds') or 0))" 2>/dev/null)
+  if [ -n "$SCAN_S" ] && [ "$SCAN_S" -gt 900 ] 2>/dev/null; then
+    warn "Angel scan running ${SCAN_S}s — possible stall (alert fires at 600s)"
+  fi
+  if [ -n "$LSCAN_AGE" ] && [ "$LSCAN_AGE" -ge 0 ] 2>/dev/null; then
+    if [ "$IN_MARKET" = "1" ] && [ "$LSCAN_AGE" -gt 1200 ]; then
+      warn "Angel last completed scan $((LSCAN_AGE/60))min ago — overdue"
+    else
+      ok "Last completed scan $((LSCAN_AGE/60))min ago"
+    fi
+  fi
 else
   warn "No intraday engine status file yet"
 fi

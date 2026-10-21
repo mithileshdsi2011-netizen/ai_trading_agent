@@ -130,7 +130,7 @@ class TokenManager:
             New access token
         """
         try:
-            kite = KiteConnect(api_key=config.KITE_API_KEY)
+            kite = KiteConnect(api_key=config.KITE_API_KEY, timeout=15)
             session = kite.generate_session(request_token, api_secret=config.KITE_API_SECRET)
             access_token = session['access_token']
             
@@ -158,7 +158,7 @@ class TokenManager:
         try:
             access_token = self.get_access_token(request_token)
             
-            self.kite = KiteConnect(api_key=config.KITE_API_KEY)
+            self.kite = KiteConnect(api_key=config.KITE_API_KEY, timeout=15)
             self.kite.set_access_token(access_token)
             
             # Test connection

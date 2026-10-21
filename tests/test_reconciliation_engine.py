@@ -398,6 +398,48 @@ class TestBrokerFetchSafety(unittest.TestCase):
         self.assertFalse(status['healthy'])
         self.assertTrue(status.get('broker_fetch_errors'))
 
+    def test_stalled_request_timeout_marks_unhealthy(self):
+        """A timed-out Kite call (stalled socket) is a fetch error, not
+        an auth error: no token reload attempted, error recorded,
+        reconciliation unhealthy → orchestrator blocks new BUYs. The
+        KiteConnect timeout=15 is what turns a hang into this path."""
+        import requests
+        broker = self._live_broker()
+        broker.kite.holdings.side_effect = requests.exceptions.ConnectTimeout("stalled")
+        broker.kite.positions.side_effect = requests.exceptions.ReadTimeout("stalled")
+        broker.kite.orders.side_effect = requests.exceptions.ReadTimeout("stalled")
+        self._write_token()
+        engine = ReconciliationEngine(broker=broker, store=self.store)
+        status = engine.reconcile_all()
+        self.assertFalse(status['healthy'])
+        self.assertTrue(status.get('broker_fetch_errors'))
+        broker.kite.set_access_token.assert_not_called()
+
+    def test_timeout_recovery_restores_health(self):
+        """Timeouts on one cycle then clean fetches on the next →
+        healthy again (fetch errors are per-cycle, not latching)."""
+        import requests
+        broker = self._live_broker()
+
+        def fail_once(ok):
+            calls = {'n': 0}
+            def _fn():
+                calls['n'] += 1
+                if calls['n'] == 1:
+                    raise requests.exceptions.ReadTimeout("stalled")
+                return ok
+            return _fn
+
+        broker.kite.holdings.side_effect = fail_once([])
+        broker.kite.positions.side_effect = fail_once({'net': [], 'day': []})
+        broker.kite.orders.side_effect = fail_once([])
+        self._write_token()
+        engine = ReconciliationEngine(broker=broker, store=self.store)
+        self.assertFalse(engine.reconcile_all()['healthy'])
+        recovered = engine.reconcile_all()
+        self.assertTrue(recovered['healthy'])
+        self.assertFalse(recovered.get('broker_fetch_errors'))
+
     def test_successful_fetch_after_reload_restores_health(self):
         """Token reload mid-reconcile recovers and stays healthy."""
         broker = self._live_broker()
