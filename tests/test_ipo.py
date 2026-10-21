@@ -512,7 +512,8 @@ class TestNseIPOProvider:
         first = provider.get_open_ipos()
         second = provider.get_open_ipos()
         assert first == second  # cached object returned
-        assert client_calls(provider) == 4  # bootstrap + 3 endpoint fetches (one 'all' fetch)
+        # bootstrap + 3 feed fetches + 1 ipo-detail enrichment for the open issue
+        assert client_calls(provider) == 5
 
     def test_upcoming_and_recent_endpoints(self):
         provider = self._provider(payloads=[
@@ -681,6 +682,142 @@ class TestNseVerificationAndOptionalFields:
         """Mock/demo rows must never claim authoritative-source verification."""
         mock = MockIPODataProvider()
         assert all(i.verified is False for i in mock.get_open_ipos())
+
+
+class TestIssuePriceBandAndDetailEnrichment:
+    """Real-shape NSE payloads (Oct 2026 ipo-current-issue + ipo-detail).
+
+    Root cause fixed here: the list feed carries the band as an
+    'issuePrice' STRING ("Rs.1065 to Rs.1119") which was previously
+    only treated as a scalar — so band, issue_size and lot/min-invest
+    all silently rendered N/A.
+    """
+
+    _provider = TestNseIPOProvider._provider
+
+    @staticmethod
+    def _today_range():
+        from datetime import date, timedelta
+        s = (date.today() - timedelta(days=1)).strftime('%d-%b-%Y')
+        e = (date.today() + timedelta(days=2)).strftime('%d-%b-%Y')
+        return s, e
+
+    def test_issueprice_band_string_parsed(self):
+        s, e = self._today_range()
+        provider = self._provider(payloads=[
+            [{'companyName': 'Mega Corp Ltd', 'symbol': 'MEGA',
+              'issueStartDate': s, 'issueEndDate': e,
+              'issuePrice': 'Rs.1065 to Rs.1119',
+              'issueSize': '197525934', 'noOfSharesOffered': '1.97525934E8',
+              'noOfTime': '1.0485', 'series': 'EQ', 'category': 'Total'}],
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.price_band_min == 1065.0
+        assert ipo.price_band_max == 1119.0
+        # issue_size = shares × cap / 1e7
+        assert ipo.issue_size == round(197525934 * 1119 / 1e7, 2)
+        assert ipo.subscription.overall == 1.0485
+
+    def test_issueprice_scalar_price(self):
+        provider = self._provider(payloads=[
+            [{'companyName': 'Fixed Co', 'symbol': 'FIX',
+              'issuePrice': 'Rs.340'}],
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.price_band_min == 340.0
+        assert ipo.price_band_max == 340.0
+
+    def test_detail_enrichment_lot_min_investment_subscription(self):
+        s, e = self._today_range()
+        detail = {
+            'bidDetails': [
+                {'category': 'Qualified Institutional Buyers(QIBs)', 'noOfTime': '2.625'},
+                {'category': 'Non Institutional Investors', 'noOfTime': '0.660'},
+                {'category': 'Retail Individual Investors(RIIs)', 'noOfTime': '0.382'},
+            ],
+            'issueInfo': {'dataList': [
+                {'title': 'Bid Lot', 'value': '12 Equity Shares and in multiples thereof'},
+                {'title': 'Minimum Order Quantity', 'value': '12 Equity Shares'},
+                {'title': 'Price Range', 'value': 'Rs. 1065 to Rs. 1119 per Equity Share'},
+                {'title': 'Issue Size', 'value': 'Fresh Issue of up to 27,00,00,000 equity shares'},
+            ]},
+        }
+        provider = self._provider(payloads=[
+            [{'companyName': 'Big Platform Ltd', 'symbol': 'BIG',
+              'issueStartDate': s, 'issueEndDate': e,
+              'issuePrice': 'Rs.1065 to Rs.1119', 'series': 'EQ',
+              'category': 'Total', 'noOfTime': '1.05'}],
+            [],  # upcoming feed
+            [],  # past feed
+            detail,  # ipo-detail for BIG
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.lot_size == 12
+        assert ipo.min_investment == round(1119 * 12, 2)  # 13428
+        assert ipo.fresh_issue == round(270000000 * 1119 / 1e7, 2)
+        assert ipo.subscription.qib == 2.625
+        assert ipo.subscription.nii == 0.660
+        assert ipo.subscription.retail == 0.382
+        assert ipo.subscription.overall == 1.05  # list-feed value preserved
+
+    def test_min_investment_not_fabricated_without_lot_or_price(self):
+        """No fabrication: missing lot OR price → min_investment stays N/A."""
+        s, e = self._today_range()
+        detail_no_lot = {'issueInfo': {'dataList': [
+            {'title': 'Price Range', 'value': 'Rs. 100 to Rs. 110'}]}}
+        provider = self._provider(payloads=[
+            [{'companyName': 'NoLot Ltd', 'symbol': 'NL',
+              'issueStartDate': s, 'issueEndDate': e, 'series': 'EQ',
+              'category': 'Total'}],
+            [], [], detail_no_lot,
+        ])
+        ipo = provider.get_open_ipos()[0]
+        assert ipo.price_band_min == 100.0
+        assert ipo.lot_size is None
+        assert ipo.min_investment is None
+
+    def test_detail_failure_degrades_record_not_list(self):
+        """A failing ipo-detail call leaves the record intact (N/A fields)."""
+        s, e = self._today_range()
+        provider = self._provider(
+            payloads=[
+                [{'companyName': 'Fragile Ltd', 'symbol': 'FRAG',
+                  'issueStartDate': s, 'issueEndDate': e,
+                  'issuePrice': 'Rs.100 to Rs.110', 'series': 'EQ',
+                  'category': 'Total'}],
+                [], []],
+            statuses=[200, 200, 200, 200, 500],  # detail call -> HTTP 500
+        )
+        ipos = provider.get_open_ipos()
+        assert len(ipos) == 1
+        assert ipos[0].price_band_max == 110.0
+        assert ipos[0].lot_size is None
+
+    def test_stale_cache_served_on_refresh_failure(self):
+        """Provider outage after a successful fetch → last-known-good data
+        returned and flagged stale instead of erroring out."""
+        provider = self._provider(
+            payloads=[
+                [{'companyName': 'Stable Co', 'symbol': 'STB',
+                  'issueStartDate': '01-01-2099', 'issueEndDate': '05-01-2099'}],
+            ],
+            statuses=[200, 200, 200, 200, 200,   # call 1: bootstrap + 3 feeds + detail
+                      403, 200, 403],            # call 2: 403 → re-bootstrap → 403
+        )
+        provider._cache_ttl = 0  # force refetch on second call
+        first = provider.get_open_ipos()
+        assert provider._serving_stale is False
+        second = provider.get_open_ipos()
+        assert second[0] is first[0]  # same cached IPO objects returned
+        assert provider._serving_stale is True
+        assert provider.last_success_at is not None
+
+    def test_cold_failure_still_raises(self):
+        """No cache + fetch failure → error propagates (dashboard falls back)."""
+        from ipo.providers.nse_provider import IPOProviderError
+        provider = self._provider(statuses=[200, 500])
+        with pytest.raises(IPOProviderError):
+            provider.get_open_ipos()
 
 
 def client_calls(provider):

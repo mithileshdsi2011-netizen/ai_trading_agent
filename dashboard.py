@@ -3392,7 +3392,7 @@ tr:last-child td{border:none}
           <th style="text-align:center;padding:10px 8px">Min Invest</th>
           <th style="text-align:center;padding:10px 8px">Sub (×)</th>
           <th style="text-align:center;padding:10px 8px">Data Quality</th>
-          <th style="text-align:center;padding:10px 8px">Verified</th>
+          <th style="text-align:center;padding:10px 8px">Source Status</th>
           <th style="text-align:center;padding:10px 8px">Score</th>
         </tr></thead>
         <tbody id="ipo-summary-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
@@ -3418,7 +3418,7 @@ tr:last-child td{border:none}
           <th style="text-align:center;padding:10px 8px">Min Invest</th>
           <th style="text-align:center;padding:10px 8px">Sub (×)</th>
           <th style="text-align:center;padding:10px 8px">Data Quality</th>
-          <th style="text-align:center;padding:10px 8px">Verified</th>
+          <th style="text-align:center;padding:10px 8px">Source Status</th>
           <th style="text-align:center;padding:10px 8px">Score</th>
         </tr></thead>
         <tbody id="ipo-history-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No history</td></tr></tbody>
@@ -6752,9 +6752,13 @@ async function loadIPOData(){
       const sc=ipo.score>=80?'#22c55e':ipo.score>=65?'#84cc16':ipo.score>=50?'#f97316':ipo.score>=35?'#f59e0b':'#ef4444';
       return `<span style="background:${sc}33;color:${sc};padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">${ipo.score_display||ipo.score.toFixed(1)}</span>`;
     };
-    const verChip=ipo=>ipo.verified===true
-      ?'<span style="color:#22c55e;font-size:11px;font-weight:600">VERIFIED</span>'
-      :'<span style="color:#f59e0b;font-size:11px;font-weight:600">UNVERIFIED</span>';
+    const verChip=ipo=>{
+      const ss=ipo.source_status||(ipo.verified===true?'SOURCE CONFIRMED':'UNVERIFIED');
+      return ss==='SOURCE CONFIRMED'
+        ?'<span style="color:#22c55e;font-size:11px;font-weight:600">SOURCE CONFIRMED</span>'
+        :'<span style="color:#f59e0b;font-size:11px;font-weight:600">UNVERIFIED</span>';
+    };
+    const dqLbl=v=>({FULL:'COMPLETE'})[v]||v||'—';
     const datesTxt=ipo=>{
       if(ipo.open_date||ipo.close_date)return `${ipo.open_date||'TBD'} → ${ipo.close_date||'TBD'}`;
       if(ipo.listing_date)return `Listed ${ipo.listing_date}`;
@@ -6772,7 +6776,7 @@ async function loadIPOData(){
         <td style="padding:10px 8px;text-align:center;color:#9ca3af">${naTxt(ipo.lot_size)}</td>
         <td style="padding:10px 8px;text-align:center;color:#9ca3af">${ipo.min_investment!=null?'₹'+Number(ipo.min_investment).toLocaleString('en-IN'):'N/A'}</td>
         <td style="padding:10px 8px;text-align:center;color:#9ca3af;font-size:12px">${fmtSub(ipo.subscription)}</td>
-        <td style="padding:10px 8px;text-align:center;color:${dqColor};font-size:11px;font-weight:600">${ipo.data_quality||'—'}</td>
+        <td style="padding:10px 8px;text-align:center;color:${dqColor};font-size:11px;font-weight:600">${dqLbl(ipo.data_quality)}</td>
         <td style="padding:10px 8px;text-align:center">${verChip(ipo)}</td>
         <td style="padding:10px 8px;text-align:center">${scoreChip(ipo)}</td>
       </tr>`;
@@ -6851,8 +6855,9 @@ async function loadIPOData(){
       upcomingList.innerHTML='<div style="color:#6b7280">No upcoming IPOs</div>';
     }
     
-    // Store IPO details for detail view
+    // Store IPO details for detail view + source freshness metadata
     window._ipoDetails=d.ipo_details||{};
+    window._ipoMeta={source:d.data_source, fetchedAt:d.data_fetched_at, stale:!!d.stale};
     
   }catch(e){
     console.error('IPO data load error:',e);
@@ -7096,8 +7101,8 @@ function showIPODetails(symbol){
         <div class="stat-value-sm">${ipo.min_investment!=null?'₹'+Number(ipo.min_investment).toLocaleString('en-IN'):'N/A'}</div>
       </div>
       <div class="card-sm">
-        <div class="stat-label">Verified</div>
-        <div class="stat-value-sm" style="color:${ipo.verified===true?'#22c55e':'#f59e0b'}">${ipo.verified===true?'VERIFIED':'UNVERIFIED'}</div>
+        <div class="stat-label">Source Status</div>
+        <div class="stat-value-sm" style="color:${(ipo.source_status||'')==='SOURCE CONFIRMED'||ipo.verified===true?'#22c55e':'#f59e0b'}">${ipo.source_status||(ipo.verified===true?'SOURCE CONFIRMED':'UNVERIFIED')}</div>
       </div>
     </div>
 
@@ -7149,8 +7154,10 @@ function showIPODetails(symbol){
     </div>
     
     <div style="font-size:11px;color:#6b7280;margin-top:12px">
-      Data Quality: ${ipo.data_quality} • Analyzed: ${ipo.analyzed_at}
+      Completeness: ${({FULL:'COMPLETE'})[ipo.data_quality]||ipo.data_quality||'—'} • Analyzed: ${ipo.analyzed_at}
+      ${window._ipoMeta?(' • Source: '+window._ipoMeta.source+' • Updated: '+(window._ipoMeta.fetchedAt||'—')):''}
     </div>
+    ${window._ipoMeta&&window._ipoMeta.stale?'<div style="font-size:11px;color:#f59e0b;margin-top:6px;font-weight:600">⚠ STALE — last-known-good data (live NSE refresh failed)</div>':''}
   `;
   
   detailCard.style.display='block';
@@ -9345,6 +9352,7 @@ def api_ipo_data():
                 'lot_size': getattr(ipo, 'lot_size', None),
                 'min_investment': getattr(ipo, 'min_investment', None),
                 'verified': bool(getattr(ipo, 'verified', False)),
+                'source_status': 'SOURCE CONFIRMED' if getattr(ipo, 'verified', False) else 'UNVERIFIED',
                 'open_date': ipo.open_date,
                 'close_date': ipo.close_date,
                 'listing_date': ipo.listing_date,
@@ -9398,6 +9406,9 @@ def api_ipo_data():
             'data_source': provider.get_data_source_name(),
             'live_data_available': live_error is None,
             'live_error': live_error,
+            'stale': bool(getattr(provider, '_serving_stale', False)),
+            'data_fetched_at': (datetime.fromtimestamp(provider.last_success_at).strftime('%Y-%m-%d %H:%M:%S')
+                                if getattr(provider, 'last_success_at', None) else None),
             'open_ipos': [serialize_analysis(ipo) for ipo in open_ipos],
             'upcoming_ipos': [serialize_analysis(ipo) for ipo in upcoming_ipos],
             'recent_ipos': [serialize_analysis(ipo) for ipo in recent_ipos],

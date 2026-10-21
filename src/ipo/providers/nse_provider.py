@@ -69,6 +69,8 @@ class NseIPODataProvider(IPODataProvider):
         self._cache_expiry: Dict[str, float] = {}
         self._cookies_bootstrapped = False
         self._lock = threading.Lock()
+        self._serving_stale = False   # True when returning expired cache after a failed refresh
+        self.last_success_at: Optional[float] = None  # last successful NSE fetch (epoch)
 
     # ── transport ───────────────────────────────────────────────────
     def _bootstrap_cookies(self):
@@ -98,7 +100,17 @@ class NseIPODataProvider(IPODataProvider):
         now = time.time()
         if key in self._cache and now < self._cache_expiry.get(key, 0):
             return self._cache[key]
-        value = fetch()
+        try:
+            value = fetch()
+        except Exception:
+            # Serve last-known-good (expired) data flagged as STALE rather
+            # than losing the whole feed to a transient NSE failure.
+            if key in self._cache:
+                self._serving_stale = True
+                return self._cache[key]
+            raise
+        self._serving_stale = False
+        self.last_success_at = now
         self._cache[key] = value
         self._cache_expiry[key] = now + self._cache_ttl
         return value
@@ -161,7 +173,8 @@ class NseIPODataProvider(IPODataProvider):
         lo = cls._num_field(row, 'minPrice', 'priceBandMin', 'price_band_min', 'minprice')
         hi = cls._num_field(row, 'maxPrice', 'priceBandMax', 'price_band_max', 'maxprice',
                             'cutOffPrice', 'cutoffprice')
-        band = cls._pick(row, 'priceBand', 'price_band', 'priceRange', 'price')
+        band = cls._pick(row, 'priceBand', 'price_band', 'priceRange', 'price',
+                         'issuePrice', 'issue_price')
         if (lo is None or hi is None) and band:
             nums = [cls._num(t) for t in str(band).replace('–', '-').split()]
             nums = [n for n in nums if n is not None]
@@ -272,6 +285,105 @@ class NseIPODataProvider(IPODataProvider):
         return default
 
     # ── provider interface ──────────────────────────────────────────
+    # ── per-issue detail enrichment (ipo-detail endpoint) ──────────
+    @staticmethod
+    def _first_int(text) -> Optional[int]:
+        """Extract the first numeric value from free text like
+        '12 Equity Shares and in multiples thereof' or 'Rs. 2,00,000'."""
+        import re
+        m = re.search(r'(\d[\d,]*)', str(text or ''))
+        if not m:
+            return None
+        try:
+            return int(m.group(1).replace(',', ''))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _detail_kv(data: Dict[str, Any]) -> Dict[str, str]:
+        """Flatten issueInfo.dataList [{'title','value'}] into a dict."""
+        kv = {}
+        info = data.get('issueInfo') or {}
+        for item in info.get('dataList') or []:
+            if isinstance(item, dict) and item.get('title'):
+                kv[str(item['title']).strip()] = item.get('value') or ''
+        return kv
+
+    def _enrich_from_detail(self, ipo: IPO) -> IPO:
+        """Fill fields the list feeds don't carry — lot size, min order
+        quantity, per-category subscription, issue-type — from the
+        official ipo-detail endpoint. Anything absent stays N/A; this
+        never invents values."""
+        cls = type(self)
+        if not ipo.symbol:
+            return ipo
+        data = self._get_json(f"/api/ipo-detail?symbol={ipo.symbol}&series=EQ")
+        kv = cls._detail_kv(data)
+
+        # Lot size — authoritative per-issue value ('Bid Lot'/'Minimum Order Quantity')
+        lot = cls._first_int(kv.get('Bid Lot')) or cls._first_int(kv.get('Minimum Order Quantity'))
+        if ipo.lot_size is None and lot:
+            ipo.lot_size = lot
+
+        # Price band from the official 'Price Range' text when the list lacked it
+        if ipo.price_band_min is None or ipo.price_band_max is None:
+            rng = kv.get('Price Range')
+            if rng:
+                nums = [cls._num(t) for t in str(rng).replace('–', '-').split()]
+                nums = [n for n in nums if n is not None]
+                if nums:
+                    ipo.price_band_min = ipo.price_band_min or min(nums)
+                    ipo.price_band_max = ipo.price_band_max or max(nums)
+
+        # Issue size from prose '...Fresh Issue of up to N equity shares'
+        import re
+        size_txt = kv.get('Issue Size', '')
+        if ipo.fresh_issue is None:
+            m = re.search(r'[Ff]resh\s+[Ii]ssue\s+of\s+up\s+to\s+([\d,]+)', size_txt)
+            if m:
+                shares = cls._num(m.group(1))
+                price = ipo.price_band_max or ipo.price_band_min
+                if shares and price:
+                    ipo.fresh_issue = round(shares * price / 1e7, 2)
+        if ipo.issue_size is None:
+            m = re.search(r'([\d,]+)\s+equity\s+shares', size_txt)
+            if m:
+                shares = cls._num(m.group(1))
+                price = ipo.price_band_max or ipo.price_band_min
+                if shares and price:
+                    ipo.issue_size = round(shares * price / 1e7, 2)
+
+        # Retail minimum investment = cap price × minimum order quantity.
+        # 'Minimum Order Quantity' is the per-issue authoritative retail
+        # minimum — Mainboard and SME rules are not assumed to match.
+        min_qty = cls._first_int(kv.get('Minimum Order Quantity')) or lot
+        cap = ipo.price_band_max or ipo.price_band_min
+        if ipo.min_investment is None and min_qty and cap:
+            ipo.min_investment = round(cap * min_qty, 2)
+
+        # Per-category subscription from bidDetails — richer than the
+        # list feed's overall-only multiple.
+        bids = data.get('bidDetails') or []
+        cat_map = {'qib': 'Qualified Institutional Buyers',
+                   'nii': 'Non Institutional Investors',
+                   'retail': 'Retail Individual Investors'}
+        vals = {}
+        for key, prefix in cat_map.items():
+            for b in bids:
+                if str(b.get('category', '')).startswith(prefix):
+                    n = cls._num(b.get('noOfTime'))
+                    if n is not None:
+                        vals[key] = n
+                        break
+        if vals:
+            sub = ipo.subscription or IPOSubscription()
+            for k, v in vals.items():
+                if getattr(sub, k) is None:
+                    setattr(sub, k, v)
+            ipo.subscription = sub
+
+        return ipo
+
     @staticmethod
     def _dedup_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """One row per symbol — prefer the 'Total' category row (per-category
@@ -314,9 +426,20 @@ class NseIPODataProvider(IPODataProvider):
         re_rows = self._dedup_rows(data if isinstance(data, list)
                                    else (data.get('data') or []))
 
-        return ([self._to_ipo(r, self._status_for(r, IPOStatus.OPEN)) for r in open_rows]
+        ipos = ([self._to_ipo(r, self._status_for(r, IPOStatus.OPEN)) for r in open_rows]
                 + [self._to_ipo(r, self._status_for(r, IPOStatus.UPCOMING)) for r in up_rows]
                 + [self._to_ipo(r, self._status_for(r, IPOStatus.CLOSED)) for r in re_rows])
+
+        # Detail enrichment only for actionable records (open + upcoming
+        # equity) — typically a handful of extra calls per cache cycle.
+        # A failed detail fetch degrades one record's fields, never the list.
+        for ipo in ipos:
+            if ipo.is_equity and ipo.status in (IPOStatus.OPEN, IPOStatus.UPCOMING):
+                try:
+                    self._enrich_from_detail(ipo)
+                except Exception as e:
+                    logger.warning(f"IPO detail enrichment failed for {ipo.symbol}: {e}")
+        return ipos
 
     def get_open_ipos(self) -> List[IPO]:
         """Currently open equity/SME issues (DEBT/NCD/ZCZP excluded)."""
