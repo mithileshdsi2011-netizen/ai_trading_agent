@@ -210,15 +210,21 @@ class IntradayEngine:
 
     # ── market data / websocket status ──────────────────────────────
     def market_data_status(self) -> str:
-        """LIVE / STALE / DISCONNECTED."""
+        """LIVE / STALE / DISCONNECTED — coarse "is data flowing" signal.
+
+        The engine is REST-polled: quote freshness for ENTRIES is gated
+        separately (30s per-symbol stamp in validate_entry_conditions).
+        Here, any successful fetch (quotes or candles) within a
+        scan-scaled window means the feed is healthy — a multi-minute
+        scan with continuous candle pulls must not flicker STALE."""
         if self.websocket.is_connected():
             return "STALE" if self.websocket.is_data_stale(self.config.max_data_age_seconds) else "LIVE"
-        last_fetch = self.market_data.last_update_time() or self._last_data_time
+        last_fetch = self.market_data.last_fetch_time() or self._last_data_time
         if last_fetch is None:
             return "DISCONNECTED"
-        if self.validator.is_data_fresh(last_fetch):
-            return "LIVE"
-        return "STALE"
+        window = max(self.scan_interval * 2, self.config.max_data_age_seconds)
+        age = (datetime.now() - last_fetch).total_seconds()
+        return "LIVE" if age <= window else "STALE"
 
     def _record_data_time(self):
         """

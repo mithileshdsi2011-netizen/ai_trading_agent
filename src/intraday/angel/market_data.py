@@ -29,6 +29,10 @@ class AngelMarketData:
         self._cache_expiry = {}
         self._cache_ttl_seconds = 30
         self._last_update: Optional[datetime] = None
+        # Any successful fetch (quotes OR candles) — used only for the
+        # coarse "is market data flowing" status, never for the strict
+        # 30s per-symbol entry-freshness gate (that stays _last_update).
+        self._last_fetch: Optional[datetime] = None
         self._symbol_updates: Dict[str, datetime] = {}
 
     @staticmethod
@@ -79,6 +83,7 @@ class AngelMarketData:
                 )
                 self._last_update = datetime.now()
                 self._symbol_updates[symbol] = self._last_update
+                self._last_fetch = self._last_update
                 return quote
             return None
 
@@ -121,6 +126,7 @@ class AngelMarketData:
             if quotes:
                 now = datetime.now()
                 self._last_update = now
+                self._last_fetch = now
                 for base in quotes:
                     self._symbol_updates[base] = now
             return quotes
@@ -159,6 +165,7 @@ class AngelMarketData:
                 )
                 df['datetime'] = pd.to_datetime(df['datetime'])
                 df.set_index('datetime', inplace=True)
+                self._last_fetch = datetime.now()
                 logger.debug(f"[ANGEL MARKET DATA] Candles retrieved for {symbol_token}")
                 return df
 
@@ -169,8 +176,13 @@ class AngelMarketData:
             return None
 
     def last_update_time(self) -> Optional[datetime]:
-        """Time of the last successful market-data fetch."""
+        """Time of the last successful QUOTE fetch (entry-freshness gate)."""
         return self._last_update
+
+    def last_fetch_time(self) -> Optional[datetime]:
+        """Time of the last successful fetch of ANY kind — quote or
+        candles. Coarse connectivity signal for the status display."""
+        return self._last_fetch
 
     def symbol_last_update(self, symbol: str) -> Optional[datetime]:
         """Time of the last successful fetch that returned this symbol's

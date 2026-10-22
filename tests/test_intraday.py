@@ -1311,9 +1311,11 @@ class TestDataFreshness:
         assert engine._last_data_time is None  # entry gate untouched
         assert engine.market_data_status() == "LIVE"
 
-    def test_status_stale_when_fetch_older_than_30s(self, tmp_path):
+    def test_status_stale_when_no_fetch_within_scan_window(self, tmp_path):
+        """STALE = data genuinely stopped flowing (>2x scan interval),
+        not 'no quote in 30s' — the entry gate keeps its own 30s check."""
         engine = self._engine_with_quote_client(tmp_path, {'success': True, 'data': {'fetched': []}})
-        engine.market_data._last_update = datetime.now() - timedelta(seconds=60)
+        engine.market_data._last_fetch = datetime.now() - timedelta(seconds=200)
         assert engine.market_data_status() == "STALE"
 
     def test_status_disconnected_when_never_fetched(self, tmp_path):
@@ -1844,3 +1846,64 @@ class TestScanStuckMonitoring:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMarketDataStatusSemantics:
+    """STALE must mean 'data stopped flowing', not 'no tick in 30s'.
+
+    The engine is REST-polled: scans pull candles every ~1.1s and quotes
+    per candidate, so a 30s tick window flickers STALE during healthy
+    operation. Status uses last_fetch_time() (ANY fetch) within a
+    scan-scaled window; the strict 30s per-symbol QUOTE gate for entries
+    is untouched.
+    """
+
+    def _engine(self, tmp_path, scan_interval_seconds=60):
+        from intraday.engine import IntradayEngine
+        config = IntradayConfig(
+            angel_api_key="k", angel_client_code="c",
+            angel_password_or_mpin="p", angel_totp_secret="s")
+        return IntradayEngine(config=config, state_dir=str(tmp_path),
+                              scan_interval_seconds=scan_interval_seconds)
+
+    def test_disconnected_when_nothing_fetched(self, tmp_path):
+        engine = self._engine(tmp_path)
+        assert engine.market_data_status() == "DISCONNECTED"
+
+    def test_candle_fetch_counts_as_live_data_flow(self, tmp_path):
+        """A scan running candles without quote fetches must still read
+        LIVE — data IS flowing."""
+        from datetime import datetime
+        engine = self._engine(tmp_path)
+        engine.market_data._last_fetch = datetime.now()  # candle stamp, no quote stamp
+        assert engine.market_data.last_update_time() is None
+        assert engine.market_data_status() == "LIVE"
+
+    def test_stale_only_after_scan_scaled_window(self, tmp_path):
+        from datetime import datetime, timedelta
+        engine = self._engine(tmp_path, scan_interval_seconds=60)
+        engine.market_data._last_fetch = datetime.now() - timedelta(seconds=45)
+        assert engine.market_data_status() == "LIVE"   # within 120s window
+        engine.market_data._last_fetch = datetime.now() - timedelta(seconds=200)
+        assert engine.market_data_status() == "STALE"  # genuine outage
+
+    def test_candle_fetch_does_not_weaken_entry_gate(self, tmp_path):
+        """_last_update (quote stamp) must stay untouched by candles so
+        validate_entry_conditions keeps its 30s strictness."""
+        from unittest.mock import MagicMock
+        import pandas as pd
+        client = MagicMock()
+        client.get_historical_data.return_value = {
+            'success': True,
+            'data': [['2026-10-22T10:00:00', 1, 2, 0.5, 1.5, 100]]}
+        from intraday.angel.market_data import AngelMarketData
+        md = AngelMarketData(client, instruments=None)
+        df = md.get_historical_candles('TOKEN', 'ONE_MINUTE', 1)
+        assert df is not None
+        assert md.last_fetch_time() is not None      # coarse flow stamp
+        assert md.last_update_time() is None          # quote stamp untouched
+        engine = self._engine(tmp_path)
+        engine.market_data = md
+        ok, reason = engine.validator.validate_entry_conditions(
+            signal=None, last_data_time=None)
+        assert ok is False  # still rejected — no fresh quote
