@@ -55,6 +55,15 @@ for _noisy in ('market_data', 'technical_analysis', 'ai_research_agent',
 logger = logging.getLogger(__name__)
 
 
+def new_buys_blocked_regime(regime: str) -> str | None:
+    """Return the regime that blocks new BUYs, or None if buys are allowed."""
+    if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
+        return 'VOLATILE'
+    if regime == 'BEAR':
+        return 'BEAR'
+    return None
+
+
 class TradingOrchestrator:
     """Main orchestrator for AI trading system"""
     
@@ -785,11 +794,9 @@ class TradingOrchestrator:
                         continue
 
                     # ── 4. Regime deterioration guard ──────────────────────────
-                    if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
-                        logger.warning(f"Skipping {sym}: no new BUYs in VOLATILE regime")
-                        continue
-                    if regime == 'BEAR':
-                        logger.warning(f"Skipping {sym}: no new BUYs in BEAR regime")
+                    _blocked = new_buys_blocked_regime(regime)
+                    if _blocked:
+                        logger.warning(f"Skipping {sym}: no new BUYs in {_blocked} regime")
                         continue
 
                     # ── 4b. Liquidity filter: order value < 1% of 20d ADV ──────

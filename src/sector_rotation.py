@@ -15,6 +15,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_age_seconds(snap: Dict[str, Any]) -> float:
+    """Age of a snapshot in seconds; unparseable/missing timestamps count as infinitely old."""
+    try:
+        ts = snap.get("timestamp")
+        if not ts:
+            return float("inf")
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 class SectorRotationEngine:
     """
     Sector rotation analysis for the enterprise trading bot.
@@ -29,6 +42,9 @@ class SectorRotationEngine:
 
     DEFAULT_MAX_SYMBOLS = 150
     DEFAULT_NIFTY_SYMBOL = "NIFTY 50"
+
+    # Sector momentum is daily intel — never reuse a snapshot older than this.
+    SNAPSHOT_MAX_AGE_SECONDS = 24 * 3600
 
     def __init__(
         self,
@@ -224,18 +240,22 @@ class SectorRotationEngine:
             logger.warning(f"Could not persist sector rotation snapshot: {e}")
 
     def latest(self) -> Optional[Dict[str, Any]]:
-        if self._latest is not None:
-            return self._latest
-        if self.store is None:
+        snap = self._latest
+        if snap is None:
+            if self.store is None:
+                return None
+            try:
+                snap = self.store.get_latest_sector_rotation()
+            except Exception as e:
+                logger.warning(f"Could not load latest sector rotation: {e}")
+                return None
+        if snap is None:
             return None
-        try:
-            snap = self.store.get_latest_sector_rotation()
-            if snap:
-                self._latest = snap
-            return snap
-        except Exception as e:
-            logger.warning(f"Could not load latest sector rotation: {e}")
+        if _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+            self._latest = None
             return None
+        self._latest = snap
+        return snap
 
     def adjust_ai_score(self, ai_score: float, sector: str) -> Dict[str, Any]:
         """

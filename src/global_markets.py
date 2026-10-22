@@ -13,6 +13,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_age_seconds(snap: Dict[str, Any]) -> float:
+    """Age of a snapshot in seconds; unparseable/missing timestamps count as infinitely old."""
+    try:
+        ts = snap.get("timestamp")
+        if not ts:
+            return float("inf")
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 class GlobalMarketMonitor:
     """
     Monitors global markets and returns a 0-100 sentiment score.
@@ -48,6 +61,9 @@ class GlobalMarketMonitor:
         "Gold": -0.03,
         "USDINR": -0.15,
     }
+
+    # Global-market intel refreshes daily — never reuse a snapshot older than this.
+    SNAPSHOT_MAX_AGE_SECONDS = 12 * 3600
 
     def __init__(
         self,
@@ -147,13 +163,28 @@ class GlobalMarketMonitor:
         sentiment = 50.0
         raw_score = 0.0
 
+        missing: List[str] = []
         for name, symbol in self.assets.items():
             ret = self._fetch_returns(name, symbol)
             if ret is None:
-                ret = {"last": 0.0, "return_1d_pct": 0.0, "return_5d_pct": 0.0}
+                missing.append(name)
+                continue
             asset_data[name] = ret
             weight = self.WEIGHTS.get(name, 0.0)
             raw_score += ret["return_5d_pct"] * weight
+
+        if not asset_data:
+            snapshot = {
+                "timestamp": datetime.now().isoformat(),
+                "sentiment_score": None,
+                "raw_score": None,
+                "assets": {},
+                "status": "UNAVAILABLE",
+                "reason": "global market data unavailable",
+            }
+            self._latest = snapshot
+            # Do not persist: fabricated/unavailable values must not poison the store.
+            return snapshot
 
         # Map raw score to a 0-100 sentiment index
         sentiment = round(max(0.0, min(100.0, 50.0 + raw_score)), 2)
@@ -164,6 +195,8 @@ class GlobalMarketMonitor:
             "raw_score": round(raw_score, 2),
             "assets": asset_data,
         }
+        if missing:
+            snapshot["missing_assets"] = missing
 
         self._latest = snapshot
         self._persist_snapshot(snapshot)
@@ -178,23 +211,36 @@ class GlobalMarketMonitor:
             logger.warning(f"Could not persist global markets snapshot: {e}")
 
     def latest(self) -> Optional[Dict[str, Any]]:
-        if self._latest is not None:
-            return self._latest
-        if self.store is None:
+        snap = self._latest
+        if snap is None:
+            if self.store is None:
+                return None
+            try:
+                snap = self.store.get_latest_global_markets()
+            except Exception as e:
+                logger.warning(f"Could not load latest global markets: {e}")
+                return None
+        if snap is None:
             return None
-        try:
-            snap = self.store.get_latest_global_markets()
-            if snap:
-                self._latest = snap
-            return snap
-        except Exception as e:
-            logger.warning(f"Could not load latest global markets: {e}")
+        if _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+            self._latest = None
             return None
+        self._latest = snap
+        return snap
 
     def adjust_confidence(self, confidence: float) -> Dict[str, Any]:
         """Apply global sentiment confidence adjustment."""
         snap = self.latest() or self.compute()
-        sentiment = float(snap.get("sentiment_score", 50.0))
+        sentiment_raw = snap.get("sentiment_score")
+        if sentiment_raw is None:
+            return {
+                "sentiment_score": None,
+                "adjustment": 0.0,
+                "adjusted_confidence": round(max(0.0, min(100.0, confidence)), 2),
+                "timestamp": snap.get("timestamp"),
+                "reason": snap.get("reason", "global market data unavailable"),
+            }
+        sentiment = float(sentiment_raw)
 
         if sentiment >= 70:
             adjustment = 5.0

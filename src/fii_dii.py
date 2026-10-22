@@ -12,6 +12,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_age_seconds(snap: Dict[str, Any]) -> float:
+    """Age of a snapshot in seconds; uses the ISO `date` field. Missing/unparseable = infinitely old."""
+    try:
+        ts = snap.get("date")
+        if not ts:
+            return float("inf")
+        dt = datetime.fromisoformat(str(ts))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 class FII_DII_Engine:
     """
     FII/DII flow intelligence.
@@ -29,6 +42,9 @@ class FII_DII_Engine:
     """
 
     DEFAULT_RISK_FACTOR = 0
+
+    # FII/DII figures are official T-1 data — valid across a weekend, not beyond.
+    SNAPSHOT_MAX_AGE_SECONDS = 72 * 3600
 
     def __init__(self, store: Optional[Any] = None, market_data: Optional[Any] = None):
         self.market_data = market_data
@@ -129,6 +145,8 @@ class FII_DII_Engine:
         if snap is None:
             # Try to load from store; otherwise return a neutral snapshot
             snap = self._load_from_store()
+            if snap is not None and _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+                snap = None
             if snap is None:
                 snap = self._neutral_snapshot("No FII/DII data available")
 
@@ -170,9 +188,13 @@ class FII_DII_Engine:
             logger.warning(f"Could not persist FII/DII snapshot: {e}")
 
     def latest(self) -> Optional[Dict[str, Any]]:
-        if self._latest is not None:
-            return self._latest
-        return self._load_from_store()
+        snap = self._latest if self._latest is not None else self._load_from_store()
+        if snap is None:
+            return None
+        if _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+            self._latest = None
+            return None
+        return snap
 
     def adjust_ai_score(self, ai_score: float) -> Dict[str, Any]:
         """

@@ -4,6 +4,7 @@ Unit tests for src/market_intelligence.py
 import os
 import sys
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 
 import pandas as pd
@@ -93,7 +94,7 @@ class TestMarketBreadthEngine(unittest.TestCase):
             "breadth_score": 80.0,
             "market_strength": "BULLISH",
             "total": 10,
-            "timestamp": "2026-08-03T09:15:00",
+            "timestamp": datetime.now().isoformat(),
         }
         adj = self.engine.adjust_ai_score(60.0)
         self.assertEqual(adj["adjustment"], 5)
@@ -104,7 +105,7 @@ class TestMarketBreadthEngine(unittest.TestCase):
             "breadth_score": 40.0,
             "market_strength": "BEARISH",
             "total": 10,
-            "timestamp": "2026-08-03T09:15:00",
+            "timestamp": datetime.now().isoformat(),
         }
         adj = self.engine.adjust_ai_score(60.0)
         self.assertEqual(adj["adjustment"], -10)

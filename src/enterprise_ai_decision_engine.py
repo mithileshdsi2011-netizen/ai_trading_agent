@@ -582,8 +582,9 @@ class EnterpriseAIDecisionEngine:
         if global_markets:
             g = global_markets
             sign = '+' if g.get('adjustment', 0) >= 0 else ''
+            sent_str = f"{g['sentiment_score']:6.2f}" if g.get('sentiment_score') is not None else '   N/A'
             lines.append(
-                f"  {'Global Sentiment':20s} {g['sentiment_score']:6.2f}  ("
+                f"  {'Global Sentiment':20s} {sent_str}  ("
                 f"{sign}{g['adjustment']}% confidence)"
             )
 

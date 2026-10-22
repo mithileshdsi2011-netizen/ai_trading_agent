@@ -89,7 +89,8 @@ class TestGlobalMarketMonitor(unittest.TestCase):
     def test_sentiment_bounds(self):
         mon = GlobalMarketMonitor(store=None, market_data=FakeGlobalData({}))
         snap = mon.compute()
-        self.assertTrue(0 <= snap['sentiment_score'] <= 100)
+        # No data → honest UNAVAILABLE (None), never a fabricated neutral score
+        self.assertTrue(snap['sentiment_score'] is None or 0 <= snap['sentiment_score'] <= 100)
 
 
 if __name__ == '__main__':

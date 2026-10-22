@@ -4,6 +4,7 @@ Unit tests for src/sector_rotation.py
 import os
 import sys
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 
 import pandas as pd
@@ -94,7 +95,7 @@ class TestSectorRotationEngine(unittest.TestCase):
 
     def test_top3_adjustment(self):
         self.engine._latest = {
-            'timestamp': '2026-08-03T09:15:00',
+            'timestamp': datetime.now().isoformat(),
             'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}, {'sector': 'Pharma', 'momentum_score': 80}],
             'top5_weak': [{'sector': 'IT', 'momentum_score': 10}],
             'all_sectors': [
@@ -110,7 +111,7 @@ class TestSectorRotationEngine(unittest.TestCase):
 
     def test_bottom3_adjustment(self):
         self.engine._latest = {
-            'timestamp': '2026-08-03T09:15:00',
+            'timestamp': datetime.now().isoformat(),
             'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}],
             'top5_weak': [{'sector': 'IT', 'momentum_score': 10}, {'sector': 'Auto', 'momentum_score': 15}, {'sector': 'FMCG', 'momentum_score': 20}],
             'all_sectors': [

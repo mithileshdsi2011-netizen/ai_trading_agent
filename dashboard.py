@@ -1213,6 +1213,9 @@ def _generate_morning_report():
                 if config.VOLATILE_BLOCK_BUYS and regime == 'VOLATILE':
                     watchlist.append(_pick('Volatile market regime'))
                     continue
+                if regime == 'BEAR':
+                    watchlist.append(_pick('Bear market regime'))
+                    continue
                 if exp_ret <= 0:
                     avoid.append(_pick(f'Negative expected return ({exp_ret}%)'))
                     continue
@@ -1818,6 +1821,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Overall Global Sentiment</div><div class="stat-value-sm" id="gm-sentiment">—</div></div>
       <div class="card-sm" style="grid-column: span 2"><div class="stat-label">Top 3 Market Drivers</div><div class="stat-value-sm" id="gm-drivers" style="font-size:12px">—</div></div>
     </div>
+    <div id="gm-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: Economic Events -->
@@ -1829,6 +1833,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Size Factor</div><div class="stat-value-sm" id="evt-factor">—</div></div>
       <div class="card-sm"><div class="stat-label">New BUYs</div><div class="stat-value-sm" id="evt-buy">—</div></div>
     </div>
+    <div id="evt-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: Options Chain Intelligence -->
@@ -1844,6 +1849,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Strong OI Support</div><div class="stat-value-sm" id="oi-support">—</div></div>
       <div class="card-sm"><div class="stat-label">Conf Boost</div><div class="stat-value-sm" id="oi-conf-boost">—</div></div>
     </div>
+    <div id="oi-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: FII/DII Flow -->
@@ -1855,6 +1861,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Net Flow</div><div class="stat-value-sm" id="fii-dii-net">—</div></div>
       <div class="card-sm"><div class="stat-label">Institutional Sentiment</div><div class="stat-value-sm" id="fii-dii-sentiment">—</div></div>
     </div>
+    <div id="fii-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: VIX Risk -->
@@ -1866,6 +1873,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Risk Factor</div><div class="stat-value-sm" id="vix-factor">—</div></div>
       <div class="card-sm"><div class="stat-label">Risk Level</div><div class="stat-value-sm" id="vix-level">—</div></div>
     </div>
+    <div id="vix-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: Sector Rotation -->
@@ -1885,6 +1893,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">NIFTY 7d</div><div class="stat-value-sm" id="sr-nifty-7d">—</div></div>
       <div class="card-sm"><div class="stat-label">NIFTY 30d</div><div class="stat-value-sm" id="sr-nifty-30d">—</div></div>
     </div>
+    <div id="sr-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
 
   <!-- Row 4: Risk Monitor -->
@@ -5008,7 +5017,7 @@ async function load(){
     const regime=(d.market_regime||'—').toUpperCase();
     document.getElementById('ai-rec-regime').textContent=regime;
     document.getElementById('ai-rec-regime').className='stat-value-sm '+(regime==='BULL'?'green':regime==='BEAR'?'red':'yellow');
-    const canBuyNew=!(d.economic_event_risk||{}).no_new_buy && openPos<maxPos && (d.market_open||false);
+    const canBuyNew=!(d.economic_event_risk||{}).no_new_buy && openPos<maxPos && (d.market_open||false) && regime!=='BEAR' && !(d.cfg_volatile_block_buys!==false && regime==='VOLATILE');
     const confidence=Math.min(100,Math.round(parseFloat(d.confidence||(d.portfolio_health||{}).confidence||70)));
     const action=canBuyNew?'LOOK FOR BUY SETUPS':regime==='BEAR'?'STAY DEFENSIVE':'HOLD / WATCH';
     const advice=(dpnl||0)>=0?'Let winners run with trailing SLs':(dpnl||0)<-250?'Daily loss rising - reduce risk':'Hold existing positions';
@@ -5022,10 +5031,15 @@ async function load(){
     // Global Markets (simplified)
     const gm=d.global_markets||{};
     const gmAssets=gm.assets||{};
-    const gmSent=parseFloat(gm.sentiment_score||50);
     const gmSentEl=document.getElementById('gm-sentiment');
-    gmSentEl.textContent=(gmSent>=70?'BULLISH':gmSent>=40?'NEUTRAL':'BEARISH')+' ('+gmSent.toFixed(1)+')';
-    gmSentEl.className='stat-value-sm '+(gmSent>=70?'green':gmSent>=40?'yellow':'red');
+    if(gm.sentiment_score==null){
+      gmSentEl.textContent='N/A';
+      gmSentEl.className='stat-value-sm';
+    } else {
+      const gmSent=parseFloat(gm.sentiment_score);
+      gmSentEl.textContent=(gmSent>=70?'BULLISH':gmSent>=40?'NEUTRAL':'BEARISH')+' ('+gmSent.toFixed(1)+')';
+      gmSentEl.className='stat-value-sm '+(gmSent>=70?'green':gmSent>=40?'yellow':'red');
+    }
     const drivers=Object.entries(gmAssets).filter(([,a])=>a.return_5d_pct!=null).sort((a,b)=>Math.abs(b[1].return_5d_pct)-Math.abs(a[1].return_5d_pct)).slice(0,3).map(([name,a])=>{
       const v=parseFloat(a.return_5d_pct);
       const col=v>=0?'#22c55e':'#ef4444';
@@ -5125,6 +5139,24 @@ async function load(){
     const weak=(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
     document.getElementById('sr-strong').innerHTML=strong.length?strong.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
     document.getElementById('sr-weak').innerHTML=weak.length?weak.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
+
+    // Source/freshness footers for market-intelligence cards
+    const intelAsof=(elId,ts,source,staleAfterHrs)=>{
+      const el=document.getElementById(elId); if(!el)return;
+      if(!ts){el.innerHTML=`<span style="color:#6b7280">${source} · N/A</span>`;return;}
+      let ageH=NaN;
+      try{ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;}catch(e){}
+      const stale=isNaN(ageH)||ageH>staleAfterHrs;
+      const when=String(ts).replace('T',' ').slice(0,19);
+      el.innerHTML=`<span style="color:#6b7280">${source} · as of ${when}</span>`+(stale?` <span style="color:#ef4444;font-weight:700">STALE</span>`:'');
+    };
+    intelAsof('gm-asof',gm.timestamp,'Global snapshot (Yahoo Finance)',24);
+    intelAsof('oi-asof',oi.timestamp,'NSE option-chain snapshot',24);
+    intelAsof('fii-asof',fd.date,'NSE FII/DII report (T-1)',72);
+    intelAsof('vix-asof',vix.timestamp,'Kite live',1);
+    intelAsof('sr-asof',sr.timestamp,'Sector momentum snapshot',48);
+    const evtAsof=document.getElementById('evt-asof');
+    if(evtAsof)evtAsof.innerHTML='<span style="color:#6b7280">Event calendar · evaluated real-time</span>';
 
     // Recent orders - show only completed broker orders
     const ordEl=document.getElementById('d-recent-orders');
@@ -7393,6 +7425,7 @@ def api_data():
         "cfg_max_capital": config.MAX_CAPITAL_USAGE,
         "cfg_daily_loss": config.DAILY_MAX_LOSS_PCT,
         "cfg_sideways_buy_score_min": config.SIDEWAYS_BUY_SCORE_MIN,
+        "cfg_volatile_block_buys": config.VOLATILE_BLOCK_BUYS,
         "cfg_risk_per_trade": config.RISK_PER_TRADE,
         "cfg_swing_max_hold_days": config.SWING_MAX_HOLD_DAYS,
         "cfg_reentry_cooldown_hours": config.REENTRY_COOLDOWN_HOURS,

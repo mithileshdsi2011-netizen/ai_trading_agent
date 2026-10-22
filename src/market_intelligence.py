@@ -14,6 +14,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_age_seconds(snap: Dict[str, Any]) -> float:
+    """Age of a snapshot in seconds; unparseable/missing timestamps count as infinitely old."""
+    try:
+        ts = snap.get("timestamp")
+        if not ts:
+            return float("inf")
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 class MarketBreadthEngine:
     """
     Measures overall market breadth using a universe of NSE equities.
@@ -26,6 +39,9 @@ class MarketBreadthEngine:
     """
 
     DEFAULT_MAX_SYMBOLS = 150
+
+    # Breadth is intraday/daily intel — never reuse a snapshot older than this.
+    SNAPSHOT_MAX_AGE_SECONDS = 6 * 3600
 
     def __init__(
         self,
@@ -243,18 +259,22 @@ class MarketBreadthEngine:
 
     def latest(self) -> Optional[Dict[str, Any]]:
         """Return the latest snapshot from memory or store."""
-        if self._latest is not None:
-            return self._latest
-        if self.store is None:
+        snap = self._latest
+        if snap is None:
+            if self.store is None:
+                return None
+            try:
+                snap = self.store.get_latest_market_breadth()
+            except Exception as e:
+                logger.warning(f"Could not load latest market breadth: {e}")
+                return None
+        if snap is None:
             return None
-        try:
-            snap = self.store.get_latest_market_breadth()
-            if snap:
-                self._latest = snap
-            return snap
-        except Exception as e:
-            logger.warning(f"Could not load latest market breadth: {e}")
+        if _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+            self._latest = None
             return None
+        self._latest = snap
+        return snap
 
     def adjust_ai_score(self, ai_score: float) -> Dict[str, Any]:
         """

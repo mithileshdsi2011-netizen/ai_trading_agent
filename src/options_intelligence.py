@@ -13,6 +13,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_age_seconds(snap: Dict[str, Any]) -> float:
+    """Age of a snapshot in seconds; unparseable/missing timestamps count as infinitely old."""
+    try:
+        ts = snap.get("timestamp")
+        if not ts:
+            return float("inf")
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (now - dt).total_seconds())
+    except Exception:
+        return float("inf")
+
+
 class OptionsIntelligenceEngine:
     """
     Options chain intelligence for the enterprise trading bot.
@@ -25,6 +38,9 @@ class OptionsIntelligenceEngine:
         - Strong OI Support flag
         - Confidence boost suggestion
     """
+
+    # Options-chain data is intraday/daily intel — never reuse a snapshot older than this.
+    SNAPSHOT_MAX_AGE_SECONDS = 6 * 3600
 
     def __init__(
         self,
@@ -83,6 +99,8 @@ class OptionsIntelligenceEngine:
         raw = self.fetch_nse_option_chain()
         if raw is None:
             snap = self._load_from_store()
+            if snap is not None and _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+                snap = None
             if snap is None:
                 snap = self._neutral_snapshot("No options chain data available")
             self._latest = snap
@@ -227,9 +245,13 @@ class OptionsIntelligenceEngine:
             logger.warning(f"Could not persist options intelligence snapshot: {e}")
 
     def latest(self) -> Optional[Dict[str, Any]]:
-        if self._latest is not None:
-            return self._latest
-        return self._load_from_store()
+        snap = self._latest if self._latest is not None else self._load_from_store()
+        if snap is None:
+            return None
+        if _snapshot_age_seconds(snap) > self.SNAPSHOT_MAX_AGE_SECONDS:
+            self._latest = None
+            return None
+        return snap
 
     def adjust_confidence(self, confidence: float) -> Dict[str, Any]:
         """Apply options-derived confidence boost."""

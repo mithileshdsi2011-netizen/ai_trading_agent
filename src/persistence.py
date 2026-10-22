@@ -1386,9 +1386,9 @@ class TradingStore:
                     """,
                     (
                         snapshot.get("timestamp") or datetime.now().isoformat(),
-                        float(snapshot.get("sentiment_score", 50.0)),
-                        float(snapshot.get("raw_score", 0.0)),
-                        self._dumps(snapshot.get("assets", {})),
+                        float(snapshot["sentiment_score"]) if snapshot.get("sentiment_score") is not None else None,
+                        float(snapshot["raw_score"]) if snapshot.get("raw_score") is not None else None,
+                        self._dumps({k: v for k, v in snapshot.items() if k in ("assets", "missing_assets", "status", "reason")}),
                     ),
                 )
 
@@ -1404,12 +1404,19 @@ class TradingStore:
                 ).fetchone()
                 if not row:
                     return None
-                return {
+                payload = self._loads(row["assets"])
+                if not isinstance(payload, dict):
+                    payload = {}
+                snap = {
                     "timestamp": row["timestamp"],
                     "sentiment_score": row["sentiment_score"],
                     "raw_score": row["raw_score"],
-                    "assets": self._loads(row["assets"]),
                 }
+                for k in ("status", "reason", "missing_assets"):
+                    if k in payload:
+                        snap[k] = payload.pop(k)
+                snap["assets"] = payload
+                return snap
 
     # ── portfolio optimizer ───────────────────────────────────────────────
 

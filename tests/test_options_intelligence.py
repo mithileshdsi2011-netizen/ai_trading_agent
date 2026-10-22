@@ -4,6 +4,7 @@ Unit tests for src/options_intelligence.py
 import os
 import sys
 import unittest
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -56,7 +57,7 @@ def make_option_chain(
 
     return {
         "records": {
-            "timestamp": "2026-08-03T15:30:00",
+            "timestamp": datetime.now().isoformat(),
             "underlyingValue": spot,
             "data": data,
         }
