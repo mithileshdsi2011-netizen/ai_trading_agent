@@ -3392,17 +3392,17 @@ tr:last-child td{border:none}
     </div>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="background:#1f2937">
-          <th style="text-align:left;padding:10px 8px">IPO</th>
-          <th style="text-align:center;padding:10px 8px">Status</th>
-          <th style="text-align:left;padding:10px 8px">Dates</th>
-          <th style="text-align:left;padding:10px 8px">Price Band</th>
-          <th style="text-align:center;padding:10px 8px">Lot</th>
-          <th style="text-align:center;padding:10px 8px">Min Invest</th>
-          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
-          <th style="text-align:center;padding:10px 8px">Data Quality</th>
-          <th style="text-align:center;padding:10px 8px">Source Status</th>
-          <th style="text-align:center;padding:10px 8px">Score</th>
+        <thead><tr style="background:#1f2937;border-bottom:2px solid #3b82f6">
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">IPO</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Status</th>
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Dates</th>
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Price Band</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Lot</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Min Invest</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Sub (×)</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Data Quality</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Source Status</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Score</th>
         </tr></thead>
         <tbody id="ipo-summary-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">Loading IPO data...</td></tr></tbody>
       </table>
@@ -3418,17 +3418,17 @@ tr:last-child td{border:none}
     </div>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="background:#1f2937">
-          <th style="text-align:left;padding:10px 8px">IPO</th>
-          <th style="text-align:center;padding:10px 8px">Status</th>
-          <th style="text-align:left;padding:10px 8px">Dates</th>
-          <th style="text-align:left;padding:10px 8px">Price Band</th>
-          <th style="text-align:center;padding:10px 8px">Lot</th>
-          <th style="text-align:center;padding:10px 8px">Min Invest</th>
-          <th style="text-align:center;padding:10px 8px">Sub (×)</th>
-          <th style="text-align:center;padding:10px 8px">Data Quality</th>
-          <th style="text-align:center;padding:10px 8px">Source Status</th>
-          <th style="text-align:center;padding:10px 8px">Score</th>
+        <thead><tr style="background:#1f2937;border-bottom:2px solid #3b82f6">
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">IPO</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Status</th>
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Dates</th>
+          <th style="text-align:left;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Price Band</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Lot</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Min Invest</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Sub (×)</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Data Quality</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Source Status</th>
+          <th style="text-align:center;padding:10px 8px;color:#f9fafb;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.08em">Score</th>
         </tr></thead>
         <tbody id="ipo-history-table"><tr><td colspan="10" style="text-align:center;color:#4b5563;padding:20px">No history</td></tr></tbody>
       </table>
