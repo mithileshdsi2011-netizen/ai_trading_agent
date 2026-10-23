@@ -22,6 +22,7 @@ intraday engine only — Swing Trading and IPO Intelligence are unaffected.
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -66,6 +67,7 @@ EOD_QUOTE_INCIDENT_KEY = 'intraday:angel:eod_quote_failure'
 # beyond their normal duration even with zero open positions.
 SCAN_STUCK_ALERT_SECONDS = 600
 SCAN_STUCK_INCIDENT_KEY = 'intraday:angel:scan_stuck'
+SCHEDULER_TICK_SECONDS = 30
 
 
 def _production_incident(action: str, incident_key: str, detail: str) -> None:
@@ -139,6 +141,7 @@ class IntradayEngine:
         self._alert_hook = alert_hook
         self._quote_fail_streak = 0
         self._cycle_running = False
+        self._scheduler_started = False
         self._cycle_started_at: Optional[datetime] = None
         self._last_cycle_duration_s: Optional[float] = None
         self._scan_stuck_notified = False
@@ -479,12 +482,15 @@ class IntradayEngine:
         Never blocks the caller — a full scan can take minutes."""
         due = (self._last_scan_time is None
                or (datetime.now() - self._last_scan_time).total_seconds() >= self.scan_interval)
-        if not due or self._cycle_running:
-            return
-
-        def _bg():
+        # Check-and-set under the lock: a scheduler tick and an API poll must
+        # never spawn two cycles for the same slot.
+        with self._lock:
+            if not due or self._cycle_running:
+                return
             self._cycle_running = True
             self._cycle_started_at = datetime.now()
+
+        def _bg():
             try:
                 self.run_cycle()
             except Exception as e:
@@ -499,6 +505,33 @@ class IntradayEngine:
                     self._incident('resolve', SCAN_STUCK_INCIDENT_KEY, '')
 
         threading.Thread(target=_bg, daemon=True, name="intraday-cycle").start()
+
+    def start_scheduler(self, tick_seconds: int = SCHEDULER_TICK_SECONDS):
+        """Self-schedule scan cycles during market hours.
+
+        Without this, the engine is poll-driven: cycles only start when
+        /api/intraday-data is requested, so exits (SL/target/EOD) never
+        evaluate while the Intraday tab is unviewed. A 30s daemon tick
+        calls maybe_run_cycle(), which no-ops unless a scan is due —
+        cheap, single-flight, and gated to market hours so nothing hits
+        the network overnight or on weekends."""
+        if self._scheduler_started:
+            return
+        self._scheduler_started = True
+
+        def _tick():
+            while True:
+                try:
+                    if self.validator.is_market_open() or self.validator.is_square_off_time():
+                        with self._lock:
+                            self._maybe_square_off()
+                        self.maybe_run_cycle()
+                except Exception as e:
+                    logger.error(f"[INTRADAY] scheduler tick error: {e}")
+                time.sleep(tick_seconds)
+
+        threading.Thread(target=_tick, daemon=True,
+                         name="intraday-scheduler").start()
 
     # ── kill switch ─────────────────────────────────────────────────
     def set_kill_switch(self, active: bool):
@@ -654,4 +687,5 @@ def get_intraday_engine(**kwargs) -> IntradayEngine:
     with _ENGINE_LOCK:
         if _ENGINE is None:
             _ENGINE = IntradayEngine(**kwargs)
+        _ENGINE.start_scheduler()
         return _ENGINE

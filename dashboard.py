@@ -9625,6 +9625,17 @@ if __name__ == '__main__':
     _hb = threading.Thread(target=_heartbeat_loop, daemon=True, name="heartbeat")
     _hb.start()
 
+    # Start the Angel PAPER intraday self-scheduler at boot — scans,
+    # position monitoring and EOD square-off must not depend on anyone
+    # opening the Intraday tab. get_intraday_engine() starts a daemon
+    # scheduler inside the engine (single-flight, market-hours gated).
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from intraday.engine import get_intraday_engine
+        get_intraday_engine()
+    except Exception as e:
+        logger.error(f"Intraday scheduler start failed: {e}")
+
     print("\n" + "="*55)
     print("  🤖 AI Trading Dashboard")
     print("  Open in browser: http://localhost:5001")

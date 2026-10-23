@@ -7,6 +7,7 @@ Completely separate from Swing Trading tests.
 import pytest
 import sys
 import os
+import threading
 from datetime import datetime, timedelta
 from unittest.mock import Mock, MagicMock
 
@@ -1907,3 +1908,100 @@ class TestMarketDataStatusSemantics:
         ok, reason = engine.validator.validate_entry_conditions(
             signal=None, last_data_time=None)
         assert ok is False  # still rejected — no fresh quote
+
+
+class TestSelfScheduler:
+    """Oct-23 audit: engine was poll-driven — scans/exits only ran while
+    /api/intraday-data was being requested. The self-scheduler keeps
+    cycles running during market hours without a viewer."""
+
+    def _engine(self, tmp_path):
+        from intraday.engine import IntradayEngine
+        return IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+
+    def test_tick_runs_cycle_when_market_open(self, tmp_path):
+        import time
+        engine = self._engine(tmp_path)
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.maybe_run_cycle = Mock()
+        engine.start_scheduler(tick_seconds=0.05)
+        time.sleep(0.2)
+        assert engine.maybe_run_cycle.called
+
+    def test_tick_skips_when_market_closed(self, tmp_path):
+        import time
+        engine = self._engine(tmp_path)
+        engine.validator.is_market_open = Mock(return_value=False)
+        engine.maybe_run_cycle = Mock()
+        engine.start_scheduler(tick_seconds=0.05)
+        time.sleep(0.2)
+        engine.maybe_run_cycle.assert_not_called()
+
+    def test_scheduler_starts_only_once(self, tmp_path):
+        engine = self._engine(tmp_path)
+        engine.validator.is_market_open = Mock(return_value=False)
+        engine.start_scheduler(tick_seconds=10)
+        assert engine._scheduler_started is True
+        thread_count_before = sum(1 for t in threading.enumerate()
+                                  if t.name == 'intraday-scheduler')
+        engine.start_scheduler(tick_seconds=10)
+        thread_count_after = sum(1 for t in threading.enumerate()
+                                 if t.name == 'intraday-scheduler')
+        assert thread_count_after == thread_count_before
+
+    def test_tick_recovers_from_cycle_exceptions(self, tmp_path):
+        """A failing cycle must not kill the scheduler — next tick retries."""
+        import time
+        engine = self._engine(tmp_path)
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.maybe_run_cycle = Mock(side_effect=RuntimeError("boom"))
+        engine.start_scheduler(tick_seconds=0.05)
+        time.sleep(0.25)
+        assert engine.maybe_run_cycle.call_count >= 2
+
+    def test_no_overlapping_scans(self, tmp_path):
+        """Two rapid maybe_run_cycle calls spawn exactly one cycle."""
+        import time
+        engine = self._engine(tmp_path)
+        calls = []
+        def slow_cycle():
+            calls.append(1)
+            time.sleep(0.3)
+        engine.run_cycle = slow_cycle
+        engine.maybe_run_cycle()
+        engine.maybe_run_cycle()  # _cycle_running already set → no-op
+        engine.maybe_run_cycle()
+        time.sleep(0.5)
+        assert len(calls) == 1
+        assert engine._cycle_running is False
+
+    def test_unattended_eod_square_off(self, tmp_path):
+        """Square-off fires on open positions with no UI involved."""
+        engine = self._engine(tmp_path)
+        pos = make_position(symbol="DRREDDY")
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=True)
+        engine.paper_executor.get_open_positions = Mock(return_value=[pos])
+        engine.paper_executor.eod_square_off = Mock(return_value=[])
+        engine.market_data.get_quotes = Mock(return_value={
+            'DRREDDY': {'ltp': 1237.8}})
+        with engine._lock:
+            engine._maybe_square_off()
+        engine.paper_executor.eod_square_off.assert_called_once()
+
+    def test_positions_survive_engine_restart(self, tmp_path):
+        """Open paper positions rehydrate into a new engine on same state_dir."""
+        engine1 = self._engine(tmp_path)
+        engine1.state_store.save_positions([make_position(symbol="DRREDDY")])
+        engine2 = self._engine(tmp_path)
+        open_syms = [p.symbol for p in engine2.paper_executor.get_open_positions()]
+        assert "DRREDDY" in open_syms
+
+    def test_engine_factory_starts_scheduler(self, tmp_path, monkeypatch):
+        """get_intraday_engine() — the boot-time path — activates the scheduler."""
+        import intraday.engine as eng_mod
+        monkeypatch.setattr(eng_mod, '_ENGINE', None)
+        engine = eng_mod.get_intraday_engine(
+            config=IntradayConfig(), state_dir=str(tmp_path))
+        assert engine._scheduler_started is True
+        monkeypatch.setattr(eng_mod, '_ENGINE', None)
