@@ -1915,9 +1915,18 @@ class TestSelfScheduler:
     /api/intraday-data was being requested. The self-scheduler keeps
     cycles running during market hours without a viewer."""
 
+    @pytest.fixture(autouse=True)
+    def _stop_schedulers(self):
+        self._engines = []
+        yield
+        for e in self._engines:
+            e.stop_scheduler()
+
     def _engine(self, tmp_path):
         from intraday.engine import IntradayEngine
-        return IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
+        self._engines.append(engine)
+        return engine
 
     def test_tick_runs_cycle_when_market_open(self, tmp_path):
         import time

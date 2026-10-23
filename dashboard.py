@@ -1193,7 +1193,7 @@ def _generate_morning_report():
                         "rank":        len(top_picks) + 1,
                         "symbol":      sym,
                         "score":       score,
-                        "confidence":  round(conf * 100),
+                        "confidence":  round(conf * 100) if conf <= 1.0 else round(conf),
                         "sector":      sec,
                         "action":      act,
                         "entry":       price,

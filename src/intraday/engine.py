@@ -142,6 +142,7 @@ class IntradayEngine:
         self._quote_fail_streak = 0
         self._cycle_running = False
         self._scheduler_started = False
+        self._scheduler_stop = threading.Event()
         self._cycle_started_at: Optional[datetime] = None
         self._last_cycle_duration_s: Optional[float] = None
         self._scan_stuck_notified = False
@@ -518,9 +519,10 @@ class IntradayEngine:
         if self._scheduler_started:
             return
         self._scheduler_started = True
+        self._scheduler_stop.clear()
 
         def _tick():
-            while True:
+            while not self._scheduler_stop.is_set():
                 try:
                     if self.validator.is_market_open() or self.validator.is_square_off_time():
                         with self._lock:
@@ -528,10 +530,14 @@ class IntradayEngine:
                         self.maybe_run_cycle()
                 except Exception as e:
                     logger.error(f"[INTRADAY] scheduler tick error: {e}")
-                time.sleep(tick_seconds)
+                self._scheduler_stop.wait(tick_seconds)
 
         threading.Thread(target=_tick, daemon=True,
                          name="intraday-scheduler").start()
+
+    def stop_scheduler(self):
+        """Stop the background tick (test teardown / graceful shutdown)."""
+        self._scheduler_stop.set()
 
     # ── kill switch ─────────────────────────────────────────────────
     def set_kill_switch(self, active: bool):

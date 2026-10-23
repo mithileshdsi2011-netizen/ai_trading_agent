@@ -213,6 +213,7 @@ class MarketDataFetcher:
             except Exception as exc:
                 last_exc = exc
                 print(f"DEBUG _kite_call_with_retry({endpoint}) attempt {attempt+1} error: {exc} after {time.perf_counter()-t_attempt:.3f}s", flush=True)
+                exc_str = str(exc).lower()
                 if 'access_token' in exc_str or 'api_key' in exc_str or 'invalid token' in exc_str:
                     logger.error("Kite auth error — token invalid. Run: python get_kite_token.py")
                     raise exc

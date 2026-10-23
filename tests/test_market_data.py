@@ -158,5 +158,44 @@ class TestMarketDataFetcher:
         assert 'TCS' in result
 
 
+class TestKiteCallRetry:
+    """Regression: exception handler in _kite_call_with_retry must not
+    raise NameError and must preserve retry semantics."""
+
+    @pytest.fixture
+    def fetcher(self):
+        _reset_market_data_caches()
+        from src.market_data_optimized import MarketDataFetcher as OptFetcher
+        OptFetcher._cb_failures = 0
+        OptFetcher._cb_open_until = 0
+        return OptFetcher(kite=Mock())
+
+    def test_non_auth_error_retries_and_raises_real_exception(self, fetcher, monkeypatch):
+        monkeypatch.setattr('src.market_data_optimized.time.sleep', lambda s: None)
+        calls = {'n': 0}
+
+        def boom():
+            calls['n'] += 1
+            raise ConnectionError("kite down")
+
+        with pytest.raises(ConnectionError):
+            fetcher._kite_call_with_retry(boom, "hist")
+
+        assert calls['n'] == 3  # retried, not a NameError on first failure
+
+    def test_auth_error_raises_immediately(self, fetcher, monkeypatch):
+        monkeypatch.setattr('src.market_data_optimized.time.sleep', lambda s: None)
+        calls = {'n': 0}
+
+        def boom():
+            calls['n'] += 1
+            raise RuntimeError("Invalid access_token provided")
+
+        with pytest.raises(RuntimeError):
+            fetcher._kite_call_with_retry(boom, "hist")
+
+        assert calls['n'] == 1  # auth errors must not retry
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
