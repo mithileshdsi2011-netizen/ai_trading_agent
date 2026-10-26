@@ -353,5 +353,114 @@ class TestSectorCoverageGate(unittest.TestCase):
             os.remove(db)
 
 
+def _uneven_sector_setup(big_sectors_ok, small_sector_count=13):
+    """Uneven sector sizes: each 'big' sector has 10 symbols (all succeed),
+    each 'small' sector has 1 symbol (all fail) — lets coverage_pct stay
+    high while sectors_covered stays controlled."""
+    syms, sector_map, hists, fail = [], {}, {}, set()
+    for i in range(big_sectors_ok):
+        for j in range(10):
+            s = f'BIG{i}_{j}'
+            syms.append(s)
+            sector_map[s] = f'BigSector{i}'
+            hists[s] = up_hist(100, 110 + (10 - i) * 3 + j)
+    for i in range(small_sector_count):
+        s = f'SML{i}'
+        syms.append(s)
+        sector_map[s] = f'SmallSector{i}'
+        fail.add(s)
+    md = CountingMarketData(hists, fail=fail)
+    eng = SectorRotationEngine(market_data=md, store=None,
+                               universe=syms, sector_map=sector_map)
+    return eng
+
+
+class TestSectorCoverageDenominator(unittest.TestCase):
+    """Sector-count gate at the real configured-universe boundary."""
+
+    def test_12_of_24_sectors_sufficient(self):
+        eng = _uneven_sector_setup(12, 12)  # 24 configured, 12 covered, 120/132 ok
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['sectors_configured'], 24)
+        self.assertEqual(snap['coverage']['sectors_covered'], 12)
+        self.assertEqual(snap['coverage']['min_sectors_required'], 12)
+        self.assertGreaterEqual(snap['coverage']['coverage_pct'], 70.0)
+        self.assertEqual(snap['sector_status'], 'SUFFICIENT')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'BigSector0')['adjustment'], 5)
+
+    def test_11_of_24_sectors_neutral_despite_high_symbol_coverage(self):
+        eng = _uneven_sector_setup(11, 13)  # 24 configured, 11 covered, 110/123 ok
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['sectors_covered'], 11)
+        self.assertEqual(snap['coverage']['coverage_pct'], 89.4)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'BigSector0')['adjustment'], 0)
+
+    def test_2_of_24_sectors_neutral(self):
+        eng = _uneven_sector_setup(2, 22)  # today's production shape
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['sectors_covered'], 2)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'BigSector0')['adjustment'], 0)
+
+
+class TestSectorRotationMigration(unittest.TestCase):
+    """Pre-gate DB schema must migrate cleanly and preserve old rows."""
+
+    def test_legacy_schema_migrates_and_preserves_rows(self):
+        import sqlite3 as _sq
+        import tempfile
+        from persistence import TradingStore
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            # Simulate a pre-gate database: old schema + one legacy row.
+            conn = _sq.connect(db)
+            conn.execute("""CREATE TABLE sector_rotation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                nifty_7d REAL NOT NULL DEFAULT 0,
+                nifty_30d REAL NOT NULL DEFAULT 0,
+                top5_strong TEXT NOT NULL DEFAULT '[]',
+                top5_weak TEXT NOT NULL DEFAULT '[]',
+                all_sectors TEXT NOT NULL DEFAULT '[]')""")
+            conn.execute(
+                "INSERT INTO sector_rotation (timestamp,nifty_7d,nifty_30d,top5_strong,top5_weak,all_sectors) "
+                "VALUES ('2026-10-26T16:47:00',1.2,3.4,'[{\"sector\":\"Banking\",\"momentum_score\":100}]','[]','[]')")
+            conn.commit()
+            conn.close()
+
+            store = TradingStore(db)
+            # Legacy row readable; absent metadata fails neutral downstream.
+            row = store.get_latest_sector_rotation()
+            self.assertEqual(row['coverage'], {})
+            self.assertIsNone(row['sector_status'])
+            self.assertEqual(row['top5_strong'][0]['sector'], 'Banking')
+
+            # Idempotent migration: repeated ensure + second store → no error.
+            with store._conn() as c:
+                store._ensure_sector_rotation_columns(c)
+            with store._conn() as c:
+                store._ensure_sector_rotation_columns(c)
+            store2 = TradingStore(db)
+
+            # New row round-trips coverage metadata without losing old rows.
+            store2.save_sector_rotation({
+                'timestamp': datetime.now().isoformat(),
+                'sector_status': 'SUFFICIENT',
+                'coverage': {'symbols_attempted': 150, 'symbols_succeeded': 140,
+                             'coverage_pct': 93.3, 'sufficient': True},
+                'top5_strong': [{'sector': 'IT', 'momentum_score': 88}],
+                'all_sectors': [{'sector': 'IT', 'momentum_score': 88}],
+            })
+            latest = store2.get_latest_sector_rotation()
+            self.assertEqual(latest['sector_status'], 'SUFFICIENT')
+            self.assertEqual(latest['coverage']['symbols_succeeded'], 140)
+            cnt = _sq.connect(db).execute('SELECT COUNT(*) FROM sector_rotation').fetchone()[0]
+            self.assertEqual(cnt, 2)
+        finally:
+            os.remove(db)
+
+
 if __name__ == '__main__':
     unittest.main()
