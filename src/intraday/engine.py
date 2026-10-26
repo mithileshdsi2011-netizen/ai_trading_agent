@@ -484,12 +484,19 @@ class IntradayEngine:
         due = (self._last_scan_time is None
                or (datetime.now() - self._last_scan_time).total_seconds() >= self.scan_interval)
         # Check-and-set under the lock: a scheduler tick and an API poll must
-        # never spawn two cycles for the same slot.
-        with self._lock:
+        # never spawn two cycles for the same slot. The acquire MUST be
+        # non-blocking — run_cycle holds this lock for the whole (multi-
+        # minute, API-throttled) scan, so a blocking acquire would hang
+        # every /api/intraday-data poll behind an in-flight scan.
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
             if not due or self._cycle_running:
                 return
             self._cycle_running = True
             self._cycle_started_at = datetime.now()
+        finally:
+            self._lock.release()
 
         def _bg():
             try:
@@ -654,6 +661,8 @@ class IntradayEngine:
             'scan_started': self._cycle_started_at.isoformat() if self._cycle_started_at else None,
             'scan_seconds': scan_seconds,
             'last_cycle_duration_s': self._last_cycle_duration_s,
+            # Response generation stamp so the UI can age/label stale data.
+            'server_time': datetime.now().isoformat(),
         }
 
     def _static_ip_status(self) -> str:

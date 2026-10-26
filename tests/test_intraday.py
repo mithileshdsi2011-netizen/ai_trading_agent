@@ -1941,6 +1941,7 @@ class TestSelfScheduler:
         import time
         engine = self._engine(tmp_path)
         engine.validator.is_market_open = Mock(return_value=False)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         engine.maybe_run_cycle = Mock()
         engine.start_scheduler(tick_seconds=0.05)
         time.sleep(0.2)
@@ -1967,6 +1968,20 @@ class TestSelfScheduler:
         engine.start_scheduler(tick_seconds=0.05)
         time.sleep(0.25)
         assert engine.maybe_run_cycle.call_count >= 2
+
+    def test_poll_during_scan_does_not_block(self, tmp_path):
+        """/api/intraday-data polls must return immediately while a scan
+        holds the engine lock — otherwise the UI freezes on stale data."""
+        import time
+        engine = self._engine(tmp_path)
+        engine._last_scan_time = None  # make a cycle due
+        engine.validator.is_market_open = Mock(return_value=True)
+        with engine._lock:  # simulate in-flight scan holding the lock
+            t0 = time.monotonic()
+            engine.maybe_run_cycle()
+            elapsed = time.monotonic() - t0
+        assert elapsed < 0.5, f"poll blocked {elapsed:.2f}s behind engine lock"
+        assert engine._cycle_running is False  # must not have spawned
 
     def test_no_overlapping_scans(self, tmp_path):
         """Two rapid maybe_run_cycle calls spawn exactly one cycle."""

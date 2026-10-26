@@ -3516,6 +3516,7 @@ tr:last-child td{border:none}
       <button id="intraday-kill-btn" onclick="toggleIntradayKillSwitch()" style="background:#ef4444;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">STOP INTRADAY</button>
     </div>
   </div>
+  <div id="intraday-data-age" style="color:#9ca3af;font-size:11px;margin:-8px 0 14px 2px">Intraday data: —</div>
 
   <!-- Today's Summary -->
   <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
@@ -6900,10 +6901,27 @@ async function loadIPOData(){
 
 // ─── Intraday Trading Loader ───────────────────────────────────────────────────
 async function loadIntradayData(){
+  const ageEl=document.getElementById('intraday-data-age');
   try{
-    const r=await fetch('/api/intraday-data');
+    const ctrl=new AbortController();
+    const to=setTimeout(()=>ctrl.abort(),15000);
+    const r=await fetch('/api/intraday-data',{signal:ctrl.signal});
+    clearTimeout(to);
     const d=await r.json();
     if(d.error)throw new Error(d.error);
+    window._intradayLastGood=Date.now();
+    if(ageEl){
+      ageEl.style.fontWeight='400';
+      const st=d.server_time?new Date(d.server_time):null;
+      const ageS=st?(Date.now()-st.getTime())/1000:0;
+      if(ageS>120){
+        ageEl.textContent=`⚠ STALE RESPONSE — server data is ${Math.round(ageS)}s old (as of ${st.toLocaleTimeString('en-IN',{hour12:false})})`;
+        ageEl.style.color='#ef4444';
+      }else{
+        ageEl.textContent=`Intraday data: live · server ${st?st.toLocaleTimeString('en-IN',{hour12:false}):'—'}`;
+        ageEl.style.color='#9ca3af';
+      }
+    }
     
     // Update status boxes
     const authStatus=document.getElementById('intraday-auth-status');
@@ -7037,6 +7055,15 @@ async function loadIntradayData(){
     
   }catch(e){
     console.error('Intraday data load error:',e);
+    // Visible offline state — never leave stale status boxes looking live.
+    if(ageEl){
+      const last=window._intradayLastGood?new Date(window._intradayLastGood).toLocaleTimeString('en-IN',{hour12:false}):'never';
+      ageEl.textContent=`⚠ INTRADAY DATA OFFLINE — last good response ${last}`;
+      ageEl.style.color='#ef4444';
+      ageEl.style.fontWeight='700';
+    }
+    const ts=document.getElementById('intraday-trading-status');
+    if(ts){ts.textContent='DATA OFFLINE';ts.style.color='#ef4444';}
     const oppBody=document.getElementById('intraday-opportunities-body');
     if(oppBody)oppBody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:20px">Intraday data temporarily unavailable</td></tr>';
   }
