@@ -81,8 +81,10 @@ class EnterpriseSystemMonitor:
             'ai_engine': self._ai_engine_health(),
             'portfolio_optimizer': self._portfolio_optimizer_health(),
             'ai_learning': self._ai_learning_health(),
+            'data_quality': self._data_quality(),
         }
         metrics['health_score'] = self.health_score(metrics)
+        metrics['data_quality_score'] = self._data_quality_score(metrics['data_quality'])
         self._last_metrics = metrics
         return metrics
 
@@ -189,6 +191,46 @@ class EnterpriseSystemMonitor:
             return {'ok': False, 'last_run': None}
 
     # ── Health score ──────────────────────────────────────────────────────
+
+    # Decision-input feeds — thresholds mirror the engines' staleness gates
+    # (options/breadth 6h, global 12h, sector 24h, FII/DII 72h T-1-safe).
+    _DATA_FEEDS = (
+        ('options_intelligence', 'get_latest_options_intelligence', 'timestamp', 6, True),
+        ('market_breadth', 'get_latest_market_breadth', 'timestamp', 6, True),
+        ('global_markets', 'get_latest_global_markets', 'timestamp', 12, True),
+        ('sector_rotation', 'get_latest_sector_rotation', 'timestamp', 24, False),
+        ('fii_dii', 'get_latest_fii_dii', 'date', 72, False),
+    )
+
+    def _data_quality(self) -> Dict[str, Any]:
+        """Per-feed freshness — kept separate from system health so stale
+        decision inputs can never hide behind an 'Excellent' infra score."""
+        feeds = {}
+        for name, getter, ts_key, max_age_h, critical in self._DATA_FEEDS:
+            entry = {'critical': critical, 'max_age_hours': max_age_h,
+                     'status': 'MISSING', 'age_hours': None}
+            try:
+                snap = getattr(self.store, getter)() if hasattr(self.store, getter) else None
+                ts = (snap or {}).get(ts_key)
+                if ts:
+                    try:
+                        age_h = (datetime.now() - pd.to_datetime(ts).to_pydatetime().replace(tzinfo=None)).total_seconds() / 3600
+                        entry['age_hours'] = round(age_h, 1)
+                        entry['status'] = 'OK' if age_h <= max_age_h else 'STALE'
+                    except Exception:
+                        entry['status'] = 'UNPARSEABLE'
+            except Exception:
+                pass
+            feeds[name] = entry
+        return feeds
+
+    @staticmethod
+    def _data_quality_score(feeds: Dict[str, Any]) -> int:
+        score = 100
+        for f in (feeds or {}).values():
+            if f.get('status') in ('STALE', 'MISSING', 'UNPARSEABLE'):
+                score -= 25 if f.get('critical') else 10
+        return max(0, score)
 
     def health_score(self, metrics: Dict[str, Any]) -> int:
         """Return 0-100 health score."""

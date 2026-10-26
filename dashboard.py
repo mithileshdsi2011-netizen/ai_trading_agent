@@ -913,6 +913,26 @@ def _maybe_trigger_background_scan():
 _MORNING_CACHE: dict = {"report": None, "date": None, "generating": False}
 _MORNING_CACHE_LOCK = threading.Lock()
 
+# Last successfully detected market regime — shown when detection fails so
+# the UI can display "last known" instead of a fabricated value.
+_LAST_KNOWN_REGIME = {'value': None, 'at': None}
+
+
+def _detect_regime_or_unavailable(kite) -> tuple:
+    """Detect market regime; on any failure return 'UNAVAILABLE' plus the
+    last genuine reading (never fabricate a regime for LIVE context)."""
+    try:
+        from market_regime import MarketRegimeDetector
+        regime = MarketRegimeDetector(kite=kite).detect_regime()
+        if regime not in ('BULL', 'BEAR', 'SIDEWAYS', 'VOLATILE'):
+            raise ValueError(f'unexpected regime value: {regime!r}')
+        _LAST_KNOWN_REGIME['value'] = regime
+        _LAST_KNOWN_REGIME['at'] = datetime.now().isoformat()
+        return regime, None
+    except Exception:
+        return 'UNAVAILABLE', (dict(_LAST_KNOWN_REGIME)
+                               if _LAST_KNOWN_REGIME.get('value') else None)
+
 # Sector proxy symbols — used to judge sector strength from daily moves
 _SECTOR_PROXIES = {
     "Defence":      ["HAL", "BEL", "BEML", "GRSE", "MAZDOCK"],
@@ -1831,7 +1851,7 @@ tr:last-child td{border:none}
       <div class="card-sm"><div class="stat-label">Next Event</div><div class="stat-value-sm" id="evt-name">—</div></div>
       <div class="card-sm"><div class="stat-label">Hours Away</div><div class="stat-value-sm" id="evt-hours">—</div></div>
       <div class="card-sm"><div class="stat-label">Size Factor</div><div class="stat-value-sm" id="evt-factor">—</div></div>
-      <div class="card-sm"><div class="stat-label">New BUYs</div><div class="stat-value-sm" id="evt-buy">—</div></div>
+      <div class="card-sm"><div class="stat-label">Event Gate</div><div class="stat-value-sm" id="evt-buy">—</div></div>
     </div>
     <div id="evt-asof" style="margin-top:10px;font-size:11px"></div>
   </div>
@@ -1982,7 +2002,7 @@ tr:last-child td{border:none}
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🎯 Daily Goals</div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div>
-        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Current P&L / Daily Target</span><span style="font-size:12px" id="d-goal-profit-val">₹0 / ₹100</span></div>
+        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Current P&L / Daily Target (of configured capital)</span><span style="font-size:12px" id="d-goal-profit-val">₹0 / ₹100</span></div>
         <div class="progress-bar"><div class="progress-fill" id="d-goal-profit-bar" style="width:0%;background:#22c55e"></div></div>
       </div>
       <div>
@@ -1990,7 +2010,7 @@ tr:last-child td{border:none}
         <div class="progress-bar"><div class="progress-fill" id="d-goal-capital-bar" style="width:0%;background:#60a5fa"></div></div>
       </div>
       <div>
-        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Daily Loss Limit</span><span style="font-size:12px" id="d-goal-loss-val">₹0 / ₹250</span></div>
+        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Daily Loss Limit (of configured capital)</span><span style="font-size:12px" id="d-goal-loss-val">₹0 / ₹250</span></div>
         <div class="progress-bar"><div class="progress-fill" id="d-goal-loss-bar" style="width:0%;background:#ef4444"></div></div>
       </div>
     </div>
@@ -2813,7 +2833,8 @@ tr:last-child td{border:none}
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">⚙️ Configuration</div>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <div class="card-sm"><div class="stat-label">Trading Amount</div><div style="font-size:14px;font-weight:600" id="bs-cfg-amount">—</div></div>
+      <div class="card-sm"><div class="stat-label">Trading Amount (configured)</div><div style="font-size:14px;font-weight:600" id="bs-cfg-amount">—</div></div>
+      <div class="card-sm"><div class="stat-label">Broker Cash (actual)</div><div style="font-size:14px;font-weight:600" id="bs-cfg-broker-cash">—</div></div>
       <div class="card-sm"><div class="stat-label">Max Positions</div><div style="font-size:14px;font-weight:600" id="bs-cfg-maxpos">—</div></div>
       <div class="card-sm"><div class="stat-label">Min Confidence</div><div style="font-size:14px;font-weight:600" id="bs-cfg-conf">—</div></div>
       <div class="card-sm"><div class="stat-label">Risk Per Trade</div><div style="font-size:14px;font-weight:600" id="bs-cfg-risk">—</div></div>
@@ -3336,6 +3357,11 @@ tr:last-child td{border:none}
       <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Heartbeat Log</div>
       <div id="mon-heartbeat" style="overflow-x:auto;font-size:11px;color:#f9fafb">—</div>
     </div>
+  </div>
+
+  <div class="card mb-4">
+    <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Data Quality — Decision-Input Freshness</div>
+    <div id="mon-data-quality" style="font-size:12px;color:#f9fafb">—</div>
   </div>
 
   <div class="card mb-4">
@@ -5018,9 +5044,10 @@ async function load(){
     const regime=(d.market_regime||'—').toUpperCase();
     document.getElementById('ai-rec-regime').textContent=regime;
     document.getElementById('ai-rec-regime').className='stat-value-sm '+(regime==='BULL'?'green':regime==='BEAR'?'red':'yellow');
-    const canBuyNew=!(d.economic_event_risk||{}).no_new_buy && openPos<maxPos && (d.market_open||false) && regime!=='BEAR' && !(d.cfg_volatile_block_buys!==false && regime==='VOLATILE');
+    // UNAVAILABLE regime = detection failed — fail-safe: never invite new buys
+    const canBuyNew=!(d.economic_event_risk||{}).no_new_buy && openPos<maxPos && (d.market_open||false) && regime!=='BEAR' && regime!=='UNAVAILABLE' && !(d.cfg_volatile_block_buys!==false && regime==='VOLATILE');
     const confidence=Math.min(100,Math.round(parseFloat(d.confidence||(d.portfolio_health||{}).confidence||70)));
-    const action=canBuyNew?'LOOK FOR BUY SETUPS':regime==='BEAR'?'STAY DEFENSIVE':'HOLD / WATCH';
+    const action=canBuyNew?'LOOK FOR BUY SETUPS':regime==='BEAR'?'STAY DEFENSIVE':regime==='UNAVAILABLE'?'REGIME UNAVAILABLE — STAND BY':'HOLD / WATCH';
     const advice=(dpnl||0)>=0?'Let winners run with trailing SLs':(dpnl||0)<-250?'Daily loss rising - reduce risk':'Hold existing positions';
     document.getElementById('ai-rec-action').textContent=action;
     document.getElementById('ai-rec-action').className='stat-value-sm '+(canBuyNew?'green':'yellow');
@@ -5029,11 +5056,19 @@ async function load(){
     document.getElementById('ai-rec-new-buy').className='stat-value-sm '+(canBuyNew?'green':'red');
     document.getElementById('ai-rec-confidence').textContent=confidence+'%';
 
+    // Stale snapshots must not render live-looking values — N/A past the
+    // feed's freshness window (thresholds mirror the -asof badges below).
+    const isIntelStale=(ts,staleAfterHrs)=>{
+      if(!ts)return true;
+      try{const ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;return isNaN(ageH)||ageH>staleAfterHrs;}catch(e){return true;}
+    };
+
     // Global Markets (simplified)
     const gm=d.global_markets||{};
     const gmAssets=gm.assets||{};
+    const gmStale=isIntelStale(gm.timestamp,24);
     const gmSentEl=document.getElementById('gm-sentiment');
-    if(gm.sentiment_score==null){
+    if(gmStale || gm.sentiment_score==null){
       gmSentEl.textContent='N/A';
       gmSentEl.className='stat-value-sm';
     } else {
@@ -5041,12 +5076,12 @@ async function load(){
       gmSentEl.textContent=(gmSent>=70?'BULLISH':gmSent>=40?'NEUTRAL':'BEARISH')+' ('+gmSent.toFixed(1)+')';
       gmSentEl.className='stat-value-sm '+(gmSent>=70?'green':gmSent>=40?'yellow':'red');
     }
-    const drivers=Object.entries(gmAssets).filter(([,a])=>a.return_5d_pct!=null).sort((a,b)=>Math.abs(b[1].return_5d_pct)-Math.abs(a[1].return_5d_pct)).slice(0,3).map(([name,a])=>{
+    const drivers=gmStale?'':Object.entries(gmAssets).filter(([,a])=>a.return_5d_pct!=null).sort((a,b)=>Math.abs(b[1].return_5d_pct)-Math.abs(a[1].return_5d_pct)).slice(0,3).map(([name,a])=>{
       const v=parseFloat(a.return_5d_pct);
       const col=v>=0?'#22c55e':'#ef4444';
       return `<div><span style="color:#f9fafb">${name}</span> <span style="color:${col};font-weight:700">${v>=0?'+':''}${v.toFixed(1)}%</span></div>`;
     }).join('');
-    document.getElementById('gm-drivers').innerHTML=drivers||'<span style="color:#4b5563">No data</span>';
+    document.getElementById('gm-drivers').innerHTML=drivers||'<span style="color:#4b5563">N/A — stale or unavailable</span>';
 
     // Economic Events
     const ev=d.economic_event_risk||{};
@@ -5058,7 +5093,7 @@ async function load(){
       const evtFactorEl=document.getElementById('evt-factor');
       evtFactorEl.textContent=evtFactor.toFixed(2);
       evtFactorEl.className='stat-value-sm '+(evtFactor>=1?'green':evtFactor>=0.5?'yellow':'red');
-      document.getElementById('evt-buy').textContent=ev.no_new_buy?'Blocked':'Allowed';
+      document.getElementById('evt-buy').textContent=ev.no_new_buy?'Blocked':'Clear';
       document.getElementById('evt-buy').className='stat-value-sm '+(ev.no_new_buy?'red':'green');
     } else {
       document.getElementById('evt-name').textContent='No major economic events today';
@@ -5067,29 +5102,33 @@ async function load(){
       const evtFactorEl=document.getElementById('evt-factor');
       evtFactorEl.textContent=evtFactor.toFixed(2);
       evtFactorEl.className='stat-value-sm '+(evtFactor>=1?'green':evtFactor>=0.5?'yellow':'red');
-      document.getElementById('evt-buy').textContent='Allowed';
+      document.getElementById('evt-buy').textContent='Clear';
       document.getElementById('evt-buy').className='stat-value-sm green';
     }
 
     // Options Intelligence
     const oi=d.options_intelligence||{};
+    const oiStale=isIntelStale(oi.timestamp,24);
     const oiPcr=parseFloat(oi.pcr);
     const oiPcrEl=document.getElementById('oi-pcr');
-    if(!isNaN(oiPcr) && oiPcrEl){ oiPcrEl.textContent=oiPcr.toFixed(2); oiPcrEl.className='stat-value-sm '+(oiPcr>=0.8 && oiPcr<=1.2?'green':oiPcr>1.2?'red':'yellow'); }
+    if(oiPcrEl){
+      if(oiStale || isNaN(oiPcr)){ oiPcrEl.textContent='N/A'; oiPcrEl.className='stat-value-sm'; }
+      else { oiPcrEl.textContent=oiPcr.toFixed(2); oiPcrEl.className='stat-value-sm '+(oiPcr>=0.8 && oiPcr<=1.2?'green':oiPcr>1.2?'red':'yellow'); }
+    }
     const oiMax=document.getElementById('oi-max-pain');
-    if(oiMax) oiMax.textContent=oi.max_pain!=null?rupee(oi.max_pain):'—';
+    if(oiMax) oiMax.textContent=(!oiStale && oi.max_pain!=null)?rupee(oi.max_pain):'N/A';
     const oiBuild=document.getElementById('oi-buildup');
-    if(oiBuild) oiBuild.textContent=oi.oi_build_up!=null?Number(oi.oi_build_up).toLocaleString('en-IN',{maximumFractionDigits:0}):'—';
+    if(oiBuild) oiBuild.textContent=(!oiStale && oi.oi_build_up!=null)?Number(oi.oi_build_up).toLocaleString('en-IN',{maximumFractionDigits:0}):'N/A';
     const oiLong=document.getElementById('oi-long');
-    if(oiLong){ oiLong.textContent=oi.long_buildup===true?'YES':(oi.long_buildup===false?'No':'—'); oiLong.className='stat-value-sm '+(oi.long_buildup===true?'green':(oi.long_buildup===false?'red':'yellow')); }
+    if(oiLong){ if(oiStale){oiLong.textContent='N/A';oiLong.className='stat-value-sm';} else { oiLong.textContent=oi.long_buildup===true?'YES':(oi.long_buildup===false?'No':'—'); oiLong.className='stat-value-sm '+(oi.long_buildup===true?'green':(oi.long_buildup===false?'red':'yellow')); } }
     const oiShort=document.getElementById('oi-short');
-    if(oiShort){ oiShort.textContent=oi.short_buildup===true?'YES':(oi.short_buildup===false?'No':'—'); oiShort.className='stat-value-sm '+(oi.short_buildup===true?'red':(oi.short_buildup===false?'green':'yellow')); }
+    if(oiShort){ if(oiStale){oiShort.textContent='N/A';oiShort.className='stat-value-sm';} else { oiShort.textContent=oi.short_buildup===true?'YES':(oi.short_buildup===false?'No':'—'); oiShort.className='stat-value-sm '+(oi.short_buildup===true?'red':(oi.short_buildup===false?'green':'yellow')); } }
     const oiPut=document.getElementById('oi-put-wall');
-    if(oiPut) oiPut.textContent=oi.put_wall_strike!=null?rupee(oi.put_wall_strike):'—';
+    if(oiPut) oiPut.textContent=(!oiStale && oi.put_wall_strike!=null)?rupee(oi.put_wall_strike):'N/A';
     const oiSupport=document.getElementById('oi-support');
-    if(oiSupport) oiSupport.textContent=oi.put_wall_oi!=null?Number(oi.put_wall_oi).toLocaleString('en-IN'):'—';
+    if(oiSupport) oiSupport.textContent=(!oiStale && oi.put_wall_oi!=null)?Number(oi.put_wall_oi).toLocaleString('en-IN'):'N/A';
     const oiConf=document.getElementById('oi-conf-boost');
-    if(oiConf){ oiConf.textContent=oi.confidence_boost!=null?('+'+oi.confidence_boost.toFixed(0)+'%'):'—'; oiConf.className='stat-value-sm green'; }
+    if(oiConf){ if(oiStale){oiConf.textContent='N/A';oiConf.className='stat-value-sm';} else { oiConf.textContent=oi.confidence_boost!=null?('+'+oi.confidence_boost.toFixed(0)+'%'):'—'; oiConf.className='stat-value-sm green'; } }
 
     // FII/DII Flow
     const fd=d.fii_dii||{};
@@ -5133,13 +5172,19 @@ async function load(){
     const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
     vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':vixLevel==='EXTREME'?'red':'');
 
-    // Sector Rotation (dedupe strong from weak)
+    // Sector Rotation (dedupe strong from weak); stale → no live-looking data
     const sr=d.sector_rotation||{};
+    const srStale=isIntelStale(sr.timestamp,48);
     const strongSet=new Set((sr.top5_strong||[]).map(s=>s.sector));
-    const strong=(sr.top5_strong||[]).slice(0,5);
-    const weak=(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
-    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
-    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${(s.momentum_score||0).toFixed(0)}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`).join(''):'—';
+    const strong=srStale?[]:(sr.top5_strong||[]).slice(0,5);
+    const weak=srStale?[]:(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
+    const srRow=s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${s.momentum_score!=null?s.momentum_score.toFixed(0):'N/A'}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`;
+    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(srRow).join(''):(srStale?'N/A — stale':'—');
+    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(srRow).join(''):(srStale?'N/A — stale':'—');
+    const srN7=document.getElementById('sr-nifty-7d');
+    if(srN7)srN7.textContent=(!srStale && sr.nifty_7d!=null)?sr.nifty_7d.toFixed(1)+'%':'N/A';
+    const srN30=document.getElementById('sr-nifty-30d');
+    if(srN30)srN30.textContent=(!srStale && sr.nifty_30d!=null)?sr.nifty_30d.toFixed(1)+'%':'N/A';
 
     // Source/freshness footers for market-intelligence cards
     const intelAsof=(elId,ts,source,staleAfterHrs)=>{
@@ -5199,7 +5244,11 @@ async function load(){
     if(prevData){
       if((d.open_positions||0)>(prevData.open_positions||0)) pushNotif('🟢','New position opened','#22c55e');
       if((d.open_positions||0)<(prevData.open_positions||0)) pushNotif('🏁','Position closed','#60a5fa');
-      if((d.market_regime||'')!==(prevData.market_regime||'')) pushNotif('📊','Market regime changed to '+d.market_regime,'#eab308');
+      if((d.market_regime||'')!==(prevData.market_regime||'')){
+        const _bad=['','UNKNOWN','UNAVAILABLE','—'];
+        if(!_bad.includes(d.market_regime) && !_bad.includes(prevData.market_regime))
+          pushNotif('📊','Market regime changed to '+d.market_regime,'#eab308');
+      }
       if(d.ip_changed && !prevData.ip_changed) pushNotif('⚠️','IP changed! Update Kite whitelist now','#f59e0b');
     }
 
@@ -5456,7 +5505,9 @@ async function load(){
     document.getElementById('bs-token2').textContent=fmtDateTime(d.token_expiry,true)||'—';
     document.getElementById('bs-paper').innerHTML=d.paper_trading?'<span class="yellow">⚠️ Paper Mode</span>':'<span class="green">✅ Live Trading</span>';
     const bsrEl=document.getElementById('bs-regime');
+    const lk=d.market_regime_last_known;
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
+    if(d.market_regime==='UNAVAILABLE'&&lk&&lk.value)bsrEl.innerHTML='UNAVAILABLE<br><span style="font-size:11px;color:#9ca3af">last: '+lk.value+' @ '+fmtDateTime(lk.at)+'</span>';
     document.getElementById('bs-budget').textContent=rupee(d.budget||0);
     const bsScanActive=d.scan_running?'Scanning now':(d.market_open?'Scanning soon':'Market closed');
     document.getElementById('bs-last-scan').textContent=(d.last_scan&&d.last_scan!=='—')?d.last_scan:bsScanActive;
@@ -5465,6 +5516,8 @@ async function load(){
     document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
     document.getElementById('bs-orders-exec').textContent=d.orders_executed||0;
     document.getElementById('bs-cfg-amount').textContent=rupee(d.cfg_trading_amount||d.budget||5000);
+    const bsCash=document.getElementById('bs-cfg-broker-cash');
+    if(bsCash)bsCash.textContent=d.cash!=null?rupee(d.cash):'N/A';
     document.getElementById('bs-cfg-maxpos').textContent=(d.cfg_max_positions||5);
     document.getElementById('bs-cfg-conf').textContent=((d.cfg_min_confidence||0.52)*100).toFixed(0)+'%';
     document.getElementById('bs-cfg-sl').textContent=((d.cfg_sl_pct||0.05)*100).toFixed(1)+'%';
@@ -6629,6 +6682,8 @@ async function loadMonitoring(){
     const kpi=document.getElementById('mon-kpi');
     if(kpi){
       const add=(label, value, color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      const dq=m.data_quality||{};
+      const dqScore=m.data_quality_score;
       kpi.innerHTML=[
         add('CPU', (sys.cpu_percent||0).toFixed(1)+'%'),
         add('Memory', (sys.memory_percent||0).toFixed(1)+'%'),
@@ -6639,8 +6694,20 @@ async function loadMonitoring(){
         add('Internet', inet?'UP':'DOWN', inet?'green':'red'),
         add('Kite', k.ok?'UP':'DOWN', k.ok?'green':'red'),
         add('Scheduler', hb.ok?'OK':'MISSING', hb.ok?'green':'red'),
-        add('Reconciliation', rh.ok?'OK':'FAIL', rh.ok?'green':'red')
+        add('Reconciliation', rh.ok?'OK':'FAIL', rh.ok?'green':'red'),
+        add('Data Quality', dqScore!=null?dqScore+'/100':'—', dqScore!=null?(dqScore>=70?'green':dqScore>=40?'yellow':'red'):'')
       ].join('');
+      // Per-feed freshness — critical feeds can sink LIVE scoring inputs
+      const dqEl=document.getElementById('mon-data-quality');
+      if(dqEl){
+        dqEl.innerHTML=Object.entries(dq).map(([name,f])=>{
+          const c=f.status==='OK'?'#4ade80':'#f87171';
+          const crit=f.critical?' <span style="color:#9ca3af;font-size:10px">(decision input)</span>':'';
+          const age=f.age_hours!=null?` · ${f.age_hours}h old`:'';
+          const gate=f.max_age_hours!=null?` · gate ≤${f.max_age_hours}h`:'';
+          return `<div style="margin:3px 0;display:flex;justify-content:space-between"><span style="color:#9ca3af">${name}${crit}</span><span style="color:${c}">${f.status}${age}${gate}</span></div>`;
+        }).join('')||'—';
+      }
     }
 
     const status=document.getElementById('mon-status');
@@ -7541,13 +7608,11 @@ def api_data():
     from market_data import MarketDataFetcher
     mdf = MarketDataFetcher(kite=kite)
     data['market_open'] = mdf.is_market_open()
-    try:
-        from market_regime import MarketRegimeDetector
-        regime_det = MarketRegimeDetector(kite=kite)
-        data['market_regime'] = regime_det.detect_regime()
-        data['market_summary']['market_regime'] = data['market_regime']
-    except Exception:
-        pass
+    regime, last_known = _detect_regime_or_unavailable(kite)
+    data['market_regime'] = regime
+    data['market_summary']['market_regime'] = regime
+    if last_known:
+        data['market_regime_last_known'] = last_known
 
     # Market summary: NIFTY, BANKNIFTY, VIX
     try:

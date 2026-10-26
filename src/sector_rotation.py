@@ -122,8 +122,8 @@ class SectorRotationEngine:
             d30 = float(close.iloc[-31]) if len(close) >= 31 else float(close.iloc[0])
 
             return {
-                "return_7d": (current - d7) / d7 if d7 > 0 else 0.0,
-                "return_30d": (current - d30) / d30 if d30 > 0 else 0.0,
+                "return_7d": (current - d7) / d7 if d7 > 0 else None,
+                "return_30d": (current - d30) / d30 if d30 > 0 else None,
                 "current": current,
             }
         except Exception as e:
@@ -157,8 +157,10 @@ class SectorRotationEngine:
             self._latest = self._empty_snapshot("No universe available")
             return self._latest
 
-        # NIFTY benchmark returns
-        nifty = self._fetch_returns(self.nifty_symbol) or {"return_7d": 0.0, "return_30d": 0.0}
+        # NIFTY benchmark returns — a failed baseline must NOT masquerade
+        # as 0%, or absolute sector returns get mislabeled as relative.
+        nifty = self._fetch_returns(self.nifty_symbol)
+        nifty_ok = bool(nifty) and nifty.get("return_7d") is not None
 
         # Fetch individual stock returns and assign to sectors
         sector_map = self._get_sector_map()
@@ -180,36 +182,45 @@ class SectorRotationEngine:
         for sector, rows in sector_data.items():
             if not rows:
                 continue
-            avg_7d = float(np.mean([r["return_7d"] for r in rows]))
-            avg_30d = float(np.mean([r["return_30d"] for r in rows]))
-            rel_7d = avg_7d - nifty["return_7d"]
-            rel_30d = avg_30d - nifty["return_30d"]
+            v7 = [r["return_7d"] for r in rows if r["return_7d"] is not None]
+            v30 = [r["return_30d"] for r in rows if r["return_30d"] is not None]
+            avg_7d = float(np.mean(v7)) if v7 else None
+            avg_30d = float(np.mean(v30)) if v30 else None
+            # Relative returns need BOTH a valid sector average and a valid
+            # NIFTY baseline — otherwise None, never 0%.
+            rel_7d = (avg_7d - nifty["return_7d"]) if (nifty_ok and avg_7d is not None) else None
+            rel_30d = (avg_30d - nifty["return_30d"]) if (nifty_ok and avg_30d is not None) else None
             sector_metrics.append({
                 "sector": sector,
-                "return_7d_pct": round(avg_7d * 100, 2),
-                "return_30d_pct": round(avg_30d * 100, 2),
-                "rel_7d_pct": round(rel_7d * 100, 2),
-                "rel_30d_pct": round(rel_30d * 100, 2),
-                "raw_score": rel_7d * 0.4 + rel_30d * 0.6,
+                "return_7d_pct": round(avg_7d * 100, 2) if avg_7d is not None else None,
+                "return_30d_pct": round(avg_30d * 100, 2) if avg_30d is not None else None,
+                "rel_7d_pct": round(rel_7d * 100, 2) if rel_7d is not None else None,
+                "rel_30d_pct": round(rel_30d * 100, 2) if rel_30d is not None else None,
+                "raw_score": (rel_7d * 0.4 + rel_30d * 0.6)
+                    if (rel_7d is not None and rel_30d is not None) else None,
             })
 
         # Second pass to compute 0-100 momentum score with min/max normalization
-        raw_scores = [s["raw_score"] for s in sector_metrics]
+        raw_scores = [s["raw_score"] for s in sector_metrics if s["raw_score"] is not None]
         for s in sector_metrics:
-            s["momentum_score"] = self._sector_momentum_score(s["raw_score"], s["raw_score"], raw_scores)
+            s["momentum_score"] = (self._sector_momentum_score(s["raw_score"], s["raw_score"], raw_scores)
+                                   if s["raw_score"] is not None else None)
             del s["raw_score"]
 
-        sector_metrics.sort(key=lambda x: x["momentum_score"], reverse=True)
+        # None-momentum sectors sort last; valid scores rank normally
+        sector_metrics.sort(key=lambda x: (x["momentum_score"] is not None, x["momentum_score"] or 0), reverse=True)
 
-        top5_strong = sector_metrics[:5]
-        remaining = sector_metrics[5:]
+        scored = [s for s in sector_metrics if s["momentum_score"] is not None]
+        top5_strong = scored[:5]
+        remaining = scored[5:]
         remaining.sort(key=lambda x: x["momentum_score"])
         top5_weak = remaining[:5]
 
         snapshot = {
             "timestamp": datetime.now().isoformat(),
-            "nifty_7d": round(nifty["return_7d"] * 100, 2),
-            "nifty_30d": round(nifty["return_30d"] * 100, 2),
+            "nifty_7d": round(nifty["return_7d"] * 100, 2) if nifty_ok else None,
+            "nifty_30d": round(nifty["return_30d"] * 100, 2) if (nifty_ok and nifty.get("return_30d") is not None) else None,
+            "baseline_available": nifty_ok,
             "top5_strong": top5_strong,
             "top5_weak": top5_weak,
             "all_sectors": sector_metrics,
@@ -274,7 +285,7 @@ class SectorRotationEngine:
 
         all_sectors = snapshot.get("all_sectors", [])
         sector_info = next((s for s in all_sectors if s.get("sector") == sector), None)
-        momentum_score = sector_info.get("momentum_score", 50.0) if sector_info else 50.0
+        momentum_score = (sector_info.get("momentum_score") or 50.0) if sector_info else 50.0
         rank = next((i for i, s in enumerate(all_sectors) if s.get("sector") == sector), -1) + 1
 
         if sector in top3:

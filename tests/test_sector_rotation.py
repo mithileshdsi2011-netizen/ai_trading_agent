@@ -124,5 +124,51 @@ class TestSectorRotationEngine(unittest.TestCase):
         self.assertEqual(adj['adjusted_score'], 55.0)
 
 
+class TestSectorRotationMissingData(unittest.TestCase):
+    """Missing/failed data must produce None/N/A — never fabricated 0%."""
+
+    def test_zero_lookback_price_yields_none(self):
+        # Lookback close of 0.0 → return must be None, not 0.0%
+        h = make_hist(np.linspace(100, 110, 60), n=60)
+        h.iloc[-8, h.columns.get_loc('Close')] = 0.0
+        engine = SectorRotationEngine(market_data=FakeMarketData({'X': h}))
+        ret = engine._fetch_returns('X')
+        self.assertIsNone(ret['return_7d'])
+        self.assertIsNotNone(ret['return_30d'])  # unaffected window stays valid
+
+    def test_failed_nifty_baseline_yields_none_relative(self):
+        hists = {'B1': up_hist(100, 130), 'B2': up_hist(100, 125)}
+        md = FakeMarketData(hists)
+        md._nifty = pd.DataFrame()  # empty → baseline fetch fails
+        engine = SectorRotationEngine(market_data=md, store=None,
+                                      universe=['B1', 'B2'],
+                                      sector_map={'B1': 'Banking', 'B2': 'Banking'})
+        result = engine.compute()
+        self.assertFalse(result['baseline_available'])
+        self.assertIsNone(result['nifty_7d'])
+        self.assertIsNone(result['nifty_30d'])
+        for s in result['all_sectors']:
+            self.assertIsNone(s['rel_7d_pct'])
+            self.assertIsNone(s['rel_30d_pct'])
+            # absolute returns must still be present and valid
+            self.assertIsNotNone(s['return_30d_pct'])
+            self.assertGreater(s['return_30d_pct'], 0)
+            self.assertIsNone(s['momentum_score'])
+        # un-scored sectors must not appear in strong/weak rankings
+        self.assertEqual(result['top5_strong'], [])
+        self.assertEqual(result['top5_weak'], [])
+
+    def test_adjust_score_treats_none_momentum_as_neutral(self):
+        engine = SectorRotationEngine(market_data=FakeMarketData({}))
+        engine._latest = {
+            'timestamp': datetime.now().isoformat(),
+            'top5_strong': [], 'top5_weak': [],
+            'all_sectors': [{'sector': 'X', 'momentum_score': None}],
+        }
+        adj = engine.adjust_ai_score(60.0, 'X')
+        self.assertEqual(adj['adjustment'], 0)
+        self.assertEqual(adj['momentum_score'], 50.0)
+
+
 if __name__ == '__main__':
     unittest.main()

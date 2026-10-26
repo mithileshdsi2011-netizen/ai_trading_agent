@@ -241,5 +241,74 @@ class TestMonitoringDashboard(unittest.TestCase):
         self.assertIn('timestamp', m)
 
 
+class _IntelStore(FakeStore):
+    """FakeStore plus stale/fresh intel snapshots for data-quality tests."""
+    def __init__(self, snapshots):
+        super().__init__()
+        self._snapshots = snapshots
+
+    def get_latest_options_intelligence(self):
+        return self._snapshots.get('options_intelligence')
+
+    def get_latest_market_breadth(self):
+        return self._snapshots.get('market_breadth')
+
+    def get_latest_global_markets(self):
+        return self._snapshots.get('global_markets')
+
+    def get_latest_sector_rotation(self):
+        return self._snapshots.get('sector_rotation')
+
+    def get_latest_fii_dii(self):
+        return self._snapshots.get('fii_dii')
+
+
+class TestDataQuality(unittest.TestCase):
+    """Feed staleness must surface separately — not hide behind infra health."""
+
+    def test_missing_feeds_score_low(self):
+        mon = EnterpriseSystemMonitor(store=_IntelStore({}))
+        dq = mon._data_quality()
+        self.assertTrue(all(f['status'] == 'MISSING' for f in dq.values()))
+        self.assertLessEqual(mon._data_quality_score(dq), 10)
+
+    def test_stale_critical_feed_penalized_more(self):
+        from datetime import datetime, timedelta
+        stale = (datetime.now() - timedelta(hours=200)).isoformat()
+        fresh = datetime.now().isoformat()
+        mon = EnterpriseSystemMonitor(store=_IntelStore({
+            'options_intelligence': {'timestamp': stale},
+            'market_breadth': {'timestamp': fresh},
+            'global_markets': {'timestamp': fresh},
+            'sector_rotation': {'timestamp': fresh},
+            'fii_dii': {'date': fresh},
+        }))
+        dq = mon._data_quality()
+        self.assertEqual(dq['options_intelligence']['status'], 'STALE')
+        self.assertEqual(dq['market_breadth']['status'], 'OK')
+        # one stale critical feed = -25 → 75
+        self.assertEqual(mon._data_quality_score(dq), 75)
+
+    def test_collect_includes_data_quality(self):
+        mon = EnterpriseSystemMonitor(store=FakeStore())
+        m = mon.collect()
+        self.assertIn('data_quality', m)
+        self.assertIn('data_quality_score', m)
+
+    def test_health_score_unaffected_by_intel(self):
+        # Infra health and data quality must remain independent scores
+        mon = EnterpriseSystemMonitor(store=FakeStore())
+        m = {
+            'system': {'cpu_percent': 30, 'memory_percent': 40, 'disk_percent': 30},
+            'sqlite': {'ok': True, 'response_ms': 10},
+            'api_latency_ms': 50,
+            'internet': True,
+            'kite': {'ok': True},
+            'scheduler_heartbeat': {'ok': True},
+            'reconciliation': {'ok': True},
+        }
+        self.assertEqual(mon.health_score(m), 100)  # intel not in health_score
+
+
 if __name__ == '__main__':
     unittest.main()
