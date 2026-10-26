@@ -70,6 +70,42 @@ SCAN_STUCK_INCIDENT_KEY = 'intraday:angel:scan_stuck'
 SCHEDULER_TICK_SECONDS = 30
 
 
+def daily_breakdown(trades: List, entries_today: int,
+                    max_entries: int) -> Dict[str, Any]:
+    """Split today's ledger into entry-date vs exit-date metrics.
+
+    trades: exit-date-filtered records (e.g. get_today_trades()).
+    A trade is 'carryover' when its entry date precedes its exit date.
+    Pure function — kept module-level for regression tests.
+    """
+    same = {'exits': 0, 'wins': 0, 'losses': 0, 'pnl': 0.0}
+    carry = {'exits': 0, 'wins': 0, 'losses': 0, 'pnl': 0.0}
+    for t in trades or []:
+        entry_dt = getattr(t, 'entry_time', None)
+        exit_dt = getattr(t, 'exit_time', None)
+        is_carry = (isinstance(entry_dt, datetime)
+                    and isinstance(exit_dt, datetime)
+                    and entry_dt.date() != exit_dt.date())
+        bucket = carry if is_carry else same
+        pnl = getattr(t, 'net_pnl', 0.0) or 0.0
+        bucket['exits'] += 1
+        bucket['pnl'] += pnl
+        if pnl > 0:
+            bucket['wins'] += 1
+        else:
+            bucket['losses'] += 1
+    for b in (same, carry):
+        b['pnl'] = round(b['pnl'], 2)
+    return {
+        'entries_today': entries_today,
+        'max_entries': max_entries,
+        'exits_today': same['exits'] + carry['exits'],
+        'same_day': same,
+        'carryover': carry,
+        'realized_pnl': round(same['pnl'] + carry['pnl'], 2),
+    }
+
+
 def _production_incident(action: str, incident_key: str, detail: str) -> None:
     """Default incident sink — deduplicated email via the shared store.
 
@@ -652,6 +688,7 @@ class IntradayEngine:
             'kill_switch': self.risk_manager.is_killed(),
             'static_ip_status': self._static_ip_status(),
             'daily_state': daily,
+            'daily_breakdown': self._daily_breakdown(),
             'opportunities': [self._signal_to_dict(s) for s in self._opportunities],
             'positions': [self._position_to_dict(p) for p in self.paper_executor.get_open_positions()],
             'history': self._history(),
@@ -676,6 +713,8 @@ class IntradayEngine:
         history = []
         for trade in self.trade_manager.get_today_trades():
             try:
+                entry_dt = trade.entry_time if isinstance(trade.entry_time, datetime) else None
+                exit_dt = trade.exit_time if isinstance(trade.exit_time, datetime) else None
                 history.append({
                     'symbol': trade.symbol,
                     'direction': trade.direction.value,
@@ -684,11 +723,27 @@ class IntradayEngine:
                     'quantity': trade.quantity,
                     'net_pnl': trade.net_pnl,
                     'exit_reason': trade.exit_reason,
-                    'exit_time': trade.exit_time.strftime('%H:%M:%S'),
+                    'entry_time': entry_dt.strftime('%Y-%m-%d %H:%M:%S') if entry_dt else None,
+                    'exit_time': exit_dt.strftime('%H:%M:%S') if exit_dt else None,
+                    'carryover': bool(entry_dt and exit_dt
+                                      and entry_dt.date() != exit_dt.date()),
+                    # Existing ledger rows carry no quote-timestamp metadata —
+                    # freshness of the exit price cannot be proven.
+                    'exit_price_source': 'UNVERIFIED',
                 })
             except Exception as e:
                 logger.error(f"[INTRADAY] History serialize error: {e}")
         return history
+
+    def _daily_breakdown(self) -> Dict[str, Any]:
+        """Entry-date vs exit-date split — trades_today counts entries,
+        wins/losses/pnl count exits; carryover exits are separated so the
+        two axes stop masquerading as one number."""
+        return daily_breakdown(
+            self.trade_manager.get_today_trades(),
+            entries_today=self.risk_manager.get_daily_state().get('trades_today', 0),
+            max_entries=self.config.max_trades_per_day,
+        )
 
 
 # ── singleton ───────────────────────────────────────────────────────

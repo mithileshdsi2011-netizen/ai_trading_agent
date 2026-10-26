@@ -3547,25 +3547,37 @@ tr:last-child td{border:none}
   <!-- Today's Summary -->
   <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
     <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Today</h4>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px">
       <div>
-        <div style="color:#9ca3af;font-size:12px">Trades</div>
+        <div style="color:#9ca3af;font-size:12px" title="New positions opened today — counts toward the daily entry limit">Entries (today)</div>
         <div id="intraday-trades-count" style="color:#f9fafb;font-size:18px;font-weight:700">0 / 5</div>
       </div>
       <div>
-        <div style="color:#9ca3af;font-size:12px">Wins</div>
-        <div id="intraday-wins" style="color:#10b981;font-size:18px;font-weight:700">0</div>
+        <div style="color:#9ca3af;font-size:12px" title="Positions closed today, including carryover from prior days">Exits (today)</div>
+        <div id="intraday-exits" style="color:#f9fafb;font-size:18px;font-weight:700">0</div>
       </div>
       <div>
-        <div style="color:#9ca3af;font-size:12px">Losses</div>
-        <div id="intraday-losses" style="color:#ef4444;font-size:18px;font-weight:700">0</div>
+        <div style="color:#9ca3af;font-size:12px" title="Trades entered AND exited today">Same-day exits</div>
+        <div id="intraday-sameday-wl" style="color:#f9fafb;font-size:18px;font-weight:700">—</div>
       </div>
       <div>
-        <div style="color:#9ca3af;font-size:12px">P&L</div>
+        <div style="color:#9ca3af;font-size:12px" title="Trades entered on a prior day, exited today">Carryover exits</div>
+        <div id="intraday-carryover-wl" style="color:#f9fafb;font-size:18px;font-weight:700">—</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Same-day P&L</div>
+        <div id="intraday-sameday-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Carryover P&L</div>
+        <div id="intraday-carryover-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
+      </div>
+      <div>
+        <div style="color:#9ca3af;font-size:12px">Total realized (today)</div>
         <div id="intraday-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
       </div>
       <div>
-        <div style="color:#9ca3af;font-size:12px">Daily Loss Limit</div>
+        <div style="color:#9ca3af;font-size:12px" title="2% of configured PAPER capital ₹10,000">Daily Loss Limit</div>
         <div id="intraday-loss-limit" style="color:#f9fafb;font-size:18px;font-weight:700">₹200</div>
       </div>
     </div>
@@ -3632,7 +3644,8 @@ tr:last-child td{border:none}
             <th style="padding:8px;text-align:right;color:#f9fafb">Exit</th>
             <th style="padding:8px;text-align:right;color:#f9fafb">P&L</th>
             <th style="padding:8px;text-align:left;color:#f9fafb">Exit Reason</th>
-            <th style="padding:8px;text-align:right;color:#f9fafb">Time</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Entered</th>
+            <th style="padding:8px;text-align:right;color:#f9fafb">Exited</th>
           </tr>
         </thead>
         <tbody id="intraday-history-body">
@@ -7019,9 +7032,16 @@ async function loadIntradayData(){
 
     const regimeEl=document.getElementById('intraday-regime');
     if(regimeEl){
-      const regime=(d.market_regime||'—').replace('_',' ');
-      regimeEl.textContent=regime;
-      regimeEl.style.color=regime==='BULLISH'?'#22c55e':regime==='BEARISH'?'#ef4444':regime==='HIGH VOLATILITY'?'#f97316':'#9ca3af';
+      // Regime is a session-only concept — when the market is closed the
+      // last/UNKNOWN value would look like a failure. Show it honestly.
+      if(d.market_session==='CLOSED'){
+        regimeEl.textContent='— (Market Closed)';
+        regimeEl.style.color='#9ca3af';
+      }else{
+        const regime=(d.market_regime||'—').replace('_',' ');
+        regimeEl.textContent=regime;
+        regimeEl.style.color=regime==='BULLISH'?'#22c55e':regime==='BEARISH'?'#ef4444':regime==='HIGH VOLATILITY'?'#f97316':'#9ca3af';
+      }
     }
     
     const ipEl=document.getElementById('intraday-static-ip');
@@ -7042,20 +7062,28 @@ async function loadIntradayData(){
       }
     }
     
-    // Update daily stats
+    // Update daily stats — entry-date vs exit-date axes kept distinct
+    const db=d.daily_breakdown||{};
+    const sd=db.same_day||{}; const co=db.carryover||{};
     const tradesCount=document.getElementById('intraday-trades-count');
-    if(tradesCount)tradesCount.textContent=`${d.daily_state.trades_today} / ${d.daily_state.max_trades_per_day}`;
-    
-    const winsEl=document.getElementById('intraday-wins');
-    if(winsEl)winsEl.textContent=d.daily_state.wins_today;
-    
-    const lossesEl=document.getElementById('intraday-losses');
-    if(lossesEl)lossesEl.textContent=d.daily_state.losses_today;
-    
+    if(tradesCount)tradesCount.textContent=`${db.entries_today ?? d.daily_state.trades_today} / ${db.max_entries ?? d.daily_state.max_trades_per_day}`;
+
+    const exitsEl=document.getElementById('intraday-exits');
+    if(exitsEl)exitsEl.textContent=db.exits_today ?? '—';
+    const sdwl=document.getElementById('intraday-sameday-wl');
+    if(sdwl)sdwl.innerHTML=`<span style="color:#10b981">${sd.wins??0}W</span> / <span style="color:#ef4444">${sd.losses??0}L</span>`;
+    const cowl=document.getElementById('intraday-carryover-wl');
+    if(cowl)cowl.innerHTML=`<span style="color:#10b981">${co.wins??0}W</span> / <span style="color:#ef4444">${co.losses??0}L</span>`;
+    const sdpnl=document.getElementById('intraday-sameday-pnl');
+    if(sdpnl){sdpnl.textContent=pnlStr(sd.pnl||0);sdpnl.style.color=pnlClass(sd.pnl||0);}
+    const copnl=document.getElementById('intraday-carryover-pnl');
+    if(copnl){copnl.textContent=pnlStr(co.pnl||0);copnl.style.color=pnlClass(co.pnl||0);}
+
     const pnlEl=document.getElementById('intraday-pnl');
     if(pnlEl){
-      pnlEl.textContent=pnlStr(d.daily_state.realized_pnl);
-      pnlEl.style.color=pnlClass(d.daily_state.realized_pnl);
+      const total=db.realized_pnl ?? d.daily_state.realized_pnl;
+      pnlEl.textContent=pnlStr(total);
+      pnlEl.style.color=pnlClass(total);
     }
     
     const lossLimitEl=document.getElementById('intraday-loss-limit');
@@ -7106,18 +7134,21 @@ async function loadIntradayData(){
     const histBody=document.getElementById('intraday-history-body');
     if(histBody && d.history && d.history.length){
       histBody.innerHTML=d.history.map(trade=>{
+        const carry=trade.carryover?` <span style="background:#78350f;color:#fbbf24;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;margin-left:4px">CARRYOVER</span>`:'';
+        const provenance=trade.exit_price_source==='LIVE'?'':`<div style="color:#6b7280;font-size:10px">price ${trade.exit_price_source||'UNVERIFIED'}</div>`;
         return `<tr style="border-bottom:1px solid #1f293744">
-          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}</td>
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}${carry}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">${trade.quantity ?? '—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.entry_price.toFixed(2)}</td>
-          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.exit_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.exit_price.toFixed(2)}${provenance}</td>
           <td style="padding:10px 8px;text-align:right;color:${pnlClass(trade.net_pnl)}">${pnlStr(trade.net_pnl)}</td>
           <td style="padding:10px 8px;color:#9ca3af">${trade.exit_reason}</td>
-          <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.exit_time}</td>
+          <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.entry_time||'—'}</td>
+          <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.exit_time||'—'}</td>
         </tr>`;
       }).join('');
     }else if(histBody){
-      histBody.innerHTML='<tr><td colspan="7" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>';
+      histBody.innerHTML='<tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">No trades today</td></tr>';
     }
     
   }catch(e){
