@@ -68,6 +68,16 @@ class IntradayValidator:
         square_off = _parse_hhmm(self.config.square_off_time, time(15, 0))
         return now.time() >= square_off
 
+    def is_square_off_window(self, now: Optional[datetime] = None) -> bool:
+        """Square-off may only execute inside the EOD window ON A TRADING
+        DAY. Weekends/holidays: overnight positions stay flagged and are
+        recovered inside the next valid session — never exited on stale
+        non-session quotes."""
+        now = now or ist_now()
+        if now.tzinfo is None:
+            now = IST.localize(now)
+        return now.weekday() < 5 and self.is_square_off_time(now)
+
     def is_data_fresh(self, last_data_time: Optional[datetime]) -> bool:
         """Market data must be no older than max_data_age_seconds."""
         if last_data_time is None:

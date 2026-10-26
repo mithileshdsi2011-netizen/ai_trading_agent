@@ -826,6 +826,24 @@ class TestIntradayValidator:
         assert v.is_square_off_time(IST.localize(datetime(2026, 10, 5, 15, 5))) is True
         assert v.is_square_off_time(IST.localize(datetime(2026, 10, 5, 10, 0))) is False
 
+    def test_square_off_window_requires_trading_day(self):
+        """Square-off may only execute Mon–Fri inside the EOD window —
+        weekend afternoons (is_square_off_time True) are NOT valid."""
+        config = IntradayConfig(square_off_time="15:00")
+        v = IntradayValidator(config)
+        # Monday 15:05 → valid window (2026-10-05 is a Monday)
+        assert v.is_square_off_window(
+            IST.localize(datetime(2026, 10, 5, 15, 5))) is True
+        # Saturday 16:00 → time-of-day due, but not a trading day
+        assert v.is_square_off_window(
+            IST.localize(datetime(2026, 10, 10, 16, 0))) is False
+        # Sunday 18:00 → blocked
+        assert v.is_square_off_window(
+            IST.localize(datetime(2026, 10, 11, 18, 0))) is False
+        # Weekday pre-window → blocked
+        assert v.is_square_off_window(
+            IST.localize(datetime(2026, 10, 5, 10, 0))) is False
+
     def test_stale_data_rejected(self):
         """No entry when market data is stale or missing."""
         v = IntradayValidator(IntradayConfig())
@@ -1160,6 +1178,9 @@ class TestPendingKeyRelease:
 
     def test_successful_execution_remains_deduplicated(self, tmp_path):
         engine = self._engine(tmp_path)
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_entry_window_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         signal = make_signal()
         key = signal_idempotency_key(signal)
         engine._try_enter(signal)  # real paper executor → creates position
@@ -1499,6 +1520,9 @@ class TestPositionRefresh:
         return IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
 
     def _open(self, engine, symbol='RELIANCE'):
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_entry_window_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         sig = make_signal(symbol=symbol)
         pos = engine.paper_executor.execute_entry(sig)
         assert pos is not None
@@ -1607,7 +1631,7 @@ class TestPositionRefresh:
     def test_eod_square_off_refreshes_prices(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path)
         self._open(engine)
-        monkeypatch.setattr(engine.validator, 'is_square_off_time', lambda *a, **k: True)
+        monkeypatch.setattr(engine.validator, 'is_square_off_window', lambda *a, **k: True)
         engine.market_data = MagicMock()
         engine.market_data.get_quotes.return_value = {'RELIANCE': {'ltp': 2530.0}}
         engine._maybe_square_off()
@@ -1620,7 +1644,7 @@ class TestPositionRefresh:
         """EOD still closes positions but surfaces missing data clearly."""
         engine = self._engine(tmp_path)
         self._open(engine)
-        monkeypatch.setattr(engine.validator, 'is_square_off_time', lambda *a, **k: True)
+        monkeypatch.setattr(engine.validator, 'is_square_off_window', lambda *a, **k: True)
         engine.market_data = MagicMock()
         engine.market_data.get_quotes.return_value = {}
         engine._maybe_square_off()
@@ -1644,6 +1668,9 @@ class TestQuoteFailureMonitoring:
         return engine, events
 
     def _open(self, engine):
+        engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_entry_window_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         sig = make_signal(symbol='RELIANCE')
         pos = engine.paper_executor.execute_entry(sig)
         assert pos is not None
@@ -1708,7 +1735,7 @@ class TestQuoteFailureMonitoring:
         """EOD is terminal — a missing quote fires the incident at once."""
         engine, events = self._engine(tmp_path)
         self._open(engine)
-        monkeypatch.setattr(engine.validator, 'is_square_off_time',
+        monkeypatch.setattr(engine.validator, 'is_square_off_window',
                             lambda *a, **k: True)
         engine.market_data = MagicMock()
         engine.market_data.get_quotes.return_value = {}
@@ -2008,7 +2035,7 @@ class TestSelfScheduler:
         engine = self._engine(tmp_path)
         pos = make_position(symbol="DRREDDY")
         engine.validator.is_market_open = Mock(return_value=True)
-        engine.validator.is_square_off_time = Mock(return_value=True)
+        engine.validator.is_square_off_window = Mock(return_value=True)
         engine.paper_executor.get_open_positions = Mock(return_value=[pos])
         engine.paper_executor.eod_square_off = Mock(return_value=[])
         engine.market_data.get_quotes = Mock(return_value={

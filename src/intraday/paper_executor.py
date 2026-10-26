@@ -22,19 +22,23 @@ logger = logging.getLogger(__name__)
 class PaperTradeExecutor:
     """Paper trading executor for intraday."""
     
-    def __init__(self, risk_manager: IntradayRiskManager, 
-                 position_sizer: IntradayPositionSizer, config):
+    def __init__(self, risk_manager: IntradayRiskManager,
+                 position_sizer: IntradayPositionSizer, config,
+                 validator=None):
         """
         Initialize paper executor.
-        
+
         Args:
             risk_manager: IntradayRiskManager instance
             position_sizer: IntradayPositionSizer instance
             config: IntradayConfig instance
+            validator: IntradayValidator — used for the commit-time
+                entry-window gate (optional; None keeps legacy behavior)
         """
         self.risk_manager = risk_manager
         self.position_sizer = position_sizer
         self.config = config
+        self.validator = validator
         self._paper_positions: Dict[str, IntradayPosition] = {}
         self._paper_trades: list = []
     
@@ -65,7 +69,22 @@ class PaperTradeExecutor:
             if quantity == 0:
                 logger.warning(f"[INTRADAY PAPER] Invalid quantity for {signal.symbol}")
                 return None
-            
+
+            # Final gate at commit time: a scan that started inside the
+            # entry window may reach here after the cutoff (or after the
+            # EOD square-off deadline). Re-check the session/window at the
+            # last moment — validation upstream ran earlier in the cycle.
+            if self.validator is not None and not (
+                    self.validator.is_market_open()
+                    and self.validator.is_entry_window_open()
+                    and not self.validator.is_square_off_time()):
+                signal.validation_passed = False
+                signal.rejection_reason = "Entry window closed at commit"
+                logger.info(
+                    f"[INTRADAY PAPER] Entry rejected at commit: "
+                    f"{signal.symbol} — window/session closed")
+                return None
+
             # Create paper position
             position_id = str(uuid.uuid4())
             position = IntradayPosition(

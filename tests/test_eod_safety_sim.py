@@ -56,8 +56,8 @@ def _quotes(ltp, stale=False):
 def test_position_open_at_1459_exits_at_squareoff(tmp_path):
     eng, _ = _engine(tmp_path)
     _add_position(eng, _position())
-    eng.validator.is_square_off_time = MagicMock(return_value=True)   # 15:00
-    eng.validator.is_market_open = MagicMock(return_value=True)       # 15:00 still in session
+    eng.validator.is_square_off_window = MagicMock(return_value=True)  # 15:00 weekday
+    eng.validator.is_market_open = MagicMock(return_value=True)        # 15:00 still in session
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
     eng._maybe_square_off()
     assert eng.paper_executor.get_open_positions() == []
@@ -71,7 +71,7 @@ def test_position_open_at_1459_exits_at_squareoff(tmp_path):
 def test_squareoff_delayed_behind_scan_lock(tmp_path):
     eng, _ = _engine(tmp_path)
     _add_position(eng, _position())
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=True)
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
 
@@ -98,7 +98,7 @@ def test_squareoff_delayed_behind_scan_lock(tmp_path):
 def test_hung_scan_blocks_eod_indefinitely(tmp_path):
     eng, _ = _engine(tmp_path)
     _add_position(eng, _position())
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
 
@@ -122,7 +122,7 @@ def test_stale_quote_priced_exit_without_warning(tmp_path):
     age — no freshness check, no incident."""
     eng, incidents = _engine(tmp_path)
     _add_position(eng, _position())
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(
         return_value=_quotes(999.0, stale=True))   # 3-day-old exchange stamp
@@ -140,7 +140,7 @@ def test_quote_failure_falls_back_with_incident(tmp_path):
     pos = _position(price=100.0)
     pos.current_price = 102.5                # last stored price
     _add_position(eng, pos)
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(
         side_effect=TimeoutError('angel timeout'))
@@ -155,7 +155,7 @@ def test_empty_quotes_falls_back_with_incident(tmp_path):
     pos = _position(price=100.0)
     pos.current_price = 101.0
     _add_position(eng, pos)
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(return_value={})
     eng._maybe_square_off()
@@ -173,7 +173,7 @@ def test_restart_rehydrates_and_flushes(tmp_path):
 
     eng2, _ = _engine(tmp_path)              # fresh process on same store
     assert len(eng2.paper_executor.get_open_positions()) == 1
-    eng2.validator.is_square_off_time = MagicMock(return_value=True)
+    eng2.validator.is_square_off_window = MagicMock(return_value=True)
     eng2.validator.is_market_open = MagicMock(return_value=False)
     eng2.market_data.get_quotes = MagicMock(return_value=_quotes(104.0))
     eng2._maybe_square_off()
@@ -188,7 +188,7 @@ def test_carryover_holds_during_session_exits_next_squareoff(tmp_path):
     _add_position(eng, pos)
 
     # Next-day mid-session: NOT square-off time, market open → held
-    eng.validator.is_square_off_time = MagicMock(return_value=False)
+    eng.validator.is_square_off_window = MagicMock(return_value=False)
     eng.validator.is_market_open = MagicMock(return_value=True)
     eng._maybe_square_off()
     assert len(eng.paper_executor.get_open_positions()) == 1  # held
@@ -203,7 +203,7 @@ def test_carryover_holds_during_session_exits_next_squareoff(tmp_path):
 def test_carryover_exits_at_next_squareoff(tmp_path):
     eng, _ = _engine(tmp_path)
     _add_position(eng, _position(entry=datetime.now() - timedelta(days=3)))
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(103.0))
     eng._maybe_square_off()
@@ -215,7 +215,7 @@ def test_carryover_exits_at_next_squareoff(tmp_path):
 def test_repeated_squareoff_no_duplicates(tmp_path):
     eng, _ = _engine(tmp_path)
     _add_position(eng, _position())
-    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
     eng._maybe_square_off()
@@ -230,6 +230,7 @@ import intraday.engine as engine_mod
 
 
 def _tick_setup(eng, square_off=True, market_open=True):
+    eng.validator.is_square_off_window = MagicMock(return_value=square_off)
     eng.validator.is_square_off_time = MagicMock(return_value=square_off)
     eng.validator.is_market_open = MagicMock(return_value=market_open)
     eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
@@ -305,14 +306,41 @@ class TestSchedulerTickSafety:
         eng._scheduler_tick_once()
         assert eng.paper_executor.get_open_positions() == []
 
-    def test_overnight_recovery_branch(self, tmp_path):
-        """Market closed, not due (early AM) + open positions → recover."""
-        eng, _ = _engine(tmp_path)
+    def test_overnight_position_held_not_flushed_on_stale_quotes(self, tmp_path):
+        """Market closed, not due (early AM/weekend) + open positions →
+        flagged but NOT exited on stale broker quotes. Recovery happens
+        inside the next valid session."""
+        eng, incidents = _engine(tmp_path)
         _add_position(eng, _position(
             entry=datetime.now() - timedelta(days=1)))
         _tick_setup(eng, square_off=False, market_open=False)
         eng._scheduler_tick_once()
-        assert eng.paper_executor.get_open_positions() == []
+        # position still open — no fictitious stale-price exit booked
+        assert len(eng.paper_executor.get_open_positions()) == 1
+        assert eng.trade_manager.get_trades() == []
+        # flagged as overnight exception
+        assert any('overnight' in k for _, k, _ in incidents)
+        # ledger untouched: entry details preserved
+        pos = eng.paper_executor.get_open_positions()[0]
+        assert pos.entry_price == 100.0
+        assert pos.exit_time is None
+
+    def test_weekend_squareoff_window_blocked(self, tmp_path):
+        """Saturday 16:00: is_square_off_time true but NOT a trading day —
+        no square-off on stale quotes."""
+        eng, _ = _engine(tmp_path)
+        _add_position(eng, _position(
+            entry=datetime.now() - timedelta(days=1)))
+        eng.validator.is_square_off_time = MagicMock(return_value=True)
+        eng.validator.is_market_open = MagicMock(return_value=False)
+        # real is_square_off_window: mock ist_now → Saturday
+        import intraday.validators as vm
+        from unittest.mock import patch
+        sat = vm.IST.localize(datetime(2026, 10, 24, 16, 0))  # Saturday
+        with patch.object(vm, 'ist_now', return_value=sat):
+            eng._maybe_square_off()
+        assert len(eng.paper_executor.get_open_positions()) == 1
+        assert eng.trade_manager.get_trades() == []
 
     def test_overnight_position_flagged_once(self, tmp_path):
         eng, incidents = _engine(tmp_path)
@@ -356,7 +384,7 @@ class TestSchedulerTickSafety:
         pos = _position()
         pos.current_price = 101.0
         _add_position(eng, pos)
-        eng.validator.is_square_off_time = MagicMock(return_value=True)
+        eng.validator.is_square_off_window = MagicMock(return_value=True)
         eng.validator.is_market_open = MagicMock(return_value=False)
         eng.market_data.get_quotes = MagicMock(
             side_effect=TimeoutError('angel down'))
@@ -364,3 +392,140 @@ class TestSchedulerTickSafety:
         assert eng.trade_manager.get_trades()[0].exit_price == 101.0
         assert any('eod' in k.lower() for _, k, _ in incidents)
 
+
+
+# ══ Batch A review: commit-gate, overnight policy, heartbeat truth ══
+
+from intraday.models import IntradaySignal, MarketRegime
+
+
+def _signal(sym='TEST'):
+    return IntradaySignal(
+        symbol=sym, direction=SignalDirection.LONG, score=80.0,
+        classification=SignalClassification.STRONG_SETUP,
+        entry_price=100.0, stop_loss=95.0, target=110.0, risk_reward=2.0,
+        vwap_score=0, ema_score=0, volume_score=0, momentum_score=0,
+        breakout_score=0, market_regime_score=0,
+        market_regime=MarketRegime.BULLISH, current_price=100.0,
+        vwap=99.0, ema_9=99.0, ema_20=98.0, rsi=60.0,
+        volume=1000, relative_volume=2.0, validation_passed=True)
+
+
+def test_commit_gate_rejects_entry_after_cutoff(tmp_path):
+    """Scan started in-window; commit happens post-cutoff → rejected,
+    no position, no trade-slot consumed."""
+    eng, _ = _engine(tmp_path)
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=False)
+    eng.validator.is_square_off_time = MagicMock(return_value=False)
+    before = eng.risk_manager.get_daily_state()['trades_today']
+    pos = eng.paper_executor.execute_entry(_signal())
+    assert pos is None
+    assert eng.paper_executor.get_open_positions() == []
+    assert eng.risk_manager.get_daily_state()['trades_today'] == before
+
+
+def test_commit_gate_rejects_entry_at_square_off_time(tmp_path):
+    """Entry window technically open but square-off due → rejected."""
+    eng, _ = _engine(tmp_path)
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=True)
+    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    assert eng.paper_executor.execute_entry(_signal()) is None
+    assert eng.paper_executor.get_open_positions() == []
+
+
+def test_commit_gate_accepts_valid_entry_mid_session(tmp_path):
+    """All commit-time checks pass → entry executes normally."""
+    eng, _ = _engine(tmp_path)
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=True)
+    eng.validator.is_square_off_time = MagicMock(return_value=False)
+    eng.risk_manager.can_enter_trade = MagicMock(return_value=(True, 'ok'))
+    eng.position_sizer.calculate_quantity = MagicMock(
+        return_value=(10, 1000.0))
+    pos = eng.paper_executor.execute_entry(_signal())
+    assert pos is not None
+    assert len(eng.paper_executor.get_open_positions()) == 1
+
+
+def test_entry_commit_serialized_against_eod(tmp_path):
+    """14:59 scan holds the lock through 15:00: the tick's EOD attempt
+    times out (bounded); when the scan releases, its commit-time entry
+    is rejected (window closed) and the NEXT tick completes EOD. Entry
+    and square-off can never interleave — same lock."""
+    eng, _ = _engine(tmp_path)
+    _add_position(eng, _position())               # position needing EOD
+    _tick_setup(eng)
+    # in-flight scan holding the engine lock
+    eng._lock.acquire()
+    eng._scheduler_tick_once()                    # EOD attempt → timeout
+    assert eng._eod_pending_since is not None
+    assert eng.paper_executor.get_open_positions()  # not silently skipped
+    # scan's late entry attempt, post-cutoff
+    eng.validator.is_square_off_time = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=False)
+    assert eng.paper_executor.execute_entry(_signal()) is None
+    eng._lock.release()
+    # next tick completes EOD with zero interference
+    eng._scheduler_tick_once()
+    assert eng.paper_executor.get_open_positions() == []
+    assert eng._eod_completed_at is not None
+
+
+def test_eod_not_complete_until_zero_positions(tmp_path):
+    """EOD completion requires zero open positions — a position created
+    or surviving means pending stays set."""
+    eng, _ = _engine(tmp_path)
+    _tick_setup(eng, square_off=True, market_open=False)
+    eng._scheduler_tick_once()                    # no positions → complete
+    assert eng._eod_completed_at is not None
+    # a (defensive) position appearing later re-pends EOD
+    _add_position(eng, _position())
+    eng._scheduler_tick_once()
+    assert eng.paper_executor.get_open_positions() == []
+    st = eng._scheduler_status()
+    assert st['open_positions'] == 0
+
+
+def test_dead_scheduler_not_reported_running(tmp_path):
+    """Persisted/flagged running alone is not proof of life — a dead
+    thread with _scheduler_started set must report running=False."""
+    eng, _ = _engine(tmp_path)
+    eng._scheduler_started = True                 # flag says started...
+    eng._scheduler_thread = threading.Thread(     # ...but thread is dead
+        target=lambda: None)
+    eng._scheduler_thread.start()
+    eng._scheduler_thread.join()
+    s = eng._scheduler_status()
+    assert s['running'] is False
+    assert s['thread_alive'] is False
+
+
+def test_idle_tick_still_catches_new_position(tmp_path):
+    """120s idle mode cannot park an open position: the next tick sees
+    positions + square-off window and executes EOD immediately."""
+    eng, _ = _engine(tmp_path)
+    _tick_setup(eng, square_off=True, market_open=False)
+    eng._scheduler_tick_once()                    # idle confirm
+    _add_position(eng, _position())               # position appears late
+    eng._scheduler_tick_once()
+    assert eng.paper_executor.get_open_positions() == []
+
+
+def test_eod_incident_visible_until_resolved(tmp_path):
+    """eod_delayed stays flagged while pending; resolved only when a
+    tick confirms zero positions in the window."""
+    eng, incidents = _engine(tmp_path)
+    _add_position(eng, _position())
+    _tick_setup(eng)
+    eng._eod_pending_since = (datetime.now()
+                              - timedelta(seconds=999))   # long overdue
+    eng._lock.acquire()
+    eng._scheduler_tick_once()
+    eng._lock.release()
+    assert eng._eod_delay_alerted is True
+    eng._scheduler_tick_once()                    # completes
+    eng._scheduler_tick_once()                    # confirm + resolve
+    assert eng._eod_delay_alerted is False
+    assert eng._eod_completed_at is not None
