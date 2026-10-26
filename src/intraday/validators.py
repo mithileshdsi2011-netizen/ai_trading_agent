@@ -43,11 +43,14 @@ class IntradayValidator:
         self.config = config
 
     def is_market_open(self, now: Optional[datetime] = None) -> bool:
-        """NSE regular session: Mon-Fri 09:15-15:30 IST."""
+        """NSE regular session: trading days 09:15-15:30 IST.
+
+        Includes the NSE holiday check — a weekday holiday is not a
+        session, so no scans/entries run against stale non-session data."""
         now = now or ist_now()
         if now.tzinfo is None:
             now = IST.localize(now)
-        if now.weekday() >= 5:
+        if not self.is_trading_day(now):
             return False
         return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
@@ -68,6 +71,29 @@ class IntradayValidator:
         square_off = _parse_hhmm(self.config.square_off_time, time(15, 0))
         return now.time() >= square_off
 
+    def is_trading_day(self, now: Optional[datetime] = None) -> bool:
+        """True only on NSE trading days (Mon–Fri, non-holiday).
+
+        Uses the same authoritative static NSE holiday list the Swing
+        LIVE orchestrator trusts (MarketDataFetcher._NSE_HOLIDAYS) —
+        offline, no network dependency. If the calendar import fails,
+        FAILS CLOSED: not-a-trading-day is the safe answer, since the
+        worst case is merely deferring work, never exiting on stale
+        quotes."""
+        now = now or ist_now()
+        if now.tzinfo is None:
+            now = IST.localize(now)
+        if now.weekday() >= 5:
+            return False
+        try:
+            from market_data import MarketDataFetcher
+            return now.strftime("%Y-%m-%d") not in MarketDataFetcher._NSE_HOLIDAYS
+        except Exception as e:
+            logger.warning(
+                f"[INTRADAY] NSE holiday calendar unavailable ({e!r}) — "
+                f"failing closed (not a trading day)")
+            return False
+
     def is_square_off_window(self, now: Optional[datetime] = None) -> bool:
         """Square-off may only execute inside the EOD window ON A TRADING
         DAY. Weekends/holidays: overnight positions stay flagged and are
@@ -76,7 +102,7 @@ class IntradayValidator:
         now = now or ist_now()
         if now.tzinfo is None:
             now = IST.localize(now)
-        return now.weekday() < 5 and self.is_square_off_time(now)
+        return self.is_trading_day(now) and self.is_square_off_time(now)
 
     def is_data_fresh(self, last_data_time: Optional[datetime]) -> bool:
         """Market data must be no older than max_data_age_seconds."""

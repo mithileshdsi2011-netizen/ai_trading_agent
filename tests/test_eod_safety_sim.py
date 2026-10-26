@@ -529,3 +529,99 @@ def test_eod_incident_visible_until_resolved(tmp_path):
     eng._scheduler_tick_once()                    # confirm + resolve
     assert eng._eod_delay_alerted is False
     assert eng._eod_completed_at is not None
+
+
+# ══ Exchange-calendar hardening: holidays, long weekends, persistence ══
+
+def _fake_date(sim_day):
+    """Fake `date` class whose today() returns the simulated day — keeps
+    the engine's overnight detection (date.today()) in sim-time."""
+    class _FakeDate:
+        @staticmethod
+        def today():
+            return sim_day.date() if isinstance(sim_day, datetime) \
+                else sim_day
+    return _FakeDate
+
+
+def test_friday_position_held_over_weekend_exits_monday(tmp_path):
+    """Friday 15:00 entry surviving → Sat/Sun ticks hold it (no stale
+    exits); Monday 15:00 window executes the square-off."""
+    eng, incidents = _engine(tmp_path)
+    import intraday.validators as vm
+    from unittest.mock import patch
+    # entry_time stored naive like production positions
+    fri = datetime(2026, 10, 23, 14, 30)                    # Friday
+    _add_position(eng, _position(entry=fri))
+    eng.market_data.get_quotes = MagicMock(
+        return_value=_quotes(97.0, stale=True))             # stale marks
+    # Saturday 16:00 + Sunday 18:00 — real is_square_off_window
+    for day, hh in [(24, 16), (25, 18)]:
+        sim = vm.IST.localize(datetime(2026, 10, day, hh))
+        with patch.object(vm, 'ist_now', return_value=sim), \
+                patch.object(engine_mod, 'date', _fake_date(sim)):
+            eng._scheduler_tick_once()
+        assert len(eng.paper_executor.get_open_positions()) == 1
+        assert eng.trade_manager.get_trades() == []          # never priced
+    # Monday 15:05 — valid window → square-off executes
+    mon = vm.IST.localize(datetime(2026, 10, 26, 15, 5))
+    with patch.object(vm, 'ist_now', return_value=mon), \
+            patch.object(engine_mod, 'date', _fake_date(mon)):
+        eng.market_data.get_quotes = MagicMock(
+            return_value=_quotes(97.0))
+        eng._scheduler_tick_once()
+    assert eng.paper_executor.get_open_positions() == []
+    assert eng.trade_manager.get_trades()[0].exit_reason == 'EOD_SQUARE_OFF'
+    assert any('overnight' in k for _, k, _ in incidents)
+
+
+def test_long_holiday_weekend_held_until_next_trading_day(tmp_path):
+    """Thu position → Fri is a holiday → Sat/Sun weekend → Mon window.
+    Position held throughout, flagged once, exits only at Monday's EOD."""
+    eng, incidents = _engine(tmp_path)
+    import intraday.validators as vm
+    from unittest.mock import patch
+    thu = datetime(2026, 11, 12, 14, 0)                   # Thursday (naive)
+    _add_position(eng, _position(entry=thu))
+    # Fri 2026-11-13 is in _NSE_HOLIDAYS; Sat 14th, Sun 15th
+    for day in [13, 14, 15]:
+        sim = vm.IST.localize(datetime(2026, 11, day, 16, 0))
+        with patch.object(vm, 'ist_now', return_value=sim), \
+                patch.object(engine_mod, 'date', _fake_date(sim)):
+            eng._scheduler_tick_once()
+        assert len(eng.paper_executor.get_open_positions()) == 1
+        assert eng.trade_manager.get_trades() == []
+    # Mon 16th 15:05 — first valid window → exit
+    mon = vm.IST.localize(datetime(2026, 11, 16, 15, 5))
+    with patch.object(vm, 'ist_now', return_value=mon), \
+            patch.object(engine_mod, 'date', _fake_date(mon)):
+        eng.market_data.get_quotes = MagicMock(
+            return_value=_quotes(103.0))
+        eng._scheduler_tick_once()
+    assert eng.paper_executor.get_open_positions() == []
+    overnight_notifies = [i for i in incidents
+                          if i[0] == 'notify' and 'overnight' in i[1]]
+    assert len(overnight_notifies) == 1                    # deduplicated
+
+
+def test_failed_exit_position_retained_in_persistence(tmp_path):
+    """An execute_exit failure must NOT wipe the position from the
+    persisted ledger — a restart would silently lose it."""
+    eng, _ = _engine(tmp_path)
+    pos = _position()
+    _add_position(eng, pos)
+    eng.state_store.save_positions([pos])
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
+    eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
+    # force every exit to fail
+    eng.paper_executor.execute_exit = MagicMock(return_value=None)
+    eng._maybe_square_off()
+    # in-memory position remains open...
+    assert len(eng.paper_executor.get_open_positions()) == 1
+    # ...and the persisted ledger still holds it
+    import json
+    persisted = json.load(open(tmp_path / 'positions.json'))
+    assert len(persisted) == 1
+    assert persisted[0]['symbol'] == 'TEST'
+    # EOD not marked complete while a position remains
+    assert eng._eod_completed_at is None

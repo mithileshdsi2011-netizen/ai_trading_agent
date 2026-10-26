@@ -9,7 +9,7 @@ import sys
 import os
 import threading
 from datetime import datetime, timedelta
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -843,6 +843,27 @@ class TestIntradayValidator:
         # Weekday pre-window → blocked
         assert v.is_square_off_window(
             IST.localize(datetime(2026, 10, 5, 10, 0))) is False
+
+    def test_square_off_window_nse_holiday_blocked(self):
+        """Weekday NSE holiday: time-of-day due but no session → blocked.
+        2026-10-02 (Gandhi Jayanti) is in the shared _NSE_HOLIDAYS list."""
+        v = IntradayValidator(IntradayConfig(square_off_time="15:00"))
+        holiday = IST.localize(datetime(2026, 10, 2, 15, 10))  # Friday
+        assert holiday.weekday() == 4                          # Friday guard
+        assert v.is_square_off_time(holiday) is True
+        assert v.is_square_off_window(holiday) is False
+        assert v.is_market_open(IST.localize(
+            datetime(2026, 10, 2, 11, 0))) is False            # holiday ≠ session
+
+    def test_square_off_window_fails_closed_without_calendar(self):
+        """If the NSE holiday calendar cannot be imported, is_trading_day
+        fails closed — never exits on unverifiable session state."""
+        import sys
+        v = IntradayValidator(IntradayConfig(square_off_time="15:00"))
+        mon = IST.localize(datetime(2026, 10, 5, 15, 10))
+        with patch.dict(sys.modules, {'market_data': None}):
+            assert v.is_trading_day(mon) is False
+            assert v.is_square_off_window(mon) is False
 
     def test_stale_data_rejected(self):
         """No entry when market data is stale or missing."""
