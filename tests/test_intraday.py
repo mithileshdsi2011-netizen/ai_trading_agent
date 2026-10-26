@@ -861,7 +861,7 @@ class TestIntradayValidator:
         import sys
         v = IntradayValidator(IntradayConfig(square_off_time="15:00"))
         mon = IST.localize(datetime(2026, 10, 5, 15, 10))
-        with patch.dict(sys.modules, {'market_data': None}):
+        with patch.dict(sys.modules, {'trading_calendar': None}):
             assert v.is_trading_day(mon) is False
             assert v.is_square_off_window(mon) is False
 

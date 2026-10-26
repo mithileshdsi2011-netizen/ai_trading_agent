@@ -25,6 +25,7 @@ sys.path.insert(0, current_dir)
 
 from token_manager import TokenManager
 from api_usage_monitor import api_monitor
+from trading_calendar import NSE_TRADING_HOLIDAYS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,16 +140,8 @@ class MarketDataFetcher:
     _cycle_metrics: Dict[str, Any] = {}
     _metrics_lock = threading.Lock()
 
-    # NSE market holidays — update annually
-    _NSE_HOLIDAYS = {
-        "2025-01-26", "2025-02-26", "2025-03-14", "2025-03-31",
-        "2025-04-10", "2025-04-14", "2025-04-18", "2025-05-01",
-        "2025-08-15", "2025-08-27", "2025-10-02", "2025-10-02",
-        "2025-10-20", "2025-10-24", "2025-11-05", "2025-12-25",
-        "2026-01-26", "2026-03-03", "2026-03-20", "2026-04-02",
-        "2026-04-03", "2026-04-14", "2026-05-01", "2026-08-15",
-        "2026-10-02", "2026-10-29", "2026-11-13", "2026-12-25",
-    }
+    # NSE market holidays — shared authoritative list
+    _NSE_HOLIDAYS = NSE_TRADING_HOLIDAYS
 
     _period_days = {
         '1d': 1,
@@ -588,13 +581,13 @@ class MarketDataFetcher:
 
     @classmethod
     def is_market_open(cls) -> bool:
+        from trading_calendar import is_trading_day
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.now(ist)
-        if now.weekday() >= 5:
-            return False
-        today_str = now.strftime("%Y-%m-%d")
-        if today_str in cls._NSE_HOLIDAYS:
-            logger.info(f"Market holiday today ({today_str}) — trading paused")
+        if not is_trading_day(now):
+            today_str = now.strftime("%Y-%m-%d")
+            if today_str in cls._NSE_HOLIDAYS:
+                logger.info(f"Market holiday today ({today_str}) — trading paused")
             return False
         market_open = datetime.strptime("09:15", "%H:%M").time()
         market_close = datetime.strptime("15:30", "%H:%M").time()

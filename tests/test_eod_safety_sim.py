@@ -581,18 +581,18 @@ def test_long_holiday_weekend_held_until_next_trading_day(tmp_path):
     eng, incidents = _engine(tmp_path)
     import intraday.validators as vm
     from unittest.mock import patch
-    thu = datetime(2026, 11, 12, 14, 0)                   # Thursday (naive)
+    thu = datetime(2026, 12, 24, 14, 0)                   # Thursday (naive)
     _add_position(eng, _position(entry=thu))
-    # Fri 2026-11-13 is in _NSE_HOLIDAYS; Sat 14th, Sun 15th
-    for day in [13, 14, 15]:
-        sim = vm.IST.localize(datetime(2026, 11, day, 16, 0))
+    # Fri 2026-12-25 is Christmas (declared holiday); Sat 26th, Sun 27th
+    for day in [25, 26, 27]:
+        sim = vm.IST.localize(datetime(2026, 12, day, 16, 0))
         with patch.object(vm, 'ist_now', return_value=sim), \
                 patch.object(engine_mod, 'date', _fake_date(sim)):
             eng._scheduler_tick_once()
         assert len(eng.paper_executor.get_open_positions()) == 1
         assert eng.trade_manager.get_trades() == []
-    # Mon 16th 15:05 — first valid window → exit
-    mon = vm.IST.localize(datetime(2026, 11, 16, 15, 5))
+    # Mon 28th 15:05 — first valid window → exit
+    mon = vm.IST.localize(datetime(2026, 12, 28, 15, 5))
     with patch.object(vm, 'ist_now', return_value=mon), \
             patch.object(engine_mod, 'date', _fake_date(mon)):
         eng.market_data.get_quotes = MagicMock(

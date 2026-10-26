@@ -18,6 +18,7 @@ sys.path.insert(0, current_dir)
 
 from token_manager import TokenManager
 from api_usage_monitor import api_monitor, monitored_api_call
+from trading_calendar import NSE_TRADING_HOLIDAYS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -430,19 +431,9 @@ class MarketDataFetcher:
             logger.error(f"Error fetching intraday data for {symbol}: {e}")
             return pd.DataFrame()
     
-    # NSE market holidays — update annually
-    # Source: https://www.nseindia.com/resources/exchange-communication-holidays
-    _NSE_HOLIDAYS = {
-        # 2025
-        "2025-01-26", "2025-02-26", "2025-03-14", "2025-03-31",
-        "2025-04-10", "2025-04-14", "2025-04-18", "2025-05-01",
-        "2025-08-15", "2025-08-27", "2025-10-02", "2025-10-02",
-        "2025-10-20", "2025-10-24", "2025-11-05", "2025-12-25",
-        # 2026
-        "2026-01-26", "2026-03-03", "2026-03-20", "2026-04-02",
-        "2026-04-03", "2026-04-14", "2026-05-01", "2026-08-15",
-        "2026-10-02", "2026-10-29", "2026-11-13", "2026-12-25",
-    }
+    # NSE market holidays — shared authoritative list
+    # Source: NSE CM trading-holidays circular (see trading_calendar.py)
+    _NSE_HOLIDAYS = NSE_TRADING_HOLIDAYS
 
     def is_market_open(self) -> bool:
         """
@@ -451,19 +442,17 @@ class MarketDataFetcher:
         """
         from datetime import datetime
         import pytz
+        from trading_calendar import is_trading_day
 
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.now(ist)
         current_time = now.time()
         today_str = now.strftime("%Y-%m-%d")
 
-        # Weekend
-        if now.weekday() >= 5:
-            return False
-
-        # NSE holiday
-        if today_str in MarketDataFetcher._NSE_HOLIDAYS:
-            logger.info(f"Market holiday today ({today_str}) — trading paused")
+        # Weekend / declared NSE holiday / uncovered calendar year
+        if not is_trading_day(now):
+            if today_str in MarketDataFetcher._NSE_HOLIDAYS:
+                logger.info(f"Market holiday today ({today_str}) — trading paused")
             return False
 
         market_open  = datetime.strptime("09:15", "%H:%M").time()

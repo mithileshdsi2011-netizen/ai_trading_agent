@@ -86,11 +86,11 @@ class IntradayValidator:
         if now.weekday() >= 5:
             return False
         try:
-            from market_data import MarketDataFetcher
-            return now.strftime("%Y-%m-%d") not in MarketDataFetcher._NSE_HOLIDAYS
+            from trading_calendar import is_trading_day
+            return is_trading_day(now)
         except Exception as e:
             logger.warning(
-                f"[INTRADAY] NSE holiday calendar unavailable ({e!r}) — "
+                f"[INTRADAY] NSE trading calendar unavailable ({e!r}) — "
                 f"failing closed (not a trading day)")
             return False
 

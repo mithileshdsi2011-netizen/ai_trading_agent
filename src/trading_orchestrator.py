@@ -1351,15 +1351,10 @@ class TradingOrchestrator:
             logger.warning(f"Email alert failed: {_ee}")
 
     def _is_trading_day(self) -> bool:
-        """Return True only on NSE trading days (Mon–Fri, non-holiday)."""
-        import pytz
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
-        if now.weekday() >= 5:
-            return False
-        today_str = now.strftime('%Y-%m-%d')
-        from market_data import MarketDataFetcher
-        return today_str not in MarketDataFetcher._NSE_HOLIDAYS
+        """Return True only on NSE trading days (Mon–Fri, non-holiday,
+        calendar-covered year). Fails closed on unknown years."""
+        from trading_calendar import is_trading_day
+        return is_trading_day()
 
     def stop(self):
         """Stop the trading orchestrator"""
