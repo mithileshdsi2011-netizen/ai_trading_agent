@@ -222,3 +222,145 @@ def test_repeated_squareoff_no_duplicates(tmp_path):
     eng._maybe_square_off()
     eng._maybe_square_off()
     assert len(eng.trade_manager.get_trades()) == 1   # exactly one trade
+
+
+# ══ Batch A: bounded lock, heartbeat, post-close idle, overnight flag ══
+
+import intraday.engine as engine_mod
+
+
+def _tick_setup(eng, square_off=True, market_open=True):
+    eng.validator.is_square_off_time = MagicMock(return_value=square_off)
+    eng.validator.is_market_open = MagicMock(return_value=market_open)
+    eng.market_data.get_quotes = MagicMock(return_value=_quotes(105.0))
+
+
+class TestSchedulerTickSafety:
+
+    def test_normal_eod_tick_flushes(self, tmp_path):
+        eng, _ = _engine(tmp_path)
+        _add_position(eng, _position())
+        _tick_setup(eng)
+        eng._scheduler_tick_once()
+        assert eng.paper_executor.get_open_positions() == []
+        assert eng._eod_completed_at is None or isinstance(
+            eng._eod_completed_at, datetime)
+
+    def test_lock_held_tick_times_out_bounded(self, tmp_path):
+        eng, incidents = _engine(tmp_path)
+        _add_position(eng, _position())
+        _tick_setup(eng)
+        eng._lock.acquire()
+        t0 = time.time()
+        try:
+            eng._scheduler_tick_once()
+        finally:
+            eng._lock.release()
+        # bounded — returns after EOD_LOCK_TIMEOUT_SECONDS, not indefinitely
+        assert time.time() - t0 < engine_mod.EOD_LOCK_TIMEOUT_SECONDS + 2
+        assert eng._eod_pending_since is not None      # delay recorded
+        assert eng.paper_executor.get_open_positions()  # still open — retry next tick
+
+    def test_repeated_timeouts_alert_once(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(engine_mod, 'EOD_DELAY_ALERT_SECONDS', 0.1)
+        eng, incidents = _engine(tmp_path)
+        _add_position(eng, _position())
+        _tick_setup(eng)
+        eng._lock.acquire()
+        try:
+            for _ in range(3):
+                eng._scheduler_tick_once()
+                time.sleep(0.05)
+        finally:
+            eng._lock.release()
+        notifies = [i for i in incidents
+                    if i[0] == 'notify' and 'eod_delayed' in i[1]]
+        assert len(notifies) == 1                      # deduplicated
+
+    def test_lock_release_retry_succeeds(self, tmp_path):
+        eng, incidents = _engine(tmp_path)
+        _add_position(eng, _position())
+        _tick_setup(eng)
+        eng._lock.acquire()
+        eng._scheduler_tick_once()
+        eng._lock.release()
+        eng._scheduler_tick_once()                     # retry completes
+        assert eng.paper_executor.get_open_positions() == []
+        # next tick confirms EOD complete → pending cleared
+        eng._scheduler_tick_once()
+        assert eng._eod_pending_since is None
+
+    def test_no_scans_once_squareoff_due(self, tmp_path):
+        eng, _ = _engine(tmp_path)
+        _tick_setup(eng, square_off=True, market_open=True)
+        eng.maybe_run_cycle = MagicMock()
+        eng._scheduler_tick_once()
+        eng.maybe_run_cycle.assert_not_called()
+
+    def test_positions_held_after_close_still_retried(self, tmp_path):
+        """15:35+ — square_off still due → retry branch stays active."""
+        eng, _ = _engine(tmp_path)
+        _add_position(eng, _position())
+        _tick_setup(eng, square_off=True, market_open=False)
+        eng._scheduler_tick_once()
+        assert eng.paper_executor.get_open_positions() == []
+
+    def test_overnight_recovery_branch(self, tmp_path):
+        """Market closed, not due (early AM) + open positions → recover."""
+        eng, _ = _engine(tmp_path)
+        _add_position(eng, _position(
+            entry=datetime.now() - timedelta(days=1)))
+        _tick_setup(eng, square_off=False, market_open=False)
+        eng._scheduler_tick_once()
+        assert eng.paper_executor.get_open_positions() == []
+
+    def test_overnight_position_flagged_once(self, tmp_path):
+        eng, incidents = _engine(tmp_path)
+        _add_position(eng, _position(
+            entry=datetime.now() - timedelta(days=1)))
+        _tick_setup(eng, square_off=False, market_open=True)
+        eng.maybe_run_cycle = MagicMock()
+        eng._scheduler_tick_once()
+        eng._scheduler_tick_once()
+        over = [i for i in incidents if 'overnight' in i[1]]
+        assert len(over) == 1
+
+    def test_idle_heartbeat_status(self, tmp_path):
+        eng, _ = _engine(tmp_path)
+        _tick_setup(eng, square_off=False, market_open=False)  # overnight, nothing open
+        eng._scheduler_tick_once()
+        s = eng._scheduler_status()
+        assert s['mode'] == 'idle'
+        assert s['last_tick'] is not None
+        assert s['last_success'] is not None
+        assert s['tick_age_seconds'] is not None and s['tick_age_seconds'] < 60
+        assert s['open_positions'] == 0
+
+    def test_dead_scheduler_distinguishable(self, tmp_path):
+        eng, _ = _engine(tmp_path)
+        s = eng._scheduler_status()
+        assert s['running'] is False          # never started → dead
+        assert s['last_tick'] is None         # no heartbeat at all
+
+    def test_status_persisted_atomically(self, tmp_path):
+        eng, _ = _engine(tmp_path)
+        _tick_setup(eng, square_off=False, market_open=False)
+        eng._persist_status()
+        import json
+        status = json.load(open(tmp_path / 'engine_status.json'))
+        assert 'scheduler' in status
+        assert 'last_tick' in status['scheduler']
+
+    def test_quote_failure_during_eod_tick_records_incident(self, tmp_path):
+        eng, incidents = _engine(tmp_path)
+        pos = _position()
+        pos.current_price = 101.0
+        _add_position(eng, pos)
+        eng.validator.is_square_off_time = MagicMock(return_value=True)
+        eng.validator.is_market_open = MagicMock(return_value=False)
+        eng.market_data.get_quotes = MagicMock(
+            side_effect=TimeoutError('angel down'))
+        eng._scheduler_tick_once()
+        assert eng.trade_manager.get_trades()[0].exit_price == 101.0
+        assert any('eod' in k.lower() for _, k, _ in incidents)
+

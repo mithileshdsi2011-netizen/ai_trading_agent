@@ -1932,6 +1932,7 @@ class TestSelfScheduler:
         import time
         engine = self._engine(tmp_path)
         engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         engine.maybe_run_cycle = Mock()
         engine.start_scheduler(tick_seconds=0.05)
         time.sleep(0.2)
@@ -1964,6 +1965,7 @@ class TestSelfScheduler:
         import time
         engine = self._engine(tmp_path)
         engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         engine.maybe_run_cycle = Mock(side_effect=RuntimeError("boom"))
         engine.start_scheduler(tick_seconds=0.05)
         time.sleep(0.25)
@@ -1976,6 +1978,7 @@ class TestSelfScheduler:
         engine = self._engine(tmp_path)
         engine._last_scan_time = None  # make a cycle due
         engine.validator.is_market_open = Mock(return_value=True)
+        engine.validator.is_square_off_time = Mock(return_value=False)
         with engine._lock:  # simulate in-flight scan holding the lock
             t0 = time.monotonic()
             engine.maybe_run_cycle()
@@ -1992,6 +1995,7 @@ class TestSelfScheduler:
             calls.append(1)
             time.sleep(0.3)
         engine.run_cycle = slow_cycle
+        engine.validator.is_square_off_time = Mock(return_value=False)
         engine.maybe_run_cycle()
         engine.maybe_run_cycle()  # _cycle_running already set → no-op
         engine.maybe_run_cycle()

@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
 from .models import (
@@ -68,6 +68,16 @@ EOD_QUOTE_INCIDENT_KEY = 'intraday:angel:eod_quote_failure'
 SCAN_STUCK_ALERT_SECONDS = 600
 SCAN_STUCK_INCIDENT_KEY = 'intraday:angel:scan_stuck'
 SCHEDULER_TICK_SECONDS = 30
+# EOD duty must never starve behind a scan lock. The tick waits a bounded
+# time per attempt, retries each tick, and raises a deduplicated incident
+# once the delay crosses the alert threshold.
+EOD_LOCK_TIMEOUT_SECONDS = 5
+EOD_DELAY_ALERT_SECONDS = 300
+# Once EOD is confirmed complete (or the market is closed with nothing
+# open), the scheduler drops to a slow heartbeat instead of trading cycles.
+IDLE_TICK_SECONDS = 120
+EOD_DELAYED_INCIDENT_KEY = 'intraday:angel:eod_delayed'
+OVERNIGHT_INCIDENT_KEY = 'intraday:angel:overnight_positions'
 
 
 def daily_breakdown(trades: List, entries_today: int,
@@ -187,6 +197,14 @@ class IntradayEngine:
         self._auth_cooldown_until: Optional[datetime] = None
         self._last_scan_time: Optional[datetime] = None
         self._last_data_time: Optional[datetime] = None
+        self._scheduler_last_tick: Optional[datetime] = None
+        self._scheduler_last_success: Optional[datetime] = None
+        self._eod_pending_since: Optional[datetime] = None
+        self._eod_last_attempt: Optional[datetime] = None
+        self._eod_completed_at: Optional[datetime] = None
+        self._eod_last_failure: Optional[str] = None
+        self._eod_delay_alerted = False
+        self._overnight_alerted = False
         self._market_regime = MarketRegime.SIDEWAYS
         self._opportunities: List[IntradaySignal] = []
         self._instruments_loaded = False
@@ -479,11 +497,19 @@ class IntradayEngine:
         return len(exited)
 
     def _maybe_square_off(self):
-        """EOD square-off of any remaining paper positions."""
+        """EOD square-off of any remaining paper positions.
+
+        Carryover policy (unchanged, documented): a position that survives
+        a session is an operational exception — flagged via the overnight
+        incident — but it is still MANAGED: SL/target monitoring resumes
+        next session via _refresh_positions, and it is force-closed at the
+        next square-off window or on any market-closed tick that finds it
+        open (the overnight/early-morning recovery path)."""
         if not self.paper_executor.get_open_positions():
             return
         if not self.validator.is_square_off_time() and self.validator.is_market_open():
             return
+        self._eod_last_attempt = datetime.now()
         # Refresh prices once more so EOD exits use live data where possible
         try:
             open_syms = [p.symbol for p in self.paper_executor.get_open_positions()]
@@ -512,11 +538,22 @@ class IntradayEngine:
             self.trade_manager.add_trade(trade)
         if trades:
             logger.warning(f"[INTRADAY] EOD SQUARE OFF executed for {len(trades)} positions")
+            self._eod_completed_at = datetime.now()
         self.state_store.save_positions([])
 
     def maybe_run_cycle(self):
         """Kick off a background cycle if the scan interval has elapsed.
         Never blocks the caller — a full scan can take minutes."""
+        # No new scans once square-off is due — but keep the EOD path
+        # alive: a non-blocking square-off attempt preserves the redundant
+        # coverage run_cycle's gate-3 used to provide via polls.
+        if self.validator.is_square_off_time():
+            if self._lock.acquire(blocking=False):
+                try:
+                    self._maybe_square_off()
+                finally:
+                    self._lock.release()
+            return
         due = (self._last_scan_time is None
                or (datetime.now() - self._last_scan_time).total_seconds() >= self.scan_interval)
         # Check-and-set under the lock: a scheduler tick and an API poll must
@@ -567,16 +604,100 @@ class IntradayEngine:
         def _tick():
             while not self._scheduler_stop.is_set():
                 try:
-                    if self.validator.is_market_open() or self.validator.is_square_off_time():
-                        with self._lock:
-                            self._maybe_square_off()
-                        self.maybe_run_cycle()
+                    self._scheduler_tick_once()
                 except Exception as e:
+                    self._eod_last_failure = repr(e)
                     logger.error(f"[INTRADAY] scheduler tick error: {e}")
-                self._scheduler_stop.wait(tick_seconds)
+                try:
+                    self._persist_status()
+                except Exception:
+                    pass
+                # Idle once nothing can need the trading loop: market closed,
+                # square-off window handled, no open positions.
+                idle = not (self.paper_executor.get_open_positions()
+                            or (self.validator.is_market_open()
+                                and not self.validator.is_square_off_time()))
+                self._scheduler_stop.wait(
+                    IDLE_TICK_SECONDS if idle else tick_seconds)
 
         threading.Thread(target=_tick, daemon=True,
                          name="intraday-scheduler").start()
+
+    def _scheduler_tick_once(self):
+        """One scheduler iteration — extracted for deterministic testing.
+
+        Priority: EOD square-off duty > session scans > overnight recovery.
+        Never blocks indefinitely; a busy scan lock defers work to the next
+        tick rather than hanging the scheduler thread."""
+        self._scheduler_last_tick = datetime.now()
+        positions = self.paper_executor.get_open_positions()
+        market_open = self.validator.is_market_open()
+        square_off_due = self.validator.is_square_off_time()
+
+        if square_off_due:
+            # EOD duty — no new scans once square-off is due.
+            if positions:
+                if self._eod_pending_since is None:
+                    self._eod_pending_since = datetime.now()
+                self._eod_last_attempt = datetime.now()
+                if self._lock.acquire(timeout=EOD_LOCK_TIMEOUT_SECONDS):
+                    try:
+                        self._maybe_square_off()
+                    finally:
+                        self._lock.release()
+                else:
+                    delay = (datetime.now()
+                             - self._eod_pending_since).total_seconds()
+                    logger.warning(
+                        f"[INTRADAY] EOD square-off delayed — scan lock held "
+                        f"({delay:.0f}s pending, retrying next tick)")
+                    if (delay >= EOD_DELAY_ALERT_SECONDS
+                            and not self._eod_delay_alerted):
+                        self._eod_delay_alerted = True
+                        self._incident(
+                            'notify', EOD_DELAYED_INCIDENT_KEY,
+                            f"EOD square-off delayed {delay:.0f}s by scan "
+                            f"lock contention — {len(positions)} PAPER "
+                            f"position(s) still open.")
+            else:
+                # EOD confirmed complete — resolve any delay state.
+                if self._eod_pending_since is not None:
+                    self._eod_completed_at = datetime.now()
+                    self._eod_pending_since = None
+                if self._eod_delay_alerted:
+                    self._eod_delay_alerted = False
+                    self._incident('resolve', EOD_DELAYED_INCIDENT_KEY, '')
+        elif market_open:
+            self.maybe_run_cycle()
+        elif positions:
+            # Market closed + not square-off-time (overnight / early
+            # morning): keep the recovery path alive while PAPER positions
+            # remain open — bounded, retried each tick.
+            self._eod_last_attempt = datetime.now()
+            if self._lock.acquire(timeout=EOD_LOCK_TIMEOUT_SECONDS):
+                try:
+                    self._maybe_square_off()
+                finally:
+                    self._lock.release()
+
+        # Overnight PAPER positions are an operational exception: flagged
+        # once (deduped incident), exit policy unchanged.
+        today = date.today()
+        overnight = [
+            p.symbol for p in self.paper_executor.get_open_positions()
+            if isinstance(p.entry_time, datetime)
+            and p.entry_time.date() < today]
+        if overnight and not self._overnight_alerted:
+            self._overnight_alerted = True
+            self._incident(
+                'notify', OVERNIGHT_INCIDENT_KEY,
+                f"{len(overnight)} PAPER position(s) carried "
+                f"overnight: {overnight}")
+        elif not overnight and self._overnight_alerted:
+            self._overnight_alerted = False
+            self._incident('resolve', OVERNIGHT_INCIDENT_KEY, '')
+
+        self._scheduler_last_success = datetime.now()
 
     def stop_scheduler(self):
         """Stop the background tick (test teardown / graceful shutdown)."""
@@ -591,14 +712,52 @@ class IntradayEngine:
         self.state_store.save_engine_status(status)
 
     # ── status / serialization ──────────────────────────────────────
+    def _scheduler_status(self) -> Dict[str, Any]:
+        """Distinguishes a healthy idle scheduler from a dead/blocked one:
+        `last_tick` advances every loop iteration while `last_success` only
+        advances on clean iterations — divergence = repeated failures."""
+        now = datetime.now()
+        def _iso(dt): return dt.isoformat() if dt else None
+        open_positions = self.paper_executor.get_open_positions()
+        today = date.today()
+        overnight = sum(
+            1 for p in open_positions
+            if isinstance(p.entry_time, datetime)
+            and p.entry_time.date() < today)
+        idle = not (open_positions
+                    or (self.validator.is_market_open()
+                        and not self.validator.is_square_off_time()))
+        return {
+            'running': self._scheduler_started
+                       and not self._scheduler_stop.is_set(),
+            'mode': 'idle' if idle else 'active',
+            'last_tick': _iso(self._scheduler_last_tick),
+            'last_success': _iso(self._scheduler_last_success),
+            'tick_age_seconds': round(
+                (now - self._scheduler_last_tick).total_seconds(), 1)
+                if self._scheduler_last_tick else None,
+            'eod_pending_since': _iso(self._eod_pending_since),
+            'eod_last_attempt': _iso(self._eod_last_attempt),
+            'eod_completed_at': _iso(self._eod_completed_at),
+            'eod_last_failure': self._eod_last_failure,
+            'eod_delay_alerted': self._eod_delay_alerted,
+            'open_positions': len(open_positions),
+            'overnight_positions': overnight,
+        }
+
     def _persist_status(self):
-        self.state_store.save_engine_status({
+        # Merge into the existing file: other writers (kill switch, earlier
+        # cycle) must not be clobbered; the store writes atomically.
+        status = self.state_store.load_engine_status() or {}
+        status.update({
             'kill_switch': self.risk_manager.is_killed(),
             'market_data_status': self.market_data_status(),
             'market_regime': self._market_regime.value,
             'last_scan_time': self._last_scan_time.isoformat() if self._last_scan_time else None,
             'last_data_time': self._last_data_time.isoformat() if self._last_data_time else None,
+            'scheduler': self._scheduler_status(),
         })
+        self.state_store.save_engine_status(status)
 
     @staticmethod
     def _signal_to_dict(signal: IntradaySignal) -> Dict[str, Any]:
@@ -695,6 +854,7 @@ class IntradayEngine:
             'metrics': self.metrics.calculate_metrics(self.trade_manager.get_trades()),
             'websocket': self.websocket.get_status(),
             'last_scan_time': status.get('last_scan_time'),
+            'scheduler': self._scheduler_status(),
             'scan_started': self._cycle_started_at.isoformat() if self._cycle_started_at else None,
             'scan_seconds': scan_seconds,
             'last_cycle_duration_s': self._last_cycle_duration_s,
