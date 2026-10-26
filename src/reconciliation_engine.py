@@ -144,6 +144,11 @@ class ReconciliationEngine:
     # from the journal before we raise a CRITICAL alert.
     MISSING_JOURNAL_RETRY_THRESHOLD = 3
 
+    # A transient broker-API rate limit must not page like a real mismatch:
+    # it only escalates to CRITICAL if still failing after this long.
+    TRANSIENT_ESCALATE_AFTER_SECONDS = 15 * 60
+    _RATE_LIMIT_MARKERS = ('too many requests', '429', 'rate limit', 'throttl')
+
     def __init__(self, broker=None, market_data_fetcher=None, store=None, alert_engine=None):
         self.broker = broker
         self.market_data_fetcher = market_data_fetcher
@@ -159,6 +164,12 @@ class ReconciliationEngine:
         self._fetch_errors: List[str] = []
         # Track completed Kite orders that are not yet reflected in the journal
         self._missing_journal_retries: Dict[str, Dict[str, Any]] = {}
+        # Unhealthy-streak bookkeeping for alert de-duplication:
+        # a CRITICAL is sent at most once per streak (transient causes are
+        # deferred), and recovery is logged with the recorded cause.
+        self._unhealthy_since: Optional[float] = None
+        self._alerted_unhealthy: bool = False
+        self._last_cause: Optional[str] = None
 
     # ── public status / health ─────────────────────────────────────────────
 
@@ -249,24 +260,51 @@ class ReconciliationEngine:
             if self._fetch_errors:
                 status['broker_fetch_errors'] = self._fetch_errors
 
+            cause, transient = self._unhealthy_cause(mismatches) if not healthy else (None, False)
+            if cause:
+                status['cause'] = cause
+                self._last_cause = cause
+
             self._store.save_broker_state('reconciliation', status)
             with self._lock:
                 self._last_status = status
 
             if self._alert_engine:
                 try:
-                    if not healthy and self._last_healthy:
-                        first_detected = next((m for m in mismatches if m.repair == 'detected'), None)
-                        detail = first_detected.type_ if first_detected else (status.get('error') or 'unknown')
-                        self._alert_engine.critical(
-                            'Reconciliation',
-                            f'Reconciliation unhealthy: {detail}',
-                            status
-                        )
-                    elif healthy and not self._last_healthy:
-                        self._alert_engine.info('Reconciliation', 'Reconciliation recovered', status)
+                    now_ts = time.time()
+                    if not healthy:
+                        if self._unhealthy_since is None:
+                            self._unhealthy_since = now_ts
+                        elapsed = now_ts - self._unhealthy_since
+                        # Non-transient causes (real mismatches, hard fetch
+                        # failures) page immediately; transient rate-limit
+                        # streaks only escalate once they outlast the window.
+                        overdue = elapsed >= self.TRANSIENT_ESCALATE_AFTER_SECONDS
+                        if (not transient or overdue) and not self._alerted_unhealthy:
+                            detail = f'{cause} — failing {int(elapsed)}s' if transient else cause
+                            self._alert_engine.critical(
+                                'Reconciliation',
+                                f'Reconciliation unhealthy: {detail}',
+                                status
+                            )
+                            self._alerted_unhealthy = True
+                    elif self._unhealthy_since is not None:
+                        if self._alerted_unhealthy:
+                            self._alert_engine.info('Reconciliation', 'Reconciliation recovered', status)
+                        else:
+                            dur = int(now_ts - self._unhealthy_since)
+                            self._alert_engine.info(
+                                'Reconciliation',
+                                f'Reconciliation recovered after transient {self._last_cause or "failure"} ({dur}s)',
+                                status
+                            )
+                        self._unhealthy_since = None
+                        self._alerted_unhealthy = False
                 except Exception:
                     pass
+            if healthy:
+                self._unhealthy_since = None
+                self._alerted_unhealthy = False
             self._last_healthy = healthy
 
             self._log_mismatches(mismatches, duration_ms)
@@ -287,14 +325,53 @@ class ReconciliationEngine:
                 self._store.save_broker_state('reconciliation', status)
             with self._lock:
                 self._last_status = status
+            # Hard failure (exception, not a fetch error) — page on the first
+            # occurrence, then re-page only per escalation window while it
+            # keeps failing, so a crash loop doesn't spam identical CRITICALs.
+            now_ts = time.time()
+            if self._unhealthy_since is None:
+                self._unhealthy_since = now_ts
             if self._alert_engine:
                 try:
-                    self._alert_engine.critical('Reconciliation', f'Full reconciliation failed: {e}', status)
+                    if not self._alerted_unhealthy:
+                        self._alert_engine.critical('Reconciliation', f'Full reconciliation failed: {e}', status)
+                        self._alerted_unhealthy = True
+                    elif now_ts - self._unhealthy_since >= self.TRANSIENT_ESCALATE_AFTER_SECONDS:
+                        self._alert_engine.critical(
+                            'Reconciliation',
+                            f'Reconciliation still failing ({e}) — unhealthy {int(now_ts - self._unhealthy_since)}s',
+                            status
+                        )
+                        self._unhealthy_since = now_ts
                 except Exception:
                     pass
+            self._last_healthy = False
+            self._last_cause = f'reconciliation_exception: {e}'
             return status
 
     # ── helpers: logging and counting ─────────────────────────────────────
+
+    @staticmethod
+    def _is_rate_limit(err: str) -> bool:
+        e = (err or '').lower()
+        return any(m in e for m in ReconciliationEngine._RATE_LIMIT_MARKERS)
+
+    def _unhealthy_cause(self, mismatches: List[Mismatch]) -> tuple:
+        """(cause, transient) for an unhealthy cycle.
+
+        transient=True only when every recorded failure is a broker-API
+        rate limit — tolerated briefly before escalation. Unrepaired
+        mismatches are checked first: a real position/order discrepancy
+        must never hide behind a transient-fetch label.
+        """
+        first_detected = next((m for m in mismatches if m.repair == 'detected'), None)
+        if first_detected:
+            return (first_detected.type_, False)
+        if self._fetch_errors:
+            if all(self._is_rate_limit(e) for e in self._fetch_errors):
+                return ('broker_api_rate_limit', True)
+            return (f'broker_api_error: {self._fetch_errors[0]}', False)
+        return ('unknown', False)
 
     def _log_mismatches(self, mismatches: List[Mismatch], duration_ms: int):
         for m in mismatches:

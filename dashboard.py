@@ -4863,6 +4863,27 @@ function renderNotifs(){
 let prevData=null;
 let _loading=false;
 
+// Stale snapshots must not render live-looking values — thresholds mirror
+// the engines' staleness gates (options/breadth 6h, global 12h, sector 24h).
+const isIntelStale=(ts,staleAfterHrs)=>{
+  if(!ts)return true;
+  try{const ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;return isNaN(ageH)||ageH>staleAfterHrs;}catch(e){return true;}
+};
+// Source/freshness footer: the server-computed `fresh` verdict wins when
+// present; otherwise the local age check decides. UNAVAILABLE/MALFORMED beat STALE.
+const intelAsof=(elId,ts,source,staleAfterHrs,fresh)=>{
+  const el=document.getElementById(elId); if(!el)return;
+  if(!ts){el.innerHTML=`<span style="color:#6b7280">${source} · N/A</span>`;return;}
+  let ageH=NaN;
+  try{ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;}catch(e){}
+  const st=(fresh&&fresh.status)||null;
+  const stale=isNaN(ageH)||ageH>staleAfterHrs||(fresh&&fresh.stale);
+  const when=String(ts).replace('T',' ').slice(0,19);
+  el.innerHTML=`<span style="color:#6b7280">${source} · as of ${when}</span>`+
+    (st==='UNAVAILABLE'||st==='MALFORMED'?` <span style="color:#ef4444;font-weight:700">${st}</span>`
+     :stale?` <span style="color:#ef4444;font-weight:700">STALE</span>`:'');
+};
+
 async function load(){
   if(_loading) return;
   _loading=true;
@@ -5070,17 +5091,11 @@ async function load(){
     document.getElementById('ai-rec-new-buy').className='stat-value-sm '+(canBuyNew?'green':'red');
     document.getElementById('ai-rec-confidence').textContent=confidence+'%';
 
-    // Stale snapshots must not render live-looking values — N/A past the
-    // feed's freshness window (thresholds mirror the -asof badges below).
-    const isIntelStale=(ts,staleAfterHrs)=>{
-      if(!ts)return true;
-      try{const ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;return isNaN(ageH)||ageH>staleAfterHrs;}catch(e){return true;}
-    };
-
-    // Global Markets (simplified)
+    // Global Markets (simplified) — server-computed freshness verdict
+    // (12h gate + all-zero check) wins over the local age fallback.
     const gm=d.global_markets||{};
     const gmAssets=gm.assets||{};
-    const gmStale=isIntelStale(gm.timestamp,24);
+    const gmStale=gm.freshness?gm.freshness.stale:isIntelStale(gm.timestamp,12);
     const gmSentEl=document.getElementById('gm-sentiment');
     if(gmStale || gm.sentiment_score==null){
       gmSentEl.textContent='N/A';
@@ -5122,7 +5137,7 @@ async function load(){
 
     // Options Intelligence
     const oi=d.options_intelligence||{};
-    const oiStale=isIntelStale(oi.timestamp,24);
+    const oiStale=oi.freshness?oi.freshness.stale:isIntelStale(oi.timestamp,6);
     const oiPcr=parseFloat(oi.pcr);
     const oiPcrEl=document.getElementById('oi-pcr');
     if(oiPcrEl){
@@ -5188,7 +5203,7 @@ async function load(){
 
     // Sector Rotation (dedupe strong from weak); stale → no live-looking data
     const sr=d.sector_rotation||{};
-    const srStale=isIntelStale(sr.timestamp,48);
+    const srStale=isIntelStale(sr.timestamp,24);
     const strongSet=new Set((sr.top5_strong||[]).map(s=>s.sector));
     const strong=srStale?[]:(sr.top5_strong||[]).slice(0,5);
     const weak=srStale?[]:(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
@@ -5200,21 +5215,13 @@ async function load(){
     const srN30=document.getElementById('sr-nifty-30d');
     if(srN30)srN30.textContent=(!srStale && sr.nifty_30d!=null)?sr.nifty_30d.toFixed(1)+'%':'N/A';
 
-    // Source/freshness footers for market-intelligence cards
-    const intelAsof=(elId,ts,source,staleAfterHrs)=>{
-      const el=document.getElementById(elId); if(!el)return;
-      if(!ts){el.innerHTML=`<span style="color:#6b7280">${source} · N/A</span>`;return;}
-      let ageH=NaN;
-      try{ageH=(Date.now()-new Date(String(ts).replace(' ','T')).getTime())/36e5;}catch(e){}
-      const stale=isNaN(ageH)||ageH>staleAfterHrs;
-      const when=String(ts).replace('T',' ').slice(0,19);
-      el.innerHTML=`<span style="color:#6b7280">${source} · as of ${when}</span>`+(stale?` <span style="color:#ef4444;font-weight:700">STALE</span>`:'');
-    };
-    intelAsof('gm-asof',gm.timestamp,'Global snapshot (Yahoo Finance)',24);
-    intelAsof('oi-asof',oi.timestamp,'NSE option-chain snapshot',24);
+    // Source/freshness footers for market-intelligence cards (intelAsof is
+    // hoisted to top level so loadMarketIntelligence() can share it).
+    intelAsof('gm-asof',gm.timestamp,'Global snapshot (Yahoo Finance)',12,gm.freshness);
+    intelAsof('oi-asof',oi.timestamp,'NSE option-chain snapshot',6,oi.freshness);
     intelAsof('fii-asof',fd.date,'NSE FII/DII report (T-1)',72);
-    intelAsof('vix-asof',vix.timestamp,'Kite live',1);
-    intelAsof('sr-asof',sr.timestamp,'Sector momentum snapshot',48);
+    intelAsof('vix-asof',vix.timestamp,'Kite LTP · local fetch'+(vix.market_session==='CLOSED'?' · last session value':''),1);
+    intelAsof('sr-asof',sr.timestamp,'Sector momentum snapshot',24);
     const evtAsof=document.getElementById('evt-asof');
     if(evtAsof)evtAsof.innerHTML='<span style="color:#6b7280">Event calendar · evaluated real-time</span>';
 
@@ -5913,13 +5920,18 @@ async function loadMarketIntelligence(){
     const add=(label, value, colorClass='')=>{
       rows.push(`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${colorClass}">${value}</div></div>`);
     };
+    // Stale feeds render N/A here too — engine-gated thresholds; server
+    // `freshness` verdict wins where present (options, global).
+    const staleNA=(fresh,ts,hrs)=>fresh?fresh.stale:isIntelStale(ts,hrs);
+    const sv=(fresh,ts,hrs,v)=>staleNA(fresh,ts,hrs)?'N/A — stale':val(v);
+    const mb=d.market_breadth||{}, sr=d.sector_rotation||{}, oi=d.options_intelligence||{}, gm=d.global_markets||{}, fd=d.fii_dii||{}, vix=d.vix_risk||{};
     add('Technical','Market closed');
-    add('Market Breadth',val(d.market_breadth&&d.market_breadth.breadth_score));
-    add('Sector Momentum',val(d.sector_rotation&&d.sector_rotation.momentum_score));
-    add('India VIX',val(d.vix_risk&&d.vix_risk.vix));
-    add('FII/DII Net',val(d.fii_dii&&d.fii_dii.net_flow));
-    add('Options PCR',val(d.options_intelligence&&d.options_intelligence.pcr));
-    add('Global Sentiment',val(d.global_markets&&d.global_markets.sentiment_score));
+    add('Market Breadth',sv(null,mb.timestamp,6,mb.breadth_score));
+    add('Sector Momentum',sv(null,sr.timestamp,24,sr.momentum_score));
+    add('India VIX',vix.status?val(null):val(vix.vix));
+    add('FII/DII Net',sv(null,fd.date,72,fd.net_flow));
+    add('Options PCR',sv(oi.freshness,oi.timestamp,6,oi.pcr));
+    add('Global Sentiment',sv(gm.freshness,gm.timestamp,12,gm.sentiment_score));
     add('Event Risk',val(d.economic_event_risk&&d.economic_event_risk.reason));
     document.getElementById('mi-grid').innerHTML=rows.join('');
   }catch(e){console.error('Market Intelligence load error:',e);}
@@ -7545,6 +7557,63 @@ def js_error():
     return jsonify({'ok': True})
 
 
+# ── Market-intelligence freshness (read-only; mirrors the engines' gates) ──
+# Same staleness limits the LIVE decision engines apply — the dashboard cards
+# must not render live-looking values past them. Evaluation only reads the
+# persisted snapshot; nothing is fetched, scored or mutated here.
+_OPTIONS_INTEL_MAX_AGE_S = 6 * 3600    # OptionsIntelligenceEngine
+_GLOBAL_MARKETS_MAX_AGE_S = 12 * 3600  # GlobalMarketMonitor
+
+
+def _snapshot_age_seconds(ts) -> float:
+    """Age of an ISO/'YYYY-MM-DD HH:MM:SS' timestamp in seconds; None if unparsable."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace(' ', 'T'))
+    except Exception:
+        return None
+    try:
+        return (datetime.now(dt.tzinfo) - dt).total_seconds() if dt.tzinfo \
+            else (datetime.now() - dt).total_seconds()
+    except Exception:
+        return None
+
+
+def _intel_freshness(snap, max_age_seconds: int) -> dict:
+    """Freshness verdict for a persisted intelligence snapshot."""
+    if not isinstance(snap, dict) or not snap:
+        return {'status': 'UNAVAILABLE', 'stale': True, 'age_seconds': None}
+    if snap.get('status') == 'UNAVAILABLE' or snap.get('reason'):
+        return {'status': 'UNAVAILABLE', 'stale': True, 'age_seconds': None,
+                'reason': snap.get('reason')}
+    age = _snapshot_age_seconds(snap.get('timestamp'))
+    if age is None:
+        return {'status': 'MALFORMED', 'stale': True, 'age_seconds': None}
+    if age > max_age_seconds:
+        return {'status': 'STALE', 'stale': True, 'age_seconds': round(age)}
+    return {'status': 'FRESH', 'stale': False, 'age_seconds': round(age)}
+
+
+def _global_markets_freshness(snap) -> dict:
+    """Global-markets freshness; an all-zero asset payload is degenerate even
+    when the timestamp is fresh (the fetch produced no real market data)."""
+    fresh = _intel_freshness(snap, _GLOBAL_MARKETS_MAX_AGE_S)
+    if fresh['status'] != 'FRESH':
+        return fresh
+    assets = (snap or {}).get('assets') or {}
+    if assets:
+        has_real = any(
+            any(isinstance(v, (int, float)) and v != 0 for v in (a or {}).values())
+            for a in assets.values()
+        )
+        if not has_real:
+            return {'status': 'UNAVAILABLE', 'stale': True,
+                    'age_seconds': fresh['age_seconds'],
+                    'reason': 'all-zero snapshot'}
+    return fresh
+
+
 @app.route('/api/data')
 def api_data():
     from config import config
@@ -8620,14 +8689,20 @@ def api_data():
         if _vix is not None:
             from vix_risk_engine import IndiaVIXRiskEngine
             data['vix_risk'] = {
+                # Kite LTP returns only last_price — no exchange quote
+                # timestamp — so this stamps the local fetch time. Post-close
+                # the value is the last session's close, not a live quote.
                 'timestamp': now_ist.isoformat(),
+                'timestamp_kind': 'local_fetch',
+                'market_session': 'OPEN' if market_open else 'CLOSED',
                 'vix': round(_vix, 2),
                 'volatility_score': round(min(100.0, _vix * 2.5), 2),
                 'risk_factor': IndiaVIXRiskEngine.risk_factor_from_vix(_vix),
                 'risk_level': IndiaVIXRiskEngine.risk_level(_vix),
             }
         else:
-            data['vix_risk'] = {'status': _status_unavailable, 'reason': 'Could not fetch India VIX'}
+            data['vix_risk'] = {'status': _status_unavailable, 'reason': 'Could not fetch India VIX',
+                                'market_session': 'OPEN' if market_open else 'CLOSED'}
     except Exception as _vix_err:
         data['vix_risk'] = {'status': _status_unavailable, 'reason': 'VIX fetch error'}
 
@@ -8650,10 +8725,12 @@ def api_data():
     except Exception as _fd_err:
         data['fii_dii'] = {'status': _status_unavailable, 'reason': 'FII/DII fetch error'}
 
-    # Options chain intelligence snapshot (from store; computed separately)
+    # Options chain intelligence snapshot — the card applies the engine's 6h
+    # freshness gate so stale/malformed rows render N/A instead of live values.
     try:
-        if get_store is not None:
-            data['options_intelligence'] = get_store().get_latest_options_intelligence() or {}
+        _oi = get_store().get_latest_options_intelligence() if get_store is not None else None
+        data['options_intelligence'] = dict(_oi or {},
+            freshness=_intel_freshness(_oi, _OPTIONS_INTEL_MAX_AGE_S))
     except Exception:
         data['options_intelligence'] = {}
 
@@ -8664,10 +8741,10 @@ def api_data():
     except Exception:
         data['economic_event_risk'] = {}
 
-    # Global market snapshot (from store; computed separately)
+    # Global market snapshot — engine's 12h gate + all-zero payload check.
     try:
-        if get_store is not None:
-            data['global_markets'] = get_store().get_latest_global_markets() or {}
+        _gm = get_store().get_latest_global_markets() if get_store is not None else None
+        data['global_markets'] = dict(_gm or {}, freshness=_global_markets_freshness(_gm))
     except Exception:
         data['global_markets'] = {}
 

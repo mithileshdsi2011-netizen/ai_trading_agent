@@ -456,5 +456,140 @@ class TestBrokerFetchSafety(unittest.TestCase):
         broker.kite.set_access_token.assert_called_with('ROTATED_TOKEN')
 
 
+class TestReconciliationAlertPolicy(unittest.TestCase):
+    """Alert quality: transient rate-limit streaks vs genuine failures."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.store = TradingStore(self.db_path)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except Exception:
+            pass
+
+    def _live_broker(self):
+        b = FakeBroker()
+        b.paper_trading = False
+        b.kite = MagicMock()
+        b.kite.holdings.return_value = []
+        b.kite.positions.return_value = {'net': [], 'day': []}
+        b.kite.orders.return_value = []
+        return b
+
+    def _engine(self, broker):
+        alerts = MagicMock()
+        eng = ReconciliationEngine(broker=broker, store=self.store,
+                                   alert_engine=alerts)
+        return eng, alerts
+
+    # ── transient rate limit ──────────────────────────────────────────────
+    def test_transient_rate_limit_does_not_page(self):
+        """orders: Too many requests → unhealthy but cause-classified and
+        no CRITICAL while inside the escalation window."""
+        broker = self._live_broker()
+        broker.kite.orders.side_effect = Exception("Too many requests")
+        eng, alerts = self._engine(broker)
+        status = eng.reconcile_all()
+        self.assertFalse(status['healthy'])
+        self.assertEqual(status['cause'], 'broker_api_rate_limit')
+        alerts.critical.assert_not_called()
+
+    def test_transient_rate_limit_recovery_logs_info(self):
+        """Transient blip recovers → INFO records the actual cause +
+        duration instead of a CRITICAL/unhealthy page."""
+        broker = self._live_broker()
+        state = {'fail': True}
+        broker.kite.orders.side_effect = lambda: (
+            (_ for _ in ()).throw(Exception("Too many requests"))
+            if state['fail'] else [])
+        eng, alerts = self._engine(broker)
+        self.assertFalse(eng.reconcile_all()['healthy'])
+        state['fail'] = False
+        recovered = eng.reconcile_all()
+        self.assertTrue(recovered['healthy'])
+        alerts.critical.assert_not_called()
+        msgs = [str(c) for c in alerts.info.call_args_list]
+        self.assertTrue(any('rate_limit' in m or 'transient' in m for m in msgs), msgs)
+
+    def test_persistent_rate_limit_escalates_to_critical(self):
+        """Still rate-limited past the escalation window → CRITICAL."""
+        import time as _time
+        broker = self._live_broker()
+        broker.kite.orders.side_effect = Exception("Too many requests")
+        eng, alerts = self._engine(broker)
+        eng.reconcile_all()
+        alerts.critical.assert_not_called()
+        eng._unhealthy_since = _time.time() - (eng.TRANSIENT_ESCALATE_AFTER_SECONDS + 1)
+        eng.reconcile_all()
+        alerts.critical.assert_called_once()
+        self.assertIn('rate_limit', str(alerts.critical.call_args))
+
+    # ── non-transient failures ────────────────────────────────────────────
+    def test_hard_fetch_error_pages_immediately(self):
+        """Non-rate-limit broker failure (e.g. auth) → CRITICAL on first
+        unhealthy cycle with the real cause in the message."""
+        broker = self._live_broker()
+        broker.kite.orders.side_effect = Exception("Incorrect `api_key` or `access_token`.")
+        eng, alerts = self._engine(broker)
+        status = eng.reconcile_all()
+        self.assertFalse(status['healthy'])
+        self.assertTrue(status['cause'].startswith('broker_api_error'))
+        alerts.critical.assert_called_once()
+
+    def test_unrepaired_mismatch_outranks_rate_limit(self):
+        """A real detected mismatch must never hide behind a transient label."""
+        from reconciliation_engine import Mismatch
+        eng, _ = self._engine(self._live_broker())
+        eng._fetch_errors = ['orders: Too many requests']
+        m = Mismatch(type_='positions', old_value=None,
+                     new_value={'symbol': 'X'}, repair='detected')
+        cause, transient = eng._unhealthy_cause([m])
+        self.assertEqual((cause, transient), ('positions', False))
+
+    def test_repeated_unhealthy_streak_pages_once(self):
+        """Flapping hard failures: one CRITICAL per streak, not per cycle."""
+        broker = self._live_broker()
+        broker.kite.orders.side_effect = Exception("Incorrect `api_key` or `access_token`.")
+        eng, alerts = self._engine(broker)
+        eng.reconcile_all()
+        eng.reconcile_all()
+        eng.reconcile_all()
+        self.assertEqual(alerts.critical.call_count, 1)
+
+    def test_recovery_then_new_streak_pages_again(self):
+        """CRITICAL → healthy → new failure → a fresh CRITICAL is allowed."""
+        broker = self._live_broker()
+        # non-auth → no token retry; flag controls the whole cycle
+        state = {'fail': True}
+        broker.kite.orders.side_effect = lambda: (
+            (_ for _ in ()).throw(ConnectionError("connection reset"))
+            if state['fail'] else [])
+        eng, alerts = self._engine(broker)
+        eng.reconcile_all()  # unhealthy → CRITICAL
+        state['fail'] = False
+        eng.reconcile_all()  # healthy  → INFO recovered
+        state['fail'] = True
+        eng.reconcile_all()  # unhealthy again → second CRITICAL
+        self.assertEqual(alerts.critical.call_count, 2)
+
+    # ── exception path ────────────────────────────────────────────────────
+    def test_exception_path_dedupes_and_reescalates(self):
+        """reconcile_all raising: CRITICAL once, re-page after the window."""
+        import time as _time
+        broker = self._live_broker()
+        eng, alerts = self._engine(broker)
+        eng._reconcile_holdings = MagicMock(side_effect=RuntimeError("boom"))
+        eng.reconcile_all()
+        eng.reconcile_all()
+        self.assertEqual(alerts.critical.call_count, 1)
+        eng._unhealthy_since = _time.time() - (eng.TRANSIENT_ESCALATE_AFTER_SECONDS + 1)
+        eng.reconcile_all()
+        self.assertEqual(alerts.critical.call_count, 2)
+        self.assertIn('still failing', str(alerts.critical.call_args))
+
+
 if __name__ == '__main__':
     unittest.main()
