@@ -625,3 +625,107 @@ def test_failed_exit_position_retained_in_persistence(tmp_path):
     assert persisted[0]['symbol'] == 'TEST'
     # EOD not marked complete while a position remains
     assert eng._eod_completed_at is None
+
+
+# ══ Dashboard status semantics: auth / market-data / kill-switch ══
+
+def test_auth_status_credentials_absent(tmp_path, monkeypatch):
+    eng, _ = _engine(tmp_path)
+    # engine config is a module-level singleton — monkeypatch restores
+    for f in ('angel_api_key', 'angel_client_code',
+              'angel_password_or_mpin', 'angel_totp_secret'):
+        monkeypatch.setattr(eng.config, f, '')
+    s = eng.get_status()
+    assert s['credentials_configured'] is False
+    assert s['auth_status'] == 'NOT CONFIGURED'
+    assert s['is_authenticated'] is False
+    assert s['auth_configured'] is False          # legacy field intact
+
+
+def test_auth_status_configured_pending(tmp_path):
+    """Real creds + no auth attempt → AUTH PENDING, never NOT CONFIGURED."""
+    eng, _ = _engine(tmp_path)
+    assert eng.credentials_configured()           # real .env creds present
+    eng.auth.is_authenticated = MagicMock(return_value=False)
+    s = eng.get_status()
+    assert s['credentials_configured'] is True
+    assert s['auth_status'] == 'AUTH PENDING'
+    assert s['is_authenticated'] is False
+    assert s['auth_configured'] is False          # not authenticated yet
+    assert s['engine_state'] == 'AUTH PENDING'
+
+
+def test_auth_status_connected(tmp_path):
+    eng, _ = _engine(tmp_path)
+    eng.auth.is_authenticated = MagicMock(return_value=True)
+    eng._auth_state = 'CONNECTED'
+    s = eng.get_status()
+    assert s['is_authenticated'] is True
+    assert s['auth_configured'] is True
+    assert s['auth_status'] == 'CONNECTED'
+
+
+def test_auth_status_failed_preserved(tmp_path):
+    eng, _ = _engine(tmp_path)
+    eng._auth_state = 'ANGEL AUTHENTICATION FAILED'
+    s = eng.get_status()
+    assert 'FAILED' in s['auth_status']
+    assert s['engine_state'] == 'ANGEL AUTHENTICATION FAILED'
+
+
+def test_market_closed_no_fetch_disconnected_raw(tmp_path):
+    """Raw status stays DISCONNECTED post-close with no fetch — the
+    MARKET CLOSED label is a dashboard render decision; session field
+    supplies the truth."""
+    eng, _ = _engine(tmp_path)
+    eng.websocket.is_connected = MagicMock(return_value=False)
+    eng.market_data.last_fetch_time = MagicMock(return_value=None)
+    eng.validator.is_market_open = MagicMock(return_value=False)
+    s = eng.get_status()
+    assert s['market_session'] == 'CLOSED'
+    assert s['market_data_status'] == 'DISCONNECTED'   # no fetch ever
+    assert 'FAILED' not in s['auth_status']            # no error to mask
+
+
+def test_market_data_statuses_open_session(tmp_path):
+    eng, _ = _engine(tmp_path)
+    eng.websocket.is_connected = MagicMock(return_value=False)
+    # fresh fetch → LIVE
+    eng.market_data.last_fetch_time = MagicMock(
+        return_value=datetime.now())
+    assert eng.market_data_status() == 'LIVE'
+    # no fetch ever → DISCONNECTED
+    eng.market_data.last_fetch_time = MagicMock(return_value=None)
+    eng._last_data_time = None
+    assert eng.market_data_status() == 'DISCONNECTED'
+    # stale fetch → STALE
+    eng.market_data.last_fetch_time = MagicMock(
+        return_value=datetime.now() - timedelta(hours=2))
+    assert eng.market_data_status() == 'STALE'
+
+
+def test_kill_switch_status_semantics(tmp_path):
+    eng, _ = _engine(tmp_path)
+    s = eng.get_status()
+    assert s['kill_switch'] is False
+    eng.risk_manager.set_kill_switch(True)
+    s = eng.get_status()
+    assert s['kill_switch'] is True
+    assert s['engine_state'] == 'STOPPED (KILL SWITCH)'
+    # kill switch blocks entries
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    ok, reason = eng.risk_manager.can_enter_trade(_signal())
+    assert ok is False
+
+
+def test_ledger_unchanged_by_status(tmp_path):
+    """get_status is read-only — calling it must not mutate trades,
+    positions or daily state."""
+    eng, _ = _engine(tmp_path)
+    before_trades = len(eng.trade_manager.get_trades())
+    before_pos = len(eng.paper_executor.get_open_positions())
+    before_state = dict(eng.risk_manager.get_daily_state())
+    eng.get_status()
+    assert len(eng.trade_manager.get_trades()) == before_trades
+    assert len(eng.paper_executor.get_open_positions()) == before_pos
+    assert eng.risk_manager.get_daily_state() == before_state

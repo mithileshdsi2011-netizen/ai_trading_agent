@@ -3539,6 +3539,7 @@ tr:last-child td{border:none}
     </div>
     <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
       <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Kill Switch</div>
+      <div id="intraday-kill-state" style="color:#22c55e;font-size:13px;font-weight:700;margin-bottom:6px">INTRADAY RUNNING — PAPER</div>
       <button id="intraday-kill-btn" onclick="toggleIntradayKillSwitch()" style="background:#ef4444;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">STOP INTRADAY</button>
     </div>
   </div>
@@ -7006,15 +7007,37 @@ async function loadIntradayData(){
     // Update status boxes
     const authStatus=document.getElementById('intraday-auth-status');
     if(authStatus){
-      authStatus.textContent=d.auth_configured?'CONNECTED':'NOT CONFIGURED';
-      authStatus.style.color=d.auth_configured?'#22c55e':'#f59e0b';
+      // Render the real auth state — never "NOT CONFIGURED" just because
+      // login hasn't been attempted yet.
+      const rawAuth=(d.auth_status||'').toUpperCase();
+      const credsOk=d.credentials_configured!==undefined?d.credentials_configured:d.auth_configured;
+      let authText, authColor;
+      if(!credsOk){
+        authText='NOT CONFIGURED'; authColor='#f59e0b';
+      }else if(rawAuth.indexOf('FAILED')>=0){
+        authText='AUTH FAILED'; authColor='#ef4444';
+      }else if(d.is_authenticated||rawAuth==='CONNECTED'){
+        authText='CONNECTED'; authColor='#22c55e';
+      }else{
+        // configured but not yet authenticated
+        authText=d.market_session==='CLOSED'?'AUTH PENDING (idle)':'AUTH PENDING';
+        authColor='#f59e0b';
+      }
+      authStatus.textContent=authText;
+      authStatus.style.color=authColor;
     }
     
     const marketStatus=document.getElementById('intraday-market-status');
     if(marketStatus){
-      const mdStatus=d.market_data_status||(d.market_data_available?'LIVE':'DISCONNECTED');
+      let mdStatus=d.market_data_status||(d.market_data_available?'LIVE':'DISCONNECTED');
+      const authFailed=(d.auth_status||'').toUpperCase().indexOf('FAILED')>=0;
+      // Post-close with no fetch attempted: DISCONNECTED is just "nothing
+      // polled yet" — label it MARKET CLOSED. Never mask a real failure.
+      if(d.market_session==='CLOSED'&&mdStatus==='DISCONNECTED'&&!authFailed){
+        mdStatus='MARKET CLOSED';
+      }
       marketStatus.textContent=mdStatus;
-      marketStatus.style.color=mdStatus==='LIVE'?'#22c55e':mdStatus==='STALE'?'#f59e0b':'#ef4444';
+      marketStatus.style.color=mdStatus==='LIVE'?'#22c55e':mdStatus==='STALE'?'#f59e0b':mdStatus==='MARKET CLOSED'?'#9ca3af':'#ef4444';
     }
     
     const modeEl=document.getElementById('intraday-mode');
@@ -7051,6 +7074,12 @@ async function loadIntradayData(){
     }
     
     const killBtn=document.getElementById('intraday-kill-btn');
+    const killState=document.getElementById('intraday-kill-state');
+    if(killState){
+      const modeSuffix=d.mode==='PAPER'?' — PAPER':'';
+      killState.textContent=d.kill_switch?`INTRADAY STOPPED${modeSuffix}`:`INTRADAY RUNNING${modeSuffix}`;
+      killState.style.color=d.kill_switch?'#ef4444':'#22c55e';
+    }
     if(killBtn){
       killBtn.dataset.stopped=d.kill_switch?'1':'0';
       if(d.kill_switch){

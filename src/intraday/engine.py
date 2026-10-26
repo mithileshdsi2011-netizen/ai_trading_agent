@@ -850,6 +850,11 @@ class IntradayEngine:
 
         return {
             'auth_status': self._auth_state if self.credentials_configured() else "NOT CONFIGURED",
+            # Split the conflated auth concept into its real parts.
+            # `auth_configured` is kept unchanged for existing consumers —
+            # it means configured AND authenticated.
+            'credentials_configured': self.credentials_configured(),
+            'is_authenticated': self.auth.is_authenticated(),
             'auth_configured': self.credentials_configured() and self.auth.is_authenticated(),
             'market_data_status': self.market_data_status(),
             'market_data_available': self.market_data_status() == "LIVE",
