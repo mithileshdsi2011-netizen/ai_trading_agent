@@ -5,6 +5,7 @@ relative to NIFTY.
 """
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +46,16 @@ class SectorRotationEngine:
 
     # Sector momentum is daily intel — never reuse a snapshot older than this.
     SNAPSHOT_MAX_AGE_SECONDS = 24 * 3600
+
+    # Coverage gate: the momentum score is a percentile placement across the
+    # sector universe. When most fetches fail (e.g. Kite rate limiting), the
+    # surviving handful produces arbitrary 0/100 extremes — Banking=100,
+    # IT=0 — that then drive ±5 LIVE confidence adjustments. Below these
+    # thresholds the snapshot is marked INSUFFICIENT_COVERAGE and the
+    # adjustment is neutralized (0.0) while raw rows stay for diagnostics.
+    MIN_COVERAGE_RATIO = 0.70          # of attempted symbols must return data
+    MIN_COVERED_SECTORS_FRACTION = 0.5  # ≥ half of configured sectors have data
+    ABS_MIN_COVERED_SECTORS = 3         # floor when the sector map is tiny
 
     def __init__(
         self,
@@ -166,15 +177,44 @@ class SectorRotationEngine:
         sector_map = self._get_sector_map()
         sector_data: Dict[str, List[Dict[str, float]]] = {}
 
-        for sym in symbols[: self.max_symbols]:
+        attempted = symbols[: self.max_symbols]
+        symbols_succeeded = 0
+        for sym in attempted:
             ret = self._fetch_returns(sym)
             if ret is None:
                 continue
+            symbols_succeeded += 1
             sector = sector_map.get(sym, "Other")
             sector_data.setdefault(sector, []).append(ret)
 
+        # Coverage is measured against the CONFIGURED universe attempted —
+        # not just the sectors that survived — so a rate-limited run can't
+        # masquerade as a complete ranking.
+        sectors_configured = len({sector_map.get(s, "Other") for s in attempted})
+        sectors_covered = len(sector_data)
+        min_sectors = (
+            max(self.ABS_MIN_COVERED_SECTORS,
+                math.ceil(sectors_configured * self.MIN_COVERED_SECTORS_FRACTION))
+            if sectors_configured else self.ABS_MIN_COVERED_SECTORS
+        )
+        coverage_ratio = (symbols_succeeded / len(attempted)) if attempted else 0.0
+        sufficient = (
+            bool(attempted)
+            and coverage_ratio >= self.MIN_COVERAGE_RATIO
+            and sectors_covered >= min_sectors
+        )
+        coverage = {
+            "symbols_attempted": len(attempted),
+            "symbols_succeeded": symbols_succeeded,
+            "coverage_pct": round(coverage_ratio * 100, 1),
+            "sectors_configured": sectors_configured,
+            "sectors_covered": sectors_covered,
+            "min_sectors_required": min_sectors,
+            "sufficient": sufficient,
+        }
+
         if not sector_data:
-            self._latest = self._empty_snapshot("No sector data returned")
+            self._latest = self._empty_snapshot("No sector data returned", coverage)
             return self._latest
 
         # Build per-sector aggregated metrics
@@ -224,13 +264,16 @@ class SectorRotationEngine:
             "top5_strong": top5_strong,
             "top5_weak": top5_weak,
             "all_sectors": sector_metrics,
+            "coverage": coverage,
+            "sector_status": "SUFFICIENT" if sufficient else "INSUFFICIENT_COVERAGE",
         }
 
         self._latest = snapshot
         self._persist_snapshot(snapshot)
         return snapshot
 
-    def _empty_snapshot(self, reason: str) -> Dict[str, Any]:
+    def _empty_snapshot(self, reason: str,
+                        coverage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         now = datetime.now().isoformat()
         return {
             "timestamp": now,
@@ -239,6 +282,8 @@ class SectorRotationEngine:
             "top5_strong": [],
             "top5_weak": [],
             "all_sectors": [],
+            "coverage": coverage or {},
+            "sector_status": "INSUFFICIENT_COVERAGE",
             "reason": reason,
         }
 
@@ -285,12 +330,17 @@ class SectorRotationEngine:
 
         all_sectors = snapshot.get("all_sectors", [])
         sector_info = next((s for s in all_sectors if s.get("sector") == sector), None)
-        momentum_score = (sector_info.get("momentum_score") or 50.0) if sector_info else 50.0
+        raw_momentum = (sector_info.get("momentum_score") or 50.0) if sector_info else 50.0
         rank = next((i for i, s in enumerate(all_sectors) if s.get("sector") == sector), -1) + 1
 
-        if sector in top3:
+        # Coverage gate: only a SUFFICIENT snapshot may move the score. Old
+        # snapshots without coverage metadata fail neutral rather than
+        # assume full coverage.
+        sufficient = snapshot.get("sector_status") == "SUFFICIENT"
+
+        if sufficient and sector in top3:
             adjustment = 5
-        elif sector in bottom3:
+        elif sufficient and sector in bottom3:
             adjustment = -5
         else:
             adjustment = 0
@@ -298,8 +348,14 @@ class SectorRotationEngine:
         adjusted = max(0.0, min(100.0, ai_score + adjustment))
         return {
             "sector": sector,
-            "momentum_score": momentum_score,
-            "rank": rank,
+            # Neutral momentum when coverage is insufficient so downstream
+            # composites (market_intelligence_score) aren't skewed by a
+            # degraded percentile — the raw value stays for diagnostics.
+            "momentum_score": raw_momentum if sufficient else 50.0,
+            "raw_momentum_score": raw_momentum,
+            "sector_status": snapshot.get("sector_status") or "INSUFFICIENT_COVERAGE",
+            "coverage": snapshot.get("coverage"),
+            "rank": rank if sufficient else None,
             "adjustment": adjustment,
             "adjusted_score": round(adjusted, 2),
             "timestamp": snapshot.get("timestamp"),

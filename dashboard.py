@@ -4880,7 +4880,7 @@ const intelAsof=(elId,ts,source,staleAfterHrs,fresh)=>{
   const stale=isNaN(ageH)||ageH>staleAfterHrs||(fresh&&fresh.stale);
   const when=String(ts).replace('T',' ').slice(0,19);
   el.innerHTML=`<span style="color:#6b7280">${source} · as of ${when}</span>`+
-    (st==='UNAVAILABLE'||st==='MALFORMED'?` <span style="color:#ef4444;font-weight:700">${st}</span>`
+    (st&&st!=='FRESH'?` <span style="color:#ef4444;font-weight:700">${st}</span>`
      :stale?` <span style="color:#ef4444;font-weight:700">STALE</span>`:'');
 };
 
@@ -5201,15 +5201,20 @@ async function load(){
     const vixLevel=(vix.risk_level||'UNKNOWN').toUpperCase();
     vixLevelEl.className='stat-value-sm '+(vixLevel==='LOW'?'green':vixLevel==='MODERATE'?'yellow':vixLevel==='HIGH'?'orange':vixLevel==='EXTREME'?'red':'');
 
-    // Sector Rotation (dedupe strong from weak); stale → no live-looking data
+    // Sector Rotation (dedupe strong from weak); stale or insufficient
+    // coverage → no live-looking rankings (a 2-sector percentile is noise)
     const sr=d.sector_rotation||{};
     const srStale=isIntelStale(sr.timestamp,24);
+    const srCov=sr.coverage||{};
+    const srInsuff=sr.sector_status==='INSUFFICIENT_COVERAGE';
+    const srCovText=(srCov.symbols_succeeded!=null)?`${srCov.symbols_succeeded}/${srCov.symbols_attempted} symbols · ${srCov.coverage_pct}%`:'';
+    const srNA=srInsuff?('N/A — insufficient coverage'+(srCovText?' ('+srCovText+')':'')):(srStale?'N/A — stale':'—');
     const strongSet=new Set((sr.top5_strong||[]).map(s=>s.sector));
-    const strong=srStale?[]:(sr.top5_strong||[]).slice(0,5);
-    const weak=srStale?[]:(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
+    const strong=(srStale||srInsuff)?[]:(sr.top5_strong||[]).slice(0,5);
+    const weak=(srStale||srInsuff)?[]:(sr.top5_weak||[]).filter(s=>!strongSet.has(s.sector)).slice(0,5);
     const srRow=s=>`<div>${s.sector||'—'} <span style="color:#f9fafb">${s.momentum_score!=null?s.momentum_score.toFixed(0):'N/A'}</span> <span style="color:#9ca3af;font-size:11px">(${s.return_30d_pct!=null?s.return_30d_pct.toFixed(1):'—'}%)</span></div>`;
-    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(srRow).join(''):(srStale?'N/A — stale':'—');
-    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(srRow).join(''):(srStale?'N/A — stale':'—');
+    document.getElementById('sr-strong').innerHTML=strong.length?strong.map(srRow).join(''):srNA;
+    document.getElementById('sr-weak').innerHTML=weak.length?weak.map(srRow).join(''):srNA;
     const srN7=document.getElementById('sr-nifty-7d');
     if(srN7)srN7.textContent=(!srStale && sr.nifty_7d!=null)?sr.nifty_7d.toFixed(1)+'%':'N/A';
     const srN30=document.getElementById('sr-nifty-30d');
@@ -5221,7 +5226,7 @@ async function load(){
     intelAsof('oi-asof',oi.timestamp,'NSE option-chain snapshot',6,oi.freshness);
     intelAsof('fii-asof',fd.date,'NSE FII/DII report (T-1)',72);
     intelAsof('vix-asof',vix.timestamp,'Kite LTP · local fetch'+(vix.market_session==='CLOSED'?' · last session value':''),1);
-    intelAsof('sr-asof',sr.timestamp,'Sector momentum snapshot',24);
+    intelAsof('sr-asof',sr.timestamp,'Sector momentum snapshot'+(srCovText?' · '+srCovText:''),24,srInsuff?{status:'INSUFFICIENT_COVERAGE'}:null);
     const evtAsof=document.getElementById('evt-asof');
     if(evtAsof)evtAsof.innerHTML='<span style="color:#6b7280">Event calendar · evaluated real-time</span>';
 
@@ -5927,7 +5932,9 @@ async function loadMarketIntelligence(){
     const mb=d.market_breadth||{}, sr=d.sector_rotation||{}, oi=d.options_intelligence||{}, gm=d.global_markets||{}, fd=d.fii_dii||{}, vix=d.vix_risk||{};
     add('Technical','Market closed');
     add('Market Breadth',sv(null,mb.timestamp,6,mb.breadth_score));
-    add('Sector Momentum',sv(null,sr.timestamp,24,sr.momentum_score));
+    add('Sector Momentum',sr.sector_status==='INSUFFICIENT_COVERAGE'
+        ?('INSUFFICIENT COVERAGE'+(sr.coverage&&sr.coverage.symbols_succeeded!=null?` (${sr.coverage.symbols_succeeded}/${sr.coverage.symbols_attempted})`:''))
+        :sv(null,sr.timestamp,24,sr.momentum_score));
     add('India VIX',vix.status?val(null):val(vix.vix));
     add('FII/DII Net',sv(null,fd.date,72,fd.net_flow));
     add('Options PCR',sv(oi.freshness,oi.timestamp,6,oi.pcr));

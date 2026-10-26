@@ -156,7 +156,9 @@ class TradingStore:
                     nifty_30d REAL NOT NULL DEFAULT 0,
                     top5_strong TEXT NOT NULL DEFAULT '[]',
                     top5_weak TEXT NOT NULL DEFAULT '[]',
-                    all_sectors TEXT NOT NULL DEFAULT '[]'
+                    all_sectors TEXT NOT NULL DEFAULT '[]',
+                    coverage TEXT,
+                    sector_status TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_sector_rotation_timestamp
@@ -1129,15 +1131,24 @@ class TradingStore:
 
     # ── sector rotation ───────────────────────────────────────────────────
 
+    def _ensure_sector_rotation_columns(self, conn) -> None:
+        """Add coverage columns to pre-gate tables (no-op when present)."""
+        for col, typ in (("coverage", "TEXT"), ("sector_status", "TEXT")):
+            try:
+                conn.execute(f"ALTER TABLE sector_rotation ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
     def save_sector_rotation(self, snapshot: Dict[str, Any]) -> None:
         """Persist a sector rotation snapshot."""
         with self._lock:
             with self._conn() as conn:
+                self._ensure_sector_rotation_columns(conn)
                 conn.execute(
                     """
                     INSERT INTO sector_rotation
-                    (timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors, coverage, sector_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         snapshot.get("timestamp") or datetime.now().isoformat(),
@@ -1146,6 +1157,8 @@ class TradingStore:
                         self._dumps(snapshot.get("top5_strong", [])),
                         self._dumps(snapshot.get("top5_weak", [])),
                         self._dumps(snapshot.get("all_sectors", [])),
+                        self._dumps(snapshot.get("coverage") or {}),
+                        snapshot.get("sector_status"),
                     ),
                 )
 
@@ -1153,9 +1166,10 @@ class TradingStore:
         """Return the most recent sector rotation snapshot."""
         with self._lock:
             with self._conn() as conn:
+                self._ensure_sector_rotation_columns(conn)
                 row = conn.execute(
                     """
-                    SELECT timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors
+                    SELECT timestamp, nifty_7d, nifty_30d, top5_strong, top5_weak, all_sectors, coverage, sector_status
                     FROM sector_rotation ORDER BY timestamp DESC LIMIT 1
                     """
                 ).fetchone()
@@ -1168,6 +1182,8 @@ class TradingStore:
                     "top5_strong": self._loads(row["top5_strong"]),
                     "top5_weak": self._loads(row["top5_weak"]),
                     "all_sectors": self._loads(row["all_sectors"]),
+                    "coverage": self._loads(row["coverage"]) or {},
+                    "sector_status": row["sector_status"],
                 }
 
     # ── vix risk ──────────────────────────────────────────────────────────

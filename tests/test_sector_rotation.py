@@ -96,6 +96,8 @@ class TestSectorRotationEngine(unittest.TestCase):
     def test_top3_adjustment(self):
         self.engine._latest = {
             'timestamp': datetime.now().isoformat(),
+            'sector_status': 'SUFFICIENT',
+            'coverage': {'sufficient': True},
             'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}, {'sector': 'Pharma', 'momentum_score': 80}],
             'top5_weak': [{'sector': 'IT', 'momentum_score': 10}],
             'all_sectors': [
@@ -112,6 +114,8 @@ class TestSectorRotationEngine(unittest.TestCase):
     def test_bottom3_adjustment(self):
         self.engine._latest = {
             'timestamp': datetime.now().isoformat(),
+            'sector_status': 'SUFFICIENT',
+            'coverage': {'sufficient': True},
             'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}],
             'top5_weak': [{'sector': 'IT', 'momentum_score': 10}, {'sector': 'Auto', 'momentum_score': 15}, {'sector': 'FMCG', 'momentum_score': 20}],
             'all_sectors': [
@@ -168,6 +172,185 @@ class TestSectorRotationMissingData(unittest.TestCase):
         adj = engine.adjust_ai_score(60.0, 'X')
         self.assertEqual(adj['adjustment'], 0)
         self.assertEqual(adj['momentum_score'], 50.0)
+
+
+class CountingMarketData(FakeMarketData):
+    """Records every fetch call so tests can assert no extra broker calls."""
+
+    def __init__(self, hists, fail=None, nifty=None):
+        super().__init__(hists, nifty=nifty)
+        self._fail = set(fail or [])
+        self.calls = []
+
+    def get_stock_data(self, symbol, period, interval):
+        if symbol != 'NIFTY 50':
+            self.calls.append(symbol)
+        if symbol in self._fail:
+            raise Exception('429 Too many requests')
+        return super().get_stock_data(symbol, period, interval)
+
+
+def _ten_sector_setup(ok, fail):
+    """10 symbols across 10 sectors; `ok` succeed, `fail` raise."""
+    syms = [f'S{i}' for i in range(10)]
+    sector_map = {s: f'Sector{i}' for i, s in enumerate(syms)}
+    # The earliest surviving sector gets the steepest history → top-1 rank.
+    hists = {s: up_hist(100, 100 + 5 * (len(ok) - i + 1)) for i, s in enumerate(ok)}
+    md = CountingMarketData(hists, fail=fail)
+    eng = SectorRotationEngine(market_data=md, store=None,
+                               universe=syms, sector_map=sector_map)
+    return eng, md
+
+
+class TestSectorCoverageGate(unittest.TestCase):
+    """Percentile rankings over a degraded universe must not move AI scores."""
+
+    def _adj(self, ok, fail, sector):
+        eng, _ = _ten_sector_setup(ok, fail)
+        snap = eng.compute()
+        return snap, eng.adjust_ai_score(60.0, sector)
+
+    def test_zero_coverage(self):
+        snap, adj = self._adj([], [f'S{i}' for i in range(10)], 'Sector0')
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(snap['coverage']['coverage_pct'], 0.0)
+        self.assertEqual(adj['adjustment'], 0)
+        self.assertEqual(adj['adjusted_score'], 60.0)
+
+    def test_twenty_pct_coverage(self):
+        snap, adj = self._adj(['S0', 'S1'], [f'S{i}' for i in range(2, 10)], 'Sector0')
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(snap['coverage']['coverage_pct'], 20.0)
+        self.assertEqual(adj['adjustment'], 0)
+        self.assertEqual(adj['momentum_score'], 50.0)  # neutralized for MIS
+
+    def test_fifty_pct_coverage(self):
+        snap, adj = self._adj([f'S{i}' for i in range(5)], [f'S{i}' for i in range(5, 10)], 'Sector0')
+        self.assertEqual(snap['coverage']['coverage_pct'], 50.0)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(adj['adjustment'], 0)
+
+    def test_exactly_70pct_coverage_sufficient(self):
+        eng, _ = _ten_sector_setup([f'S{i}' for i in range(7)], [f'S{i}' for i in range(7, 10)])
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['coverage_pct'], 70.0)
+        self.assertEqual(snap['sector_status'], 'SUFFICIENT')
+        # Sector0 has the steepest history → top-1 → +5 as before the gate
+        adj = eng.adjust_ai_score(60.0, 'Sector0')
+        self.assertEqual(adj['adjustment'], 5)
+        self.assertEqual(adj['adjusted_score'], 65.0)
+
+    def test_full_coverage_scoring_unchanged(self):
+        eng, _ = _ten_sector_setup([f'S{i}' for i in range(10)], [])
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['coverage_pct'], 100.0)
+        self.assertEqual(snap['sector_status'], 'SUFFICIENT')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'Sector0')['adjustment'], 5)
+        self.assertEqual(eng.adjust_ai_score(60.0, 'Sector9')['adjustment'], -5)
+        self.assertEqual(eng.adjust_ai_score(60.0, 'Sector5')['adjustment'], 0)
+
+    def test_sector_count_gate_blocks_symbol_rich_snapshot(self):
+        """80% symbol coverage but only 2 distinct sectors → insufficient."""
+        syms = [f'S{i}' for i in range(10)]
+        sector_map = {s: ('Banking' if i < 4 else 'IT') for i, s in enumerate(syms)}
+        hists = {s: up_hist(100, 110 + i) for i, s in enumerate(syms[:8])}
+        md = CountingMarketData(hists, fail=set(syms[8:]))
+        eng = SectorRotationEngine(market_data=md, store=None,
+                                   universe=syms, sector_map=sector_map)
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['coverage_pct'], 80.0)
+        self.assertEqual(snap['coverage']['sectors_covered'], 2)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'Banking')['adjustment'], 0)
+
+    def test_rate_limit_failures_count_as_failed(self):
+        syms = [f'S{i}' for i in range(10)]
+        sector_map = {s: f'Sec{i}' for i, s in enumerate(syms)}
+        hists = {s: up_hist(100, 110) for s in syms[:3]}
+        md = CountingMarketData(hists, fail=set(syms[3:]))  # 70% rate-limited
+        eng = SectorRotationEngine(market_data=md, store=None,
+                                   universe=syms, sector_map=sector_map)
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['symbols_succeeded'], 3)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+        self.assertEqual(eng.adjust_ai_score(60.0, 'Sec0')['adjustment'], 0)
+
+    def test_malformed_short_history_counts_as_failed(self):
+        syms = [f'S{i}' for i in range(10)]
+        sector_map = {s: f'Sec{i}' for i, s in enumerate(syms)}
+        short = make_hist([100.0] * 10, n=10)  # <30 rows → _fetch_returns None
+        hists = {s: (up_hist(100, 110) if i < 5 else short) for i, s in enumerate(syms)}
+        md = CountingMarketData(hists)
+        eng = SectorRotationEngine(market_data=md, store=None,
+                                   universe=syms, sector_map=sector_map)
+        snap = eng.compute()
+        self.assertEqual(snap['coverage']['symbols_succeeded'], 5)
+        self.assertEqual(snap['sector_status'], 'INSUFFICIENT_COVERAGE')
+
+    def test_legacy_snapshot_without_coverage_fails_neutral(self):
+        """Old store rows have no coverage metadata → adj 0, no recompute."""
+        import tempfile
+        from persistence import TradingStore
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            store = TradingStore(db)
+            store.save_sector_rotation({
+                'timestamp': datetime.now().isoformat(),
+                'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}],
+                'top5_weak': [],
+                'all_sectors': [{'sector': 'Banking', 'momentum_score': 90}],
+                # no coverage / sector_status — pre-gate format
+            })
+            md = CountingMarketData({})
+            eng = SectorRotationEngine(market_data=md, store=store,
+                                       universe=['X'], sector_map={'X': 'Banking'})
+            adj = eng.adjust_ai_score(60.0, 'Banking')
+            self.assertEqual(adj['adjustment'], 0)
+            self.assertEqual(adj['adjusted_score'], 60.0)
+            self.assertEqual(adj['sector_status'], 'INSUFFICIENT_COVERAGE')
+            self.assertEqual(md.calls, [])  # no extra broker calls
+        finally:
+            os.remove(db)
+
+    def test_stale_snapshot_recomputed_still_neutral(self):
+        """A stale SUFFICIENT snapshot is age-gated out; recompute with all
+        fetches failing produces an insufficient (neutral) snapshot."""
+        eng, _ = _ten_sector_setup([], [f'S{i}' for i in range(10)])
+        eng._latest = {
+            'timestamp': '2020-01-01T00:00:00',
+            'sector_status': 'SUFFICIENT',
+            'top5_strong': [{'sector': 'Sector0', 'momentum_score': 95}],
+            'top5_weak': [],
+            'all_sectors': [{'sector': 'Sector0', 'momentum_score': 95}],
+        }
+        adj = eng.adjust_ai_score(60.0, 'Sector0')
+        self.assertEqual(adj['adjustment'], 0)
+
+    def test_sufficient_snapshot_needs_no_api_calls(self):
+        """adjust_ai_score on a fresh stored SUFFICIENT row must not fetch."""
+        import tempfile
+        from persistence import TradingStore
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            store = TradingStore(db)
+            store.save_sector_rotation({
+                'timestamp': datetime.now().isoformat(),
+                'sector_status': 'SUFFICIENT',
+                'coverage': {'sufficient': True},
+                'top5_strong': [{'sector': 'Banking', 'momentum_score': 90}],
+                'top5_weak': [],
+                'all_sectors': [{'sector': 'Banking', 'momentum_score': 90}],
+            })
+            md = CountingMarketData({})
+            eng = SectorRotationEngine(market_data=md, store=store,
+                                       universe=['X'], sector_map={'X': 'Banking'})
+            adj = eng.adjust_ai_score(60.0, 'Banking')
+            self.assertEqual(adj['adjustment'], 5)
+            self.assertEqual(md.calls, [])
+        finally:
+            os.remove(db)
 
 
 if __name__ == '__main__':
