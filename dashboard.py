@@ -1509,6 +1509,20 @@ tr:last-child td{border:none}
 .tab-btn:hover:not(.active){background:#1f2937;color:#e2e8f0}
 .tab-content{display:none}
 .tab-content.active{display:block}
+/* ── Workspace / section / sub-tab navigation ───────────────────────── */
+.ws-btn{display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:800;letter-spacing:.04em;cursor:pointer;border:1px solid #374151;color:#9ca3af;background:#111827;white-space:nowrap}
+.ws-btn:hover{color:#e5e7eb;border-color:#4b5563}
+.ws-btn.active{color:#fff;border-color:#3b82f6;background:#1d4ed8}
+.ws-mode{font-size:10px;font-weight:800;padding:2px 7px;border-radius:10px;letter-spacing:.06em}
+.ws-mode.live{background:#7f1d1d;color:#fca5a5}
+.ws-btn.active .ws-mode.live{background:#991b1b;color:#fecaca}
+.ws-mode.paper{background:#065f46;color:#a7f3d0}
+.ws-btn.active .ws-mode.paper{background:#047857;color:#d1fae5}
+.sec-btn{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:none;color:#9ca3af;background:transparent;white-space:nowrap}
+.sec-btn:hover{color:#e5e7eb;background:#1f2937}
+.sec-btn.active{color:#fff;background:#374151}
+.itab-pane{display:none}
+.itab-pane.active{display:block}
 .progress-bar{height:6px;background:#1f2937;border-radius:3px;overflow:hidden}
 .progress-fill{height:100%;border-radius:3px;transition:width .5s}
 .heatmap-item{padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600;text-align:center;cursor:default}
@@ -1565,12 +1579,24 @@ tr:last-child td{border:none}
   </div>
   <div class="flex items-center gap-4 flex-wrap">
     <div class="text-center">
+      <div class="stat-label">Workspace</div>
+      <div id="hdr-workspace" style="font-size:13px;font-weight:800">—</div>
+    </div>
+    <div class="text-center">
       <div class="stat-label">Market</div>
       <div id="hdr-market" style="font-size:13px;font-weight:700">—</div>
     </div>
     <div class="text-center">
       <div class="stat-label">Mode</div>
       <div id="hdr-mode" style="font-size:13px;font-weight:700;color:#60a5fa">—</div>
+    </div>
+    <div class="text-center">
+      <div class="stat-label" id="hdr-cash-label">Available Cash</div>
+      <div id="hdr-cash" style="font-size:13px;font-weight:600">—</div>
+    </div>
+    <div class="text-center">
+      <div class="stat-label">Open Positions</div>
+      <div id="hdr-positions" style="font-size:13px;font-weight:600">—</div>
     </div>
     <div class="text-center">
       <div class="stat-label">Last Scan</div>
@@ -1591,32 +1617,15 @@ tr:last-child td{border:none}
   </div>
 </div>
 
-<!-- TAB NAV -->
-<div style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px;flex-wrap:wrap;" class="flex gap-2">
-  <button class="tab-btn active" onclick="switchTab('dashboard',this)">🏠 Dashboard</button>
-  <button class="tab-btn" onclick="switchTab('morning',this)" id="morning-tab-btn">🌅 Morning Intel</button>
-  <button class="tab-btn" onclick="switchTab('portfolio',this)">📈 Portfolio</button>
-  <button class="tab-btn" onclick="switchTab('positions',this)">📋 Positions</button>
-  <button class="tab-btn" onclick="switchTab('lifecycle',this)">🔄 Trade Lifecycle</button>
-  <button class="tab-btn" onclick="switchTab('history',this)">🕒 History</button>
-  <button class="tab-btn" onclick="switchTab('signals',this)">🤖 AI Signals</button>
-  <button class="tab-btn" onclick="switchTab('analytics',this)">📊 Analytics</button>
-  <button class="tab-btn" onclick="switchTab('journal',this)">📓 Trade Journal</button>
-  <button class="tab-btn" onclick="switchTab('skipped',this)">⚠️ Skipped Opportunities</button>
-  <button class="tab-btn" onclick="switchTab('explain',this)">🔍 AI Explain</button>
-  <button class="tab-btn" onclick="switchTab('askai',this)">💬 Ask AI</button>
-  <button class="tab-btn" onclick="switchTab('market-intelligence',this)">🌐 Market Intelligence</button>
-  <button class="tab-btn" onclick="switchTab('botstatus',this)">⚙️ Bot Status</button>
-  <button class="tab-btn" id="ip-tab-btn" onclick="switchTab('ipstatus',this)">🌐 IP Status</button>
-  <button class="tab-btn" onclick="switchTab('portfolio-optimizer',this)">📊 Portfolio Optimizer</button>
-  <button class="tab-btn" onclick="switchTab('backtest',this)">📈 Backtest</button>
-  <button class="tab-btn" onclick="switchTab('backtesting',this)">🧪 Backtesting</button>
-  <button class="tab-btn" onclick="switchTab('ai-learning',this)">🧠 AI Learning</button>
-  <button class="tab-btn" onclick="switchTab('monitoring',this)">🚨 Monitoring</button>
-  <button class="tab-btn" onclick="switchTab('smart-execution',this)">⚡ Smart Execution</button>
-  <button class="tab-btn" onclick="switchTab('ipo',this)">📊 IPO Intelligence</button>
-  <button class="tab-btn" onclick="switchTab('intraday',this)">⚡ Intraday Trading</button>
+<!-- WORKSPACE SELECTOR + SECTION NAV + SUB-TABS -->
+<div style="background:#0b1220;border-bottom:1px solid #1f2937;padding:8px 16px;display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+  <div style="display:flex;gap:8px">
+    <button id="ws-swing" class="ws-btn" onclick="navWorkspace('swing')">SWING TRADING<span class="ws-mode live">LIVE</span></button>
+    <button id="ws-intraday" class="ws-btn" onclick="navWorkspace('intraday')">INTRADAY TRADING<span class="ws-mode paper">PAPER</span></button>
+  </div>
+  <div id="ws-sections" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"></div>
 </div>
+<div id="ws-subtabs" style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px;display:none;gap:8px;flex-wrap:wrap;align-items:center"></div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
 
@@ -3515,6 +3524,7 @@ tr:last-child td{border:none}
     </div>
   </div>
 
+  <div class="itab-pane active" id="itab-overview">
   <!-- Status Boxes -->
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px">
     <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
@@ -3591,7 +3601,9 @@ tr:last-child td{border:none}
       </div>
     </div>
   </div>
+  </div><!-- /itab-overview -->
 
+  <div class="itab-pane" id="itab-signals">
   <!-- Top Opportunities -->
   <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
     <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Top Opportunities <span id="intraday-signals-only" style="display:none;background:#78350f;color:#fbbf24;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;margin-left:6px">SIGNALS ONLY — NEW ENTRIES BLOCKED</span></h4>
@@ -3615,7 +3627,9 @@ tr:last-child td{border:none}
       </table>
     </div>
   </div>
+  </div><!-- /itab-signals -->
 
+  <div class="itab-pane" id="itab-trading">
   <!-- Open Positions -->
   <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
     <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Open Paper Positions</h4>
@@ -3664,6 +3678,32 @@ tr:last-child td{border:none}
       </table>
     </div>
   </div>
+  </div><!-- /itab-trading -->
+
+  <div class="itab-pane" id="itab-performance">
+  <!-- Strategy performance — renders the existing metrics payload -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">PAPER Performance <span style="font-size:11px;color:#9ca3af;font-weight:400">(realistic charge model on new fills; legacy rows keep their stored estimated charges)</span></h4>
+    <div id="intraday-metrics-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px"></div>
+  </div>
+  </div><!-- /itab-performance -->
+
+  <div class="itab-pane" id="itab-risk">
+  <!-- Risk state — renders the existing risk/live-adapter payload -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Risk State</h4>
+    <div id="intraday-risk-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px"></div>
+  </div>
+  </div><!-- /itab-risk -->
+
+  <div class="itab-pane" id="itab-system">
+  <!-- System state — renders the existing engine/connectivity payload -->
+  <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">System</h4>
+    <div id="intraday-system-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px"></div>
+    <div style="color:#9ca3af;font-size:11px;margin-top:12px">PAPER engine health does not imply broker LIVE readiness. Angel LIVE requires separate explicit approval plus verified order permissions, static-IP registration and funds-field confirmation.</div>
+  </div>
+  </div><!-- /itab-system -->
 </div><!-- /tab-intraday -->
 
 </div><!-- /main container -->
@@ -3744,6 +3784,291 @@ function switchTab(id,btn){
   if(id==='smart-execution') loadSmartExecution();
   if(id==='ipo') loadIPOData();
   if(id==='intraday') loadIntradayData();
+  _navSyncTab(id);
+}
+
+// ── Workspace / section / sub-tab navigation ──────────────────────────────────
+// Two workspaces (Swing LIVE, Intraday PAPER), each with sections; swing
+// sections with multiple modules get a sub-tab row. Existing tab panes and
+// loaders are untouched — this layer only organizes navigation.
+const NAV = {
+  swing: {label:'SWING TRADING', mode:'LIVE', sections:[
+    {id:'overview',     label:'Overview',         tabs:[['dashboard','Dashboard']]},
+    {id:'trading',      label:'Trading',          tabs:[['portfolio','Portfolio'],['positions','Positions'],['lifecycle','Trade Lifecycle'],['history','History'],['journal','Trade Journal'],['skipped','Skipped Opps.'],['smart-execution','Smart Execution']]},
+    {id:'intelligence', label:'Intelligence',     tabs:[['morning','Morning Intel'],['signals','AI Signals'],['market-intelligence','Market Intel'],['explain','AI Explain'],['portfolio-optimizer','Portfolio Optimizer']]},
+    {id:'performance',  label:'Performance',      tabs:[['analytics','Analytics'],['backtest','Backtest'],['backtesting','Backtesting'],['ai-learning','AI Learning']]},
+    {id:'ipo',          label:'IPO Intelligence', tabs:[['ipo','IPO Intelligence']]},
+    {id:'assistant',    label:'AI Assistant',     tabs:[['askai','Ask AI']]},
+    {id:'system',       label:'System',           tabs:[['botstatus','Bot Status'],['ipstatus','IP Status'],['monitoring','Monitoring']]}
+  ]},
+  intraday: {label:'INTRADAY TRADING', mode:'PAPER', sections:[
+    {id:'ioverview', label:'Overview',              itab:'itab-overview'},
+    {id:'itrading',  label:'Trading',               itab:'itab-trading'},
+    {id:'isignals',  label:'Signals & Intelligence',itab:'itab-signals'},
+    {id:'iperf',     label:'Performance',           itab:'itab-performance'},
+    {id:'irisk',     label:'Risk & Monitoring',     itab:'itab-risk'},
+    {id:'isystem',   label:'System',                itab:'itab-system'}
+  ]}
+};
+let NAV_STATE={ws:'swing',sec:'overview',tab:'dashboard'};
+const _wsLast={swing:{sec:'overview',tab:'dashboard'},intraday:{sec:'ioverview'}};
+let _navApplying=false;
+
+function _secByTab(tab){
+  for(const s of NAV.swing.sections){
+    if(s.tabs&&s.tabs.some(t=>t[0]===tab))return s.id;
+  }
+  return null;
+}
+function _secByItab(itab){
+  for(const s of NAV.intraday.sections){if(s.itab===itab)return s.id;}
+  return 'ioverview';
+}
+
+function _renderNav(){
+  const ws=NAV_STATE.ws;
+  const wb=document.getElementById('ws-swing');
+  const ib=document.getElementById('ws-intraday');
+  if(wb)wb.classList.toggle('active',ws==='swing');
+  if(ib)ib.classList.toggle('active',ws==='intraday');
+  const secs=document.getElementById('ws-sections');
+  if(secs){
+    secs.innerHTML=NAV[ws].sections.map(s=>
+      `<button class="sec-btn${s.id===NAV_STATE.sec?' active':''}" onclick="navSection('${ws}','${s.id}')">${s.label}</button>`
+    ).join('');
+  }
+  const sub=document.getElementById('ws-subtabs');
+  const sec=NAV[ws].sections.find(s=>s.id===NAV_STATE.sec);
+  const tabs=sec&&sec.tabs;
+  if(sub){
+    if(ws==='swing'&&tabs&&tabs.length>1){
+      sub.style.display='flex';
+      sub.innerHTML=tabs.map(([id,label])=>{
+        const btnId=id==='ipstatus'?' id="ip-tab-btn"':id==='morning'?' id="morning-tab-btn"':'';
+        return `<button${btnId} class="tab-btn${id===NAV_STATE.tab?' active':''}" onclick="navTab('${id}')">${label}</button>`;
+      }).join('');
+    }else{
+      sub.style.display='none';sub.innerHTML='';
+    }
+  }
+}
+
+function _updateHdrWorkspace(){
+  const el=document.getElementById('hdr-workspace');
+  if(!el)return;
+  if(NAV_STATE.ws==='intraday'){
+    el.innerHTML='<span style="color:#34d399">INTRADAY</span> <span class="ws-mode paper">PAPER</span>';
+  }else{
+    el.innerHTML='<span style="color:#f87171">SWING</span> <span class="ws-mode live">LIVE</span>';
+  }
+  // Re-point the context fields at the active workspace's cached data.
+  if(NAV_STATE.ws==='intraday'&&window._lastIntradayData)_intradayHdr(window._lastIntradayData);
+  if(NAV_STATE.ws==='swing'&&window._lastData)_swingHdrCashPos(window._lastData);
+}
+
+function _persistNav(){
+  try{sessionStorage.setItem('navState',JSON.stringify(NAV_STATE));}catch(e){}
+  const h=NAV_STATE.ws==='intraday'
+    ? '#intraday/'+NAV_STATE.sec
+    : '#swing/'+NAV_STATE.sec+'/'+NAV_STATE.tab;
+  if(location.hash!==h){_navApplying=true;location.hash=h;}
+}
+
+function _navSyncTab(id){
+  if(id==='intraday'){
+    NAV_STATE.ws='intraday';
+    _wsLast.intraday={sec:NAV_STATE.sec};
+  }else{
+    NAV_STATE.ws='swing';NAV_STATE.tab=id;
+    const s=_secByTab(id);if(s)NAV_STATE.sec=s;
+    _wsLast.swing={sec:NAV_STATE.sec,tab:id};
+  }
+  _renderNav();_persistNav();_updateHdrWorkspace();
+}
+
+function navWorkspace(ws){
+  if(ws===NAV_STATE.ws){_updateHdrWorkspace();return;}
+  if(ws==='intraday'){
+    NAV_STATE.ws='intraday';NAV_STATE.sec=_wsLast.intraday.sec;
+    const sec=NAV.intraday.sections.find(s=>s.id===NAV_STATE.sec)||NAV.intraday.sections[0];
+    navIntraday(sec.itab);
+  }else{
+    NAV_STATE.ws='swing';NAV_STATE.sec=_wsLast.swing.sec;NAV_STATE.tab=_wsLast.swing.tab;
+    switchTab(NAV_STATE.tab,null);
+  }
+}
+
+function navSection(ws,secId){
+  if(ws==='intraday'){
+    const sec=NAV.intraday.sections.find(s=>s.id===secId);
+    if(sec)navIntraday(sec.itab);
+    return;
+  }
+  const sec=NAV.swing.sections.find(s=>s.id===secId);if(!sec)return;
+  const lastTab=(_wsLast.swing.sec===secId&&_wsLast.swing.tab)||sec.tabs[0][0];
+  switchTab(lastTab,null);
+}
+
+function navTab(id){switchTab(id,null);}
+
+function navIntraday(paneId){
+  NAV_STATE.ws='intraday';NAV_STATE.sec=_secByItab(paneId);
+  _wsLast.intraday={sec:NAV_STATE.sec};
+  document.querySelectorAll('.itab-pane').forEach(p=>p.classList.toggle('active',p.id===paneId));
+  switchTab('intraday',null);
+}
+
+function _applyNavHash(){
+  const p=(location.hash||'').replace(/^#/,'').split('/');
+  if(p[0]==='intraday'){
+    NAV_STATE.ws='intraday';
+    const secId=NAV.intraday.sections.some(s=>s.id===p[1])?p[1]:'ioverview';
+    navIntraday(NAV.intraday.sections.find(s=>s.id===secId).itab);
+    return;
+  }
+  if(p[0]==='swing'){
+    const tab=p[2]||'dashboard';
+    const secId=_secByTab(tab);
+    NAV_STATE.ws='swing';NAV_STATE.tab=document.getElementById('tab-'+tab)?tab:'dashboard';
+    NAV_STATE.sec=secId||'overview';
+    switchTab(NAV_STATE.tab,null);
+    return;
+  }
+  switchTab('dashboard',null);
+}
+window.addEventListener('hashchange',()=>{
+  if(_navApplying){_navApplying=false;return;}
+  _applyNavHash();
+});
+
+function _initNav(){
+  const h=(location.hash||'').replace(/^#/,'');
+  if(h.startsWith('swing/')||h.startsWith('intraday/')){_applyNavHash();return;}
+  let restored=false;
+  try{
+    const s=JSON.parse(sessionStorage.getItem('navState')||'null');
+    if(s&&s.ws==='intraday'){
+      NAV_STATE.ws='intraday';
+      navIntraday((NAV.intraday.sections.find(x=>x.id===s.sec)||NAV.intraday.sections[0]).itab);
+      restored=true;
+    }else if(s&&s.tab&&document.getElementById('tab-'+s.tab)){
+      NAV_STATE={ws:'swing',sec:s.sec||_secByTab(s.tab)||'overview',tab:s.tab};
+      switchTab(s.tab,null);
+      restored=true;
+    }
+  }catch(e){}
+  if(!restored)switchTab('dashboard',null);
+}
+
+function _swingHdrCashPos(d){
+  const cl=document.getElementById('hdr-cash-label');
+  if(cl)cl.textContent='Available Cash';
+  const c=document.getElementById('hdr-cash');if(c)c.textContent=rupee(d.cash||0);
+  const p=document.getElementById('hdr-positions');if(p)p.textContent=String(d.open_positions||0);
+}
+
+function _intradayHdr(d){
+  // Context-specific status bar for the Intraday workspace — Angel PAPER only.
+  const mktEl=document.getElementById('hdr-market');
+  if(mktEl){
+    const open=d.market_session==='OPEN';
+    mktEl.innerHTML=open?'<span class="green">🟢 OPEN</span>':'<span class="red">🔴 CLOSED</span>';
+  }
+  const modeEl=document.getElementById('hdr-mode');
+  if(modeEl){modeEl.textContent='ANGEL '+(d.execution_mode||'PAPER');modeEl.style.color='#34d399';}
+  const cl=document.getElementById('hdr-cash-label');
+  if(cl)cl.textContent='PAPER Capital';
+  const c=document.getElementById('hdr-cash');
+  if(c)c.textContent='₹10,000 configured';  // actual configured PAPER capital
+  const p=document.getElementById('hdr-positions');
+  if(p)p.textContent=String((d.positions||[]).length);
+  const ls=document.getElementById('hdr-last-scan');
+  if(ls){
+    const last=d.last_scan_time?fmtDateTime(d.last_scan_time,true):'No completed scan';
+    ls.textContent=last+(d.cycle_running?' · engine running':'');
+  }
+  const ns=document.getElementById('hdr-next-scan');
+  if(ns){
+    const sch=d.scheduler||{};
+    ns.textContent=d.market_session==='OPEN'
+      ? (sch.next_scan||sch.next_run||'Awaiting schedule')
+      : 'Paused — market closed';
+  }
+  const st=document.getElementById('hdr-status');
+  if(st){
+    const es=d.engine_state_display||'—';
+    st.innerHTML=es==='SCANNING'?'<span class="green">🟢 '+es+'</span>'
+      :es==='MONITORING'?'<span style="color:#3b82f6">🔵 '+es+'</span>'
+      :'<span class="red">🔴 '+es+'</span>';
+  }
+  const tk=document.getElementById('hdr-token');
+  if(tk)tk.textContent='Angel: '+(d.auth_status||'—');
+}
+
+function _intradayCell(label, value, color){
+  return `<div style="background:#111827;border:1px solid #1f2937;border-radius:6px;padding:10px 12px">
+    <div style="color:#9ca3af;font-size:11px;margin-bottom:3px">${label}</div>
+    <div style="color:${color||'#f9fafb'};font-size:14px;font-weight:700">${value}</div>
+  </div>`;
+}
+
+function _renderIntradaySections(d){
+  // Performance — the existing metrics payload, labeled PAPER.
+  const mg=document.getElementById('intraday-metrics-grid');
+  if(mg){
+    const m=d.metrics||{};
+    const pf=m.profit_factor!=null?Number(m.profit_factor).toFixed(2):'N/A';
+    const wr=m.win_rate!=null?Number(m.win_rate).toFixed(1)+'%':'N/A';
+    mg.innerHTML=[
+      _intradayCell('Net P&L', pnlStr(m.net_pnl||0), (m.net_pnl||0)>=0?'#22c55e':'#ef4444'),
+      _intradayCell('Gross Profit', rupee(m.gross_profit||0), '#22c55e'),
+      _intradayCell('Gross Loss', rupee(m.gross_loss||0), '#ef4444'),
+      _intradayCell('Trades', String(m.total_trades||0)),
+      _intradayCell('Win Rate', wr),
+      _intradayCell('Profit Factor', pf),
+      _intradayCell('Avg Winner', rupee(m.avg_winner||0), '#22c55e'),
+      _intradayCell('Avg Loser', rupee(m.avg_loser||0), '#ef4444'),
+      _intradayCell('Max Drawdown', rupee(m.max_drawdown||0), '#ef4444'),
+      _intradayCell('ORB P&L / trades', pnlStr(m.orb_pnl||0)+' / '+(m.orb_trades||0), (m.orb_pnl||0)>=0?'#f9fafb':'#ef4444'),
+      _intradayCell('VWAP P&L / trades', pnlStr(m.vwap_pnl||0)+' / '+(m.vwap_trades||0), (m.vwap_pnl||0)>=0?'#f9fafb':'#ef4444'),
+    ].join('');
+  }
+  // Risk & Monitoring — existing risk/live-adapter/daily-state payload.
+  const rg=document.getElementById('intraday-risk-grid');
+  if(rg){
+    const ds=d.daily_state||{};
+    const lv=d.live||{};
+    const lrk=(lv.risk)||{};
+    rg.innerHTML=[
+      _intradayCell('Kill Switch', d.kill_switch?'ACTIVE — entries blocked':'Off', d.kill_switch?'#ef4444':'#22c55e'),
+      _intradayCell('Entry Permission', d.entry_permission||'—', d.entry_permission==='ALLOWED'?'#22c55e':'#f59e0b'),
+      _intradayCell('Entries (today / cap)', `${ds.trades_today||0} / ${ds.max_trades||'5'}`),
+      _intradayCell('Daily Loss Limit', rupee(ds.daily_loss_limit||200)),
+      _intradayCell('Realized P&L (today)', pnlStr(ds.realized_pnl||0), (ds.realized_pnl||0)>=0?'#22c55e':'#ef4444'),
+      _intradayCell('Daily Block', ds.blocked?(ds.block_reason||'BLOCKED'):'None', ds.blocked?'#ef4444':'#22c55e'),
+      _intradayCell('In-flight / open orders (LIVE adapter)', String(lv.open_orders!=null?lv.open_orders:(lv.orders||[]).length||0)),
+      _intradayCell('LIVE armed / risk enabled', `${lv.armed?'ARMED':'DISARMED'} / ${lrk.enabled?'ENABLED':'disabled'}`, lv.armed?'#ef4444':'#9ca3af'),
+      _intradayCell('Market data', d.market_data_status||'—', d.market_data_status==='LIVE'?'#22c55e':'#f59e0b'),
+    ].join('');
+  }
+  // System — connectivity/auth/scheduler payload.
+  const sg=document.getElementById('intraday-system-grid');
+  if(sg){
+    const ws=d.websocket||{};
+    const sch=d.scheduler||{};
+    const lv=d.live||{};
+    sg.innerHTML=[
+      _intradayCell('SmartAPI auth', d.auth_status||'—', d.auth_status==='CONNECTED'?'#22c55e':'#f59e0b'),
+      _intradayCell('Market data feed', d.market_data_status||'—', d.market_data_status==='LIVE'?'#22c55e':'#f59e0b'),
+      _intradayCell('WebSocket', ws.status||ws.state||'—', (ws.status||ws.state)==='CONNECTED'?'#22c55e':'#9ca3af'),
+      _intradayCell('Engine role', d.singleton_role||'—'),
+      _intradayCell('Execution mode', d.execution_mode||'PAPER', '#34d399'),
+      _intradayCell('Scheduler', sch.status||(sch.running?'running':'—')),
+      _intradayCell('Last completed scan', d.last_scan_time?fmtDateTime(d.last_scan_time,true):'—'),
+      _intradayCell('Static IP status', d.static_ip_status||'NOT REQUIRED FOR PAPER'),
+      _intradayCell('LIVE gateway', lv.armed?'ARMED':'DISARMED — order submission impossible', lv.armed?'#ef4444':'#22c55e'),
+    ].join('');
+  }
 }
 
 // ── Morning Intelligence Report ───────────────────────────────────────────────
@@ -4904,8 +5229,10 @@ async function load(){
     const nextMin=new Date(now.getTime()+900000);
     const nextStr=nextMin.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
 
-    // ── HEADER ────────────────────────────────────────────────────────────────
+    // ── HEADER (Swing context — skipped while viewing the Intraday workspace
+    // so the two engines' states never overwrite each other) ─────────────────
     document.getElementById('last-updated').textContent='Last updated: '+now.toLocaleTimeString('en-IN');
+    if(typeof NAV_STATE!=='undefined'&&NAV_STATE.ws==='swing'){
     const mktEl=document.getElementById('hdr-market');
     if(d.market_open){mktEl.innerHTML='<span class="green">🟢 OPEN</span>';}
     else{mktEl.innerHTML='<span class="red">🔴 CLOSED</span>';}
@@ -4914,12 +5241,16 @@ async function load(){
         ? ' · ' + new Date(d.broker_startup_timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
         : '';
     document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
-    const scanActive=d.scan_running?'Scanning now':(d.market_open?'Scanning soon':'Market closed');
-    document.getElementById('hdr-last-scan').textContent=(d.last_scan&&d.last_scan!=='—')?d.last_scan:scanActive;
-    document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Market closed');
+    // Distinguish: engine activity vs market scanning vs paused.
+    const lastScanBase=(d.last_scan&&d.last_scan!=='—')?d.last_scan
+      :(d.market_open?'Awaiting first scan':'No completed scan');
+    document.getElementById('hdr-last-scan').textContent=lastScanBase+(d.scan_running?' · engine running':'');
+    document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Paused — market closed');
     const stEl=document.getElementById('hdr-status');
     stEl.innerHTML=d.kite_ok?'<span class="green">🟢 Running</span>':'<span class="red">🔴 Offline</span>';
     document.getElementById('hdr-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
+    _swingHdrCashPos(d);
+    }
 
     // ── TAB: DASHBOARD ────────────────────────────────────────────────────────
     const ph=d.portfolio_health||{};
@@ -5560,8 +5891,8 @@ async function load(){
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
     if(d.market_regime==='UNAVAILABLE'&&lk&&lk.value)bsrEl.innerHTML='UNAVAILABLE<br><span style="font-size:11px;color:#9ca3af">last: '+lk.value+' @ '+fmtDateTime(lk.at)+'</span>';
     document.getElementById('bs-budget').textContent=rupee(d.budget||0);
-    const bsScanActive=d.scan_running?'Scanning now':(d.market_open?'Scanning soon':'Market closed');
-    document.getElementById('bs-last-scan').textContent=(d.last_scan&&d.last_scan!=='—')?d.last_scan:bsScanActive;
+    const bsLastScan=(d.last_scan&&d.last_scan!=='—')?d.last_scan:(d.market_open?'Awaiting first scan':'No completed scan');
+    document.getElementById('bs-last-scan').textContent=bsLastScan+(d.scan_running?' · engine running':'');
     document.getElementById('bs-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Market closed');
     document.getElementById('bs-scanned').textContent=d.stocks_scanned?d.stocks_scanned.toLocaleString('en-IN'):(d.market_open?'No scan yet':'Market closed');
     document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
@@ -6490,7 +6821,7 @@ function _btRenderResults(data){
 load();
 loadJournal();
 loadHealthBadge();
-switchTab('dashboard', document.querySelector('.tab-btn.active'));
+_initNav();
 setInterval(load,60000);
 setInterval(loadJournal,120000);
 setInterval(loadHealthBadge,60000);
@@ -7035,6 +7366,9 @@ async function loadIntradayData(){
     const d=await r.json();
     if(d.error)throw new Error(d.error);
     window._intradayLastGood=Date.now();
+    window._lastIntradayData=d;
+    if(typeof NAV_STATE!=='undefined'&&NAV_STATE.ws==='intraday')_intradayHdr(d);
+    _renderIntradaySections(d);
     if(ageEl){
       ageEl.style.fontWeight='400';
       const st=d.server_time?new Date(d.server_time):null;
