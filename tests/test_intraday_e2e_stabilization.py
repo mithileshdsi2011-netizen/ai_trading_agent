@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from intraday.charges import angel_intraday_charges
 from intraday.engine import IntradayEngine, daily_breakdown
 from intraday.models import (
     IntradayPosition, IntradaySignal, PositionStatus,
@@ -82,9 +83,10 @@ class TestPnLByDirection:
         pos = _position(price=100.0, qty=10)
         _add_position(eng, pos)
         trade = eng.paper_executor.execute_exit(pos, 110.0, 'TARGET_HIT')
+        charges = angel_intraday_charges(100 * 10, 110 * 10)['total']
         assert trade.gross_pnl == 100.0
-        assert trade.charges == 0.1
-        assert trade.net_pnl == 99.9
+        assert trade.charges == pytest.approx(charges, abs=0.01)
+        assert trade.net_pnl == pytest.approx(100.0 - charges, abs=0.01)
         assert trade.direction == SignalDirection.LONG
 
     def test_losing_long(self, tmp_path):
@@ -92,9 +94,10 @@ class TestPnLByDirection:
         pos = _position(price=100.0, qty=10)
         _add_position(eng, pos)
         trade = eng.paper_executor.execute_exit(pos, 95.0, 'STOP_LOSS')
+        charges = angel_intraday_charges(100 * 10, 95 * 10)['total']
         assert trade.gross_pnl == -50.0
-        assert trade.charges == 0.05          # charge is a cost, not credit
-        assert trade.net_pnl == -50.05
+        assert trade.charges == pytest.approx(charges, abs=0.01)  # cost, not credit
+        assert trade.net_pnl == pytest.approx(-50.0 - charges, abs=0.01)
 
     def test_profitable_short(self, tmp_path):
         eng, _ = _engine(tmp_path)
@@ -102,8 +105,9 @@ class TestPnLByDirection:
                         qty=10, sl=105.0, tgt=90.0)
         _add_position(eng, pos)
         trade = eng.paper_executor.execute_exit(pos, 90.0, 'TARGET_HIT')
+        charges = angel_intraday_charges(90 * 10, 100 * 10)['total']
         assert trade.gross_pnl == 100.0
-        assert trade.net_pnl == 99.9
+        assert trade.net_pnl == pytest.approx(100.0 - charges, abs=0.01)
 
     def test_losing_short(self, tmp_path):
         eng, _ = _engine(tmp_path)
@@ -111,8 +115,9 @@ class TestPnLByDirection:
                         qty=10, sl=105.0, tgt=90.0)
         _add_position(eng, pos)
         trade = eng.paper_executor.execute_exit(pos, 105.0, 'STOP_LOSS')
+        charges = angel_intraday_charges(105 * 10, 100 * 10)['total']
         assert trade.gross_pnl == -50.0
-        assert trade.net_pnl == -50.05
+        assert trade.net_pnl == pytest.approx(-50.0 - charges, abs=0.01)
 
     def test_charges_never_negative(self, tmp_path):
         eng, _ = _engine(tmp_path)
@@ -496,7 +501,7 @@ class TestHistoryCorrectionIndicator:
         assert row['pnl_corrected'] is False
         assert row['net_pnl_corrected'] is None
         assert row['gross_pnl'] == -50.0
-        assert row['charges'] == 0.05
+        assert row['charges'] > 0
 
 
 # ══════════ PAPER-only safety ═════════════════════════════════════════

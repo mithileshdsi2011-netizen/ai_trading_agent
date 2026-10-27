@@ -14,6 +14,7 @@ from intraday.models import (
     IntradayConfig, IntradayPosition, IntradayTrade,
     PositionStatus, SignalDirection, SignalClassification,
 )
+from intraday.charges import angel_intraday_charges
 from intraday.paper_executor import PaperTradeExecutor, EXIT_QUOTE_MAX_AGE_S
 from intraday.risk_manager import IntradayRiskManager
 from intraday.position_sizer import IntradayPositionSizer
@@ -45,49 +46,58 @@ def _exit(executor, rm, pos, price):
 
 
 class TestChargesSign:
-    """charges = abs(gross_pnl) * 0.001 — always a cost, never a credit."""
+    """charges = verified Angel intraday schedule — always a nonnegative
+    cost on traded notional: net_pnl == gross_pnl - charges."""
 
     def test_profitable_long(self):
         ex, rm = _executor()
         t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10), 110.0)
+        c = angel_intraday_charges(100 * 10, 110 * 10)['total']
         assert t.gross_pnl == pytest.approx(100.0)
-        assert t.charges == pytest.approx(0.1)
-        assert t.net_pnl == pytest.approx(99.9)
+        assert t.charges == pytest.approx(c, abs=0.001)
+        assert t.net_pnl == pytest.approx(100.0 - c)
         assert t.net_pnl < t.gross_pnl
 
     def test_losing_long(self):
         ex, rm = _executor()
         t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10), 90.0)
+        c = angel_intraday_charges(100 * 10, 90 * 10)['total']
         assert t.gross_pnl == pytest.approx(-100.0)
-        assert t.charges == pytest.approx(0.1)
+        assert t.charges == pytest.approx(c, abs=0.001)
         assert t.charges > 0
         # Loss must be understated never: net MORE negative than gross
-        assert t.net_pnl == pytest.approx(-100.1)
+        assert t.net_pnl == pytest.approx(-100.0 - c)
         assert t.net_pnl < t.gross_pnl
 
     def test_profitable_short(self):
         ex, rm = _executor()
         t = _exit(ex, rm, _position(SignalDirection.SHORT, 100.0, 10,
                                     sl=105.0, tgt=90.0), 90.0)
+        c = angel_intraday_charges(90 * 10, 100 * 10)['total']
         assert t.gross_pnl == pytest.approx(100.0)
-        assert t.charges == pytest.approx(0.1)
-        assert t.net_pnl == pytest.approx(99.9)
+        assert t.charges == pytest.approx(c, abs=0.001)
+        assert t.net_pnl == pytest.approx(100.0 - c)
 
     def test_losing_short(self):
         ex, rm = _executor()
         t = _exit(ex, rm, _position(SignalDirection.SHORT, 100.0, 10,
                                     sl=105.0, tgt=90.0), 110.0)
+        c = angel_intraday_charges(110 * 10, 100 * 10)['total']
         assert t.gross_pnl == pytest.approx(-100.0)
-        assert t.charges == pytest.approx(0.1)
-        assert t.net_pnl == pytest.approx(-100.1)
+        assert t.charges == pytest.approx(c, abs=0.001)
+        assert t.net_pnl == pytest.approx(-100.0 - c)
         assert t.net_pnl < t.gross_pnl
 
-    def test_zero_pnl_zero_charges(self):
+    def test_zero_pnl_still_pays_charges(self):
+        """A scratch round trip still costs real charges — the verified
+        schedule applies to traded notional, not P&L."""
         ex, rm = _executor()
         t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10), 100.0)
+        c = angel_intraday_charges(100 * 10, 100 * 10)['total']
         assert t.gross_pnl == pytest.approx(0.0)
-        assert t.charges == pytest.approx(0.0)
-        assert t.net_pnl == pytest.approx(0.0)
+        assert t.charges == pytest.approx(c, abs=0.001)
+        assert t.charges > 0
+        assert t.net_pnl == pytest.approx(-c)
 
     def test_charges_never_negative(self):
         ex, rm = _executor()

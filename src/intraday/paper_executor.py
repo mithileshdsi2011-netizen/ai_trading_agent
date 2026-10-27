@@ -13,6 +13,7 @@ from .models import (
     IntradaySignal, IntradayPosition, IntradayTrade,
     PositionStatus, SignalDirection
 )
+from .charges import angel_intraday_charges
 from .risk_manager import IntradayRiskManager
 from .position_sizer import IntradayPositionSizer
 
@@ -163,8 +164,17 @@ class PaperTradeExecutor:
             else:
                 gross_pnl = round((position.entry_price - exit_price) * position.quantity, 4)
             
-            # Estimate charges (simplified) — always a cost, never a credit
-            charges = round(abs(gross_pnl) * 0.001, 4)  # 0.1% estimate
+            # Verified Angel One intraday charge schedule on traded
+            # notional — brokerage per order (Rs5 min / Rs20 cap), STT
+            # sell-side, stamp buy-side, txn/SEBI/IPFT + 18% GST.
+            # Applied only to new fills; historical records unchanged.
+            if position.direction == SignalDirection.LONG:
+                buy_value = position.entry_price * position.quantity
+                sell_value = exit_price * position.quantity
+            else:
+                buy_value = exit_price * position.quantity
+                sell_value = position.entry_price * position.quantity
+            charges = round(angel_intraday_charges(buy_value, sell_value)['total'], 4)
             net_pnl = round(gross_pnl - charges, 4)
             pnl_pct = round((net_pnl / (position.entry_price * position.quantity)) * 100, 4)
             
