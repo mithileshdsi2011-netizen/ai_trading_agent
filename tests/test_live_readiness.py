@@ -537,7 +537,8 @@ class TestEngineStatusAxes:
         eng = _make_engine(tmp_path)
         with patch.object(eng.validator, 'is_market_open', return_value=True), \
              patch.object(eng.validator, 'is_entry_window_open', return_value=True), \
-             patch.object(eng, 'credentials_configured', return_value=True):
+             patch.object(eng, 'credentials_configured', return_value=True), \
+             patch.object(eng.auth, 'is_authenticated', return_value=True):
             eng._auth_state = 'CONNECTED'
             with patch.object(eng, 'market_data_status', return_value='LIVE'):
                 assert eng._entry_permission() == 'ALLOWED'
@@ -554,6 +555,26 @@ class TestEngineStatusAxes:
         eng = _make_engine(tmp_path)
         with patch.object(eng.validator, 'is_market_open', return_value=False):
             assert eng._entry_permission() == 'MARKET CLOSED'
+
+    def test_expired_session_not_reported_connected(self, tmp_path):
+        eng = _make_engine(tmp_path)
+        with patch.object(eng, 'credentials_configured', return_value=True), \
+             patch.object(eng.auth, 'is_authenticated', return_value=False):
+            eng._auth_state = 'CONNECTED'  # last attempt succeeded, JWT since expired
+            assert eng._effective_auth_state() == 'AUTH EXPIRED'
+            st = eng.get_status()
+            assert st['auth_status'] == 'AUTH EXPIRED'
+            with patch.object(eng.validator, 'is_market_open', return_value=True), \
+                 patch.object(eng.validator, 'is_entry_window_open', return_value=True):
+                assert eng._entry_permission() == 'BROKER UNHEALTHY'
+
+    def test_live_session_reports_connected(self, tmp_path):
+        eng = _make_engine(tmp_path)
+        with patch.object(eng, 'credentials_configured', return_value=True), \
+             patch.object(eng.auth, 'is_authenticated', return_value=True):
+            eng._auth_state = 'CONNECTED'
+            assert eng._effective_auth_state() == 'CONNECTED'
+            assert eng.get_status()['auth_status'] == 'CONNECTED'
 
     def test_signals_only_flag(self, tmp_path):
         eng = _make_engine(tmp_path)

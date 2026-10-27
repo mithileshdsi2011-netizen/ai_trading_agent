@@ -1500,6 +1500,10 @@ class TestAngelSessionExpiry:
         calls = []
         def fake_auth():
             calls.append(1)
+            # A real successful login restores the session fields.
+            engine.auth.authenticated = True
+            engine.auth.jwt_token = 'tok'
+            engine.auth.auth_time = datetime.now()
             return {'success': True, 'authenticated': True}
         monkeypatch.setattr(engine.auth, 'authenticate', fake_auth)
         assert engine.authenticate() is True

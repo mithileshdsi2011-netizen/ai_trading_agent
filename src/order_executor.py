@@ -184,6 +184,7 @@ class OrderExecutor:
             'exit_reason': exit_reason,
             'broker_status': order_result.get('error', 'Unknown'),
             'failure_category': category,
+            'live_order_id': previous.get('live_order_id'),
             'retry': policy['retry'],
             'retry_policy': policy['retry_policy'],
             'continue_trading': policy['continue_trading'],
@@ -223,6 +224,98 @@ class OrderExecutor:
         if symbol in self._pending_sells:
             del self._pending_sells[symbol]
             self._save_pending_sells()
+
+    def _register_pending_exit(self, symbol: str, order_id: str, exit_reason: str):
+        """
+        Track a broker-acknowledged but not-yet-filled SELL order so the monitor
+        verifies broker state instead of placing a duplicate exit order.
+        """
+        previous = self._pending_sells.get(symbol, {})
+        self._pending_sells[symbol] = {
+            'symbol': symbol,
+            'exit_reason': exit_reason,
+            'live_order_id': order_id,
+            'broker_status': 'ORDER_OPEN',
+            'failure_category': 'order_pending',
+            'retry': True,
+            'retry_policy': 'verify_broker',
+            'continue_trading': True,
+            'notify': False,
+            'recovery_path': 'verify_broker_order',
+            'retry_count': previous.get('retry_count', 0),
+            'last_attempt': datetime.now().isoformat(),
+            'next_retry': (datetime.now() + timedelta(minutes=2)).isoformat(),
+            'notifications_sent': previous.get('notifications_sent', []),
+            'notification_sent': False,
+        }
+        self._save_pending_sells()
+
+    def _resolve_pending_exit(self, symbol: str, position, current_price: float) -> str:
+        """
+        If symbol has a live (acknowledged, unfilled) exit order, poll the broker
+        once and act on the result.
+
+        Returns 'filled'   — order completed; the exit was finalized here,
+                'live'     — order still working or unknown; caller must skip
+                             sell evaluation (no duplicate sell may be placed),
+                'proceed'  — no pending exit, or it died at the broker; normal
+                             sell logic may continue.
+        """
+        pending = self._pending_sells.get(symbol)
+        if not pending or not pending.get('live_order_id') or self.broker.paper_trading:
+            return 'proceed'
+        order_id = pending['live_order_id']
+        try:
+            st = self.broker.get_order_status(order_id)
+        except Exception as e:
+            logger.warning(f"Pending-exit check for {symbol} order {order_id} failed: {e}")
+            return 'live'  # unknown — do not risk a duplicate sell
+        if st.get('error'):
+            logger.warning(f"Pending-exit order {order_id} for {symbol} unknown to broker: {st['error']}")
+            return 'live'
+        status = str(st.get('status', '')).upper()
+        if status in ('REJECTED', 'CANCELLED'):
+            logger.warning(f"Pending-exit order {order_id} for {symbol} {status} — resuming normal exits")
+            self._clear_sell_pending(symbol)
+            return 'proceed'
+        if status != 'COMPLETE':
+            # Still working — roll the retry gate forward and skip this cycle.
+            pending['broker_status'] = status or 'OPEN'
+            pending['next_retry'] = (datetime.now() + timedelta(minutes=2)).isoformat()
+            self._save_pending_sells()
+            return 'live'
+
+        # Order filled — finalize the exit at the broker-confirmed price/qty.
+        fill_price = float(st.get('average_price') or current_price or 0)
+        fill_qty = int(st.get('filled_quantity') or position.quantity or 0)
+        sell_qty = min(fill_qty, position.quantity)
+        reason = pending.get('exit_reason', 'Exit order filled')
+        try:
+            exit_signal = self.risk_manager.close_position(symbol, fill_price, reason, sell_qty)
+        except Exception as ce:
+            logger.exception(f"Risk manager close_position failed for {symbol} (order already filled): {ce}")
+            exit_signal = None
+        try:
+            cost_basis = position.average_price if position.average_price else position.entry_price
+            self.journal.log_entry(
+                symbol=symbol,
+                action='SELL',
+                price=fill_price,
+                quantity=sell_qty,
+                order_id=order_id,
+                exit_reason=reason,
+                entry_price=cost_basis,
+                entry_date=position.entry_time.isoformat() if position.entry_time else '',
+                gross_pnl=(fill_price - cost_basis) * sell_qty,
+                net_pnl=exit_signal['net_pnl'] if exit_signal else 0,
+                charges=exit_signal['charges'] if exit_signal else 0,
+            )
+        except Exception as je:
+            logger.warning(f"Journal SELL log failed for pending exit {symbol}: {je}")
+        self._clear_sell_pending(symbol)
+        self.reconciliation_engine.trigger('SELL_executed')
+        logger.info(f"Pending exit filled for {symbol}: {sell_qty} @ ₹{fill_price:.2f} (order {order_id})")
+        return 'filled'
 
     def reset_pending_sells(self):
         """Clear all pending SELL records. Called at daily reset and end-of-day close."""
@@ -541,6 +634,41 @@ class OrderExecutor:
         order_result = self.broker.place_order(signal)
         
         if order_result['success']:
+            # An order acknowledgement is not a fill. For real orders, verify the
+            # broker-side outcome before opening a local position or journaling.
+            if not order_result.get('paper_trading') and order_result.get('order_id'):
+                fill = self.broker.verify_order_fill(order_result['order_id'])
+                fstatus = fill.get('status')
+                if fstatus in ('REJECTED', 'CANCELLED'):
+                    self._pending_order_symbols.discard(sym)
+                    logger.error(
+                        f"BUY {sym} order {order_result['order_id']} {fstatus} at broker — "
+                        f"no position opened"
+                    )
+                    return {
+                        'success': False,
+                        'error': f"Order {fstatus.lower()} at broker",
+                        'order_id': order_result['order_id'],
+                        'signal': signal,
+                    }
+                if fstatus == 'COMPLETE':
+                    if fill.get('average_price'):
+                        signal['current_price'] = float(fill['average_price'])
+                    if fill.get('filled_quantity'):
+                        signal['position_size'] = int(fill['filled_quantity'])
+                        signal['investment_amount'] = (
+                            signal['current_price'] * signal['position_size']
+                        )
+                else:
+                    # Still working at the broker — keep current semantics (position at
+                    # signal price so monitoring covers it) but flag it unverified so the
+                    # journal/result reflect that the fill is not broker-confirmed.
+                    logger.warning(
+                        f"BUY {sym} order {order_result['order_id']} still {fstatus} after "
+                        f"verify window — position opened at signal price, awaiting reconciliation"
+                    )
+                    signal['_fill_unverified'] = True
+
             # Order confirmed — remove from pending (fill received or paper)
             self._pending_order_symbols.discard(sym)
 
@@ -755,6 +883,14 @@ class OrderExecutor:
             )
             return {'success': False, 'reason': 'Price below entry without allowed loss exit', 'signal': signal}
 
+        # A live broker exit order supersedes a fresh sell — verify or skip.
+        pending_exit = self._resolve_pending_exit(sym, position, current_price)
+        if pending_exit == 'filled':
+            return {'success': True, 'reason': 'Pending exit filled at broker', 'signal': signal}
+        if pending_exit == 'live':
+            logger.info(f"SELL {sym} skipped: live exit order still working")
+            return {'success': False, 'reason': 'Live exit order working', 'signal': signal}
+
         if not self._should_attempt_sell(sym):
             queued = self._pending_sells[sym].get('next_retry') or 'manual'
             logger.info(f"SELL for {sym} queued until {queued}")
@@ -766,8 +902,52 @@ class OrderExecutor:
             logger.error(f"SELL order failed for {sym}: {order_result.get('error')}")
             return {'success': False, 'error': order_result.get('error'), 'signal': signal}
 
-        self._clear_sell_pending(sym)
+        # An order acknowledgement is not a fill. For real orders, verify the
+        # broker-side outcome before closing the local position.
         sell_qty = int(signal.get('position_size', position.quantity) or 0)
+        if not order_result.get('paper_trading') and order_result.get('order_id'):
+            fill = self.broker.verify_order_fill(order_result['order_id'])
+            fstatus = fill.get('status')
+            if fstatus in ('REJECTED', 'CANCELLED'):
+                failed = dict(order_result)
+                failed['success'] = False
+                failed['error'] = f"Order {fstatus.lower()} at broker"
+                self._record_sell_failure(sym, failed, reason)
+                logger.error(
+                    f"SELL {sym} order {order_result['order_id']} {fstatus} at broker — "
+                    f"position kept open"
+                )
+                return {
+                    'success': False,
+                    'error': failed['error'],
+                    'order_id': order_result['order_id'],
+                    'signal': signal,
+                }
+            if fstatus == 'COMPLETE':
+                if fill.get('average_price'):
+                    current_price = float(fill['average_price'])
+                    signal['current_price'] = current_price
+                if fill.get('filled_quantity'):
+                    # Only close what the broker actually filled (partial fills).
+                    sell_qty = min(int(fill['filled_quantity']), sell_qty)
+            else:
+                # Order still working at the broker. Do NOT close the local position
+                # at an invented price — register a pending exit so monitoring
+                # verifies broker state instead of placing a duplicate sell.
+                self._register_pending_exit(sym, order_result['order_id'], reason)
+                logger.warning(
+                    f"SELL {sym} order {order_result['order_id']} still {fstatus} — "
+                    f"position kept open, exit tracked as pending"
+                )
+                return {
+                    'success': True,
+                    'order_id': order_result['order_id'],
+                    'exit_pending': True,
+                    'signal': signal,
+                    'paper_trading': False,
+                }
+
+        self._clear_sell_pending(sym)
         try:
             exit_signal = self.risk_manager.close_position(sym, current_price, reason, sell_qty)
             if exit_signal:
@@ -859,6 +1039,11 @@ class OrderExecutor:
             if not position:
                 continue
 
+            # A live broker exit order supersedes any new decision — verify its
+            # state (or finalize a fill) instead of placing a duplicate sell.
+            if self._resolve_pending_exit(sym, position, price) in ('live', 'filled'):
+                continue
+
             if decision.decision == 'FULL_EXIT':
                 if not self._should_attempt_sell(sym):
                     queued = self._pending_sells.get(sym, {}).get('next_retry') or 'manual'
@@ -892,14 +1077,20 @@ class OrderExecutor:
                         'order_id': order_result.get('order_id'),
                         'exit_signal': order_result.get('exit_signal'),
                         'exit_decision': decision.decision,
+                        'exit_pending': bool(order_result.get('exit_pending')),
                         'scores': decision.scores,
                         'timestamp': datetime.now().isoformat()
                     })
-                    logger.info(f"Exit executed for {sym}: {decision.reason}")
-                    try:
-                        self.telegram.exit(sell_signal, order_result.get('order_id', ''))
-                    except Exception as te:
-                        logger.error(f"Telegram exit alert error: {te}")
+                    if order_result.get('exit_pending'):
+                        logger.info(f"Exit order working for {sym} (awaiting broker fill): {decision.reason}")
+                    else:
+                        logger.info(f"Exit executed for {sym}: {decision.reason}")
+                        try:
+                            self.telegram.exit(sell_signal, order_result.get('order_id', ''))
+                        except Exception as te:
+                            logger.error(f"Telegram exit alert error: {te}")
+                elif order_result.get('reason') == 'Live exit order working':
+                    logger.info(f"Exit already in progress for {sym}: {order_result}")
                 else:
                     self._record_sell_failure(sym, order_result, decision.reason)
                     logger.error(f"Exit failed for {sym}: {order_result}")
@@ -940,15 +1131,21 @@ class OrderExecutor:
                         'order_id': order_result.get('order_id'),
                         'exit_signal': order_result.get('exit_signal'),
                         'exit_decision': decision.decision,
+                        'exit_pending': bool(order_result.get('exit_pending')),
                         'partial_qty': qty,
                         'scores': decision.scores,
                         'timestamp': datetime.now().isoformat()
                     })
-                    logger.info(f"Partial exit executed for {sym}: {decision.reason}")
-                    try:
-                        self.telegram.exit(sell_signal, order_result.get('order_id', ''))
-                    except Exception as te:
-                        logger.error(f"Telegram exit alert error: {te}")
+                    if order_result.get('exit_pending'):
+                        logger.info(f"Partial exit order working for {sym} (awaiting broker fill): {decision.reason}")
+                    else:
+                        logger.info(f"Partial exit executed for {sym}: {decision.reason}")
+                        try:
+                            self.telegram.exit(sell_signal, order_result.get('order_id', ''))
+                        except Exception as te:
+                            logger.error(f"Telegram exit alert error: {te}")
+                elif order_result.get('reason') == 'Live exit order working':
+                    logger.info(f"Exit already in progress for {sym}: {order_result}")
                 else:
                     self._record_sell_failure(sym, order_result, decision.reason)
                     logger.error(f"Partial exit failed for {sym}: {order_result}")
@@ -983,6 +1180,9 @@ class OrderExecutor:
     def execute_scale_in(self, action: Dict) -> Dict:
         """Place a scale-in BUY for an existing position."""
         sym = action['symbol']
+        if sym in self._pending_order_symbols:
+            logger.warning(f"Skipping scale-in {sym}: order already in-flight")
+            return {'success': False, 'reason': 'Duplicate in-flight order'}
         qty = action.get('quantity', 0)
         price = action.get('price', 0.0)
         if qty <= 0 or price <= 0:
@@ -1005,9 +1205,35 @@ class OrderExecutor:
             'timestamp': datetime.now().isoformat()
         }
 
+        self._pending_order_symbols.add(sym)
         order_result = self.broker.place_order(buy_signal)
+        self._pending_order_symbols.discard(sym)
         if not order_result['success']:
             return {'success': False, 'error': order_result.get('error')}
+
+        # An acknowledgement is not a fill — verify real orders before scaling in.
+        if not order_result.get('paper_trading') and order_result.get('order_id'):
+            fill = self.broker.verify_order_fill(order_result['order_id'])
+            fstatus = fill.get('status')
+            if fstatus in ('REJECTED', 'CANCELLED'):
+                logger.error(f"Scale-in {sym} order {order_result['order_id']} {fstatus} at broker")
+                return {
+                    'success': False,
+                    'error': f"Order {fstatus.lower()} at broker",
+                    'order_id': order_result['order_id'],
+                }
+            if fstatus == 'COMPLETE':
+                if fill.get('average_price'):
+                    price = float(fill['average_price'])
+                    buy_signal['current_price'] = price
+                if fill.get('filled_quantity'):
+                    qty = int(fill['filled_quantity'])
+                    buy_signal['position_size'] = qty
+            else:
+                logger.warning(
+                    f"Scale-in {sym} order {order_result['order_id']} still {fstatus} — "
+                    f"updating position at signal price, awaiting reconciliation"
+                )
 
         # Update position with new capital
         self.risk_manager.add_to_position(
@@ -1110,8 +1336,12 @@ class OrderExecutor:
                 'allow_loss_exit': True,
                 'timestamp': datetime.now().isoformat()
             }
-            # Emergency closes should not be blocked by the retry queue
-            self._clear_sell_pending(p.symbol)
+            # Emergency closes should not be blocked by the retry queue — but a
+            # live broker exit order is never cleared; _execute_sell verifies or
+            # finalizes it instead of placing a duplicate sell.
+            _pending = self._pending_sells.get(p.symbol)
+            if _pending and not _pending.get('live_order_id'):
+                self._clear_sell_pending(p.symbol)
             order_result = self.execute_signal(sell_signal)
             close_results.append({
                 'success': order_result.get('success', False),

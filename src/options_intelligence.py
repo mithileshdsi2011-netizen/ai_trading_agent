@@ -224,6 +224,7 @@ class OptionsIntelligenceEngine:
             "confidence_boost": 0.0,
             "total_call_oi": 0.0,
             "total_put_oi": 0.0,
+            "status": "UNAVAILABLE",
             "reason": reason,
         }
 
@@ -266,5 +267,7 @@ class OptionsIntelligenceEngine:
             "strong_oi_support": snap.get("strong_oi_support", False),
             "confidence_boost": boost,
             "adjusted_confidence": round(adjusted, 2),
+            "status": snap.get("status", "OK"),
+            "reason": snap.get("reason"),
             "timestamp": snap.get("timestamp"),
         }

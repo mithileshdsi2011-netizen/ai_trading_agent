@@ -6,6 +6,7 @@ from typing import Dict, Optional, List
 import logging
 import os
 import json
+import time
 from datetime import datetime
 from enum import Enum
 
@@ -646,6 +647,53 @@ class BrokerIntegration:
                 logger.error(f"Error getting holdings: {e}")
                 return {'cash': 0, 'positions': [], 'total_value': 0}
     
+    # Terminal order states as reported by Kite order history.
+    ORDER_TERMINAL_STATES = frozenset({"COMPLETE", "REJECTED", "CANCELLED"})
+
+    def verify_order_fill(self, order_id: str, timeout_sec: float = 6.0) -> Dict:
+        """
+        Verify the broker-side outcome of a placed order.
+
+        An order-placement acknowledgement is NOT a fill. This read-only check
+        polls Kite's order history until the order reaches a terminal state
+        (COMPLETE / REJECTED / CANCELLED) or the timeout elapses.
+
+        Returns a dict with:
+          status          — COMPLETE / REJECTED / CANCELLED / OPEN-like state / UNKNOWN
+          average_price   — broker fill price when COMPLETE (else None)
+          filled_quantity — broker filled qty (else None)
+          pending_quantity
+          raw             — latest order-history row (for diagnostics)
+        """
+        if self.paper_trading or not order_id:
+            return {'status': 'COMPLETE', 'average_price': None,
+                    'filled_quantity': None, 'pending_quantity': None, 'raw': {}}
+
+        deadline = time.time() + timeout_sec
+        last: Dict = {}
+        while True:
+            try:
+                history = self.kite.order_history(order_id) or []
+                if history:
+                    last = history[-1]
+                    status = str(last.get('status', '')).upper()
+                    if status in self.ORDER_TERMINAL_STATES:
+                        break
+            except Exception as e:
+                logger.warning(f"verify_order_fill({order_id}) poll failed: {e}")
+            if time.time() >= deadline:
+                break
+            time.sleep(2)
+
+        status = str(last.get('status', 'UNKNOWN')).upper() or 'UNKNOWN'
+        return {
+            'status': status,
+            'average_price': last.get('average_price'),
+            'filled_quantity': last.get('filled_quantity'),
+            'pending_quantity': last.get('pending_quantity'),
+            'raw': last,
+        }
+
     def get_order_status(self, order_id: str) -> Dict:
         """
         Get status of an order

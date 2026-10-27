@@ -1794,6 +1794,7 @@ tr:last-child td{border:none}
       </div>
       <div class="progress-bar" style="height:12px"><div class="progress-fill" id="cu-bar" style="width:0%;background:#3b82f6"></div></div>
       <div style="font-size:11px;color:#9ca3af;margin-top:4px" id="cu-pct">0% used</div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:6px" id="cu-funds-vs-cfg">Broker funds — · Configured capital —</div>
     </div>
 
   </div>
@@ -1942,7 +1943,7 @@ tr:last-child td{border:none}
       <table style="width:100%;border-collapse:collapse">
         <thead><tr>
           <th style="text-align:left">Stock</th><th>Score</th><th>Trend</th>
-          <th>Entry</th><th>Target</th><th>Required Capital</th><th>Can Buy?</th><th>Position Size</th>
+          <th>Entry</th><th>Target</th><th>Required Capital</th><th>Buy Permitted?</th><th>Position Size</th>
         </tr></thead>
         <tbody id="d-opportunities"><tr><td colspan="8" style="text-align:center;color:#4b5563;padding:20px">Scanning...</td></tr></tbody>
       </table>
@@ -5033,12 +5034,20 @@ async function load(){
         const qty=Math.max(1,parseInt(s.position_size||1));
         const capital=parseFloat(s.investment_amount||qty*price);
         const scoreMin = parseInt(d.cfg_sideways_buy_score_min || 58);
-        const canBuy=openPos<maxPos && cash>=capital && (s.trade_score||0)>=scoreMin;
+        const affordable=cash>=capital;
+        const slotsOpen=openPos<maxPos;
+        const scoreOk=(s.trade_score||0)>=scoreMin;
+        const canBuy=slotsOpen && affordable && scoreOk;
         const rr2=s.stop_loss&&s.target&&s.price?Math.abs(s.target-s.price)/Math.abs(s.price-s.stop_loss):0;
         const trend=s.trend||(score>=70?'Bullish':score>=50?'Neutral':'Bearish');
         const trendStyle=trend==='Bullish'?'color:#22c55e':trend==='Bearish'?'color:#ef4444':'color:#eab308';
         const buyClass=canBuy?'green':'red';
-        const buyText=canBuy?'Yes':'No';
+        // Distinguish AFFORDABLE (broker funds cover the order) from
+        // BUY PERMITTED (every risk gate passes) — show the blocker.
+        const buyText=canBuy?'PERMITTED'
+          :!slotsOpen?'NO — position limit'
+          :!affordable?`NO — funds ${rupee(cash)} < ${rupee(capital)}`
+          :'NO — score below min';
         return `<tr>
           <td style="font-weight:700;color:#f9fafb">${s.symbol}</td>
           <td><span style="font-size:16px;font-weight:800;color:${scoreColor(score)}">${score}</span><span class="score-bar" style="background:${scoreColor(score)};width:${score*0.4}px"></span></td>
@@ -5079,6 +5088,14 @@ async function load(){
     document.getElementById('cu-reserved').textContent=rupee(reserved);
     document.getElementById('cu-bar').style.width=Math.min(100,usedPct)+'%';
     document.getElementById('cu-pct').textContent=usedPct.toFixed(1)+'% used';
+    const cuFunds=document.getElementById('cu-funds-vs-cfg');
+    if(cuFunds){
+      const cfgCap=parseFloat(d.cfg_trading_amount||d.budget||0);
+      const gap=cash<cfgCap;
+      cuFunds.textContent=`Broker funds ${rupee(cash)} · Configured capital ${rupee(cfgCap)}`;
+      cuFunds.style.color=gap?'#facc15':'#9ca3af';
+      if(gap) cuFunds.textContent+=' — broker below configured, BUY sizing limited';
+    }
 
     // AI Recommendation widget
     const regime=(d.market_regime||'—').toUpperCase();
@@ -7040,11 +7057,15 @@ async function loadIntradayData(){
         authText='NOT CONFIGURED'; authColor='#f59e0b';
       }else if(rawAuth.indexOf('FAILED')>=0){
         authText='AUTH FAILED'; authColor='#ef4444';
-      }else if(d.is_authenticated||rawAuth==='CONNECTED'){
+      }else if(rawAuth.indexOf('EXPIRED')>=0||(rawAuth==='CONNECTED'&&!d.is_authenticated)){
+        // Last login succeeded but the JWT is dead (expires each morning) —
+        // never display this as CONNECTED.
+        authText='AUTH EXPIRED'; authColor='#ef4444';
+      }else if(d.is_authenticated&&rawAuth==='CONNECTED'){
         authText='CONNECTED'; authColor='#22c55e';
       }else{
         // configured but not yet authenticated
-        authText=d.market_session==='CLOSED'?'AUTH PENDING (idle)':'AUTH PENDING';
+        authText=d.market_session==='CLOSED'?'AUTH IDLE (market closed)':'AUTH PENDING';
         authColor='#f59e0b';
       }
       authStatus.textContent=authText;

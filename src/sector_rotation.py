@@ -114,6 +114,15 @@ class SectorRotationEngine:
         except Exception:
             return []
 
+    def _kite_circuit_open(self) -> float:
+        """Seconds until the Kite circuit breaker re-closes; 0 if closed."""
+        try:
+            import time
+            from market_data import MarketDataFetcher
+            return max(0.0, getattr(MarketDataFetcher, "_cb_open_until", 0.0) - time.time())
+        except Exception:
+            return 0.0
+
     def _fetch_returns(self, symbol: str, lookback_days: int = 35) -> Optional[Dict[str, float]]:
         """Fetch historical close and compute 7-day and 30-day returns."""
         if not self.market_data:
@@ -121,6 +130,22 @@ class SectorRotationEngine:
 
         try:
             df = self.market_data.get_stock_data(symbol, period="3mo", interval="1d")
+            # A burst of Kite failures opens the shared circuit breaker for
+            # ~30s; get_stock_data then returns empty for every call inside
+            # that window. Sector intel is a daily batch — waiting out ONE
+            # breaker window per symbol is bounded (worst case adds a few
+            # minutes to the run) and turns a transient outage into
+            # recovered coverage instead of a 14/150 snapshot.
+            if (df is None or df.empty):
+                remaining = self._kite_circuit_open()
+                if remaining > 0:
+                    import time
+                    logger.info(
+                        f"Kite circuit open during sector fetch for {symbol} — "
+                        f"waiting {remaining:.0f}s before one retry")
+                    time.sleep(remaining + 0.5)
+                    df = self.market_data.get_stock_data(
+                        symbol, period="3mo", interval="1d")
             if df is None or df.empty or len(df) < 30:
                 return None
 

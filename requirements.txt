@@ -1,5 +1,5 @@
 # Core dependencies
-yfinance==0.2.44
+yfinance==0.2.66
 pandas==2.2.2
 numpy==1.26.4
 requests==2.31.0

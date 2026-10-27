@@ -983,6 +983,16 @@ class IntradayEngine:
             return 'STOPPED'
         return 'MONITORING'
 
+    def _effective_auth_state(self) -> str:
+        """Auth state adjusted for session expiry — SmartAPI JWTs die each
+        morning (~5 AM), so a token that authenticated yesterday is dead even
+        when the last login attempt succeeded."""
+        if not self.credentials_configured():
+            return "NOT CONFIGURED"
+        if self._auth_state == "CONNECTED" and not self.auth.is_authenticated():
+            return "AUTH EXPIRED"
+        return self._auth_state
+
     def _entry_permission(self) -> str:
         """Why a new entry would or would not be permitted right now —
         independent of what the engine is doing (it may still scan and
@@ -993,7 +1003,7 @@ class IntradayEngine:
             return 'MARKET CLOSED'
         if not self.validator.is_entry_window_open():
             return 'ENTRY WINDOW CLOSED'
-        if not self.credentials_configured() or self._auth_state != 'CONNECTED':
+        if not self.credentials_configured() or self._effective_auth_state() != 'CONNECTED':
             return 'BROKER UNHEALTHY'
         daily = self.risk_manager.get_daily_state()
         if daily['blocked']:
@@ -1020,8 +1030,9 @@ class IntradayEngine:
             return "BLOCKED (RISK LIMIT)"
         if not self.credentials_configured():
             return "NOT CONFIGURED"
-        if self._auth_state not in ("CONNECTED",):
-            return self._auth_state
+        effective = self._effective_auth_state()
+        if effective != "CONNECTED":
+            return effective
         if self._cycle_running:
             return "SCANNING"
         if not self.validator.is_market_open():
@@ -1056,7 +1067,7 @@ class IntradayEngine:
                     "stalled API calls.")
 
         return {
-            'auth_status': self._auth_state if self.credentials_configured() else "NOT CONFIGURED",
+            'auth_status': self._effective_auth_state(),
             # Split the conflated auth concept into its real parts.
             # `auth_configured` is kept unchanged for existing consumers —
             # it means configured AND authenticated.
