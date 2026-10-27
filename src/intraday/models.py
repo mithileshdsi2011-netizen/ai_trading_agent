@@ -127,6 +127,13 @@ class IntradayPosition:
     current_price_quote_symbol: Optional[str] = None
     current_price_quote_exchange: Optional[str] = None
 
+    # Entry-price provenance — 'VERIFIED' only when the quote behind the
+    # entry price had a receipt time 0-30s old at entry commit; otherwise
+    # 'UNVERIFIED'. Entry quote is inherently symbol-matched to this
+    # position, so symbol/exchange fields are not duplicated.
+    entry_price_source: Optional[str] = None
+    entry_quote_received_at: Optional[datetime] = None
+
 
 @dataclass
 class IntradayTrade:
@@ -174,6 +181,10 @@ class IntradayTrade:
     exit_quote_age_s: Optional[float] = None
     exit_quote_symbol: Optional[str] = None
     exit_quote_exchange: Optional[str] = None
+
+    # Entry-price provenance, carried over from the position at exit.
+    entry_price_source: Optional[str] = None
+    entry_quote_received_at: Optional[datetime] = None
 
 
 @dataclass

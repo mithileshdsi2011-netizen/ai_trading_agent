@@ -6,6 +6,7 @@ Optionally persists daily state via IntradayStateStore so the dashboard
 and engine share the same view of risk.
 """
 import logging
+import threading
 from typing import Dict, Any, List, Optional
 from datetime import date
 from dataclasses import dataclass
@@ -70,6 +71,11 @@ class IntradayRiskManager:
         self._daily_state: Optional[DailyRiskState] = None
         self._open_positions: Dict[str, IntradayPosition] = {}
         self._pending_keys: set = set()
+        # Keys holding an in-flight entry claim — reserved slots count
+        # toward the daily entry limit and concurrent-position cap so
+        # simultaneous signals cannot exceed either bound.
+        self._pending_entry_slots: set = set()
+        self._entry_lock = threading.RLock()
         self._kill_switch_active = config.kill_switch
         self._load_daily_state()
         self._load_positions()
@@ -133,61 +139,84 @@ class IntradayRiskManager:
         Returns:
             Tuple of (allowed, rejection_reason)
         """
-        self._load_daily_state()
+        with self._entry_lock:
+            self._load_daily_state()
 
-        # Check kill switch
-        if self.is_killed():
-            return False, "Kill switch is active"
+            # This signal's own in-flight claim does not count against it —
+            # its slot was reserved by the atomic claim that produced it.
+            own_key = idempotency_key
+            if own_key is None:
+                try:
+                    from .validators import signal_idempotency_key
+                    own_key = signal_idempotency_key(signal)
+                except Exception:
+                    own_key = None
+            pending_other = len(
+                self._pending_entry_slots - ({own_key} if own_key else set()))
 
-        # Check if daily blocked
-        if self._daily_state.blocked:
-            return False, self._daily_state.block_reason or "Trading blocked"
+            # Check kill switch
+            if self.is_killed():
+                return False, "Kill switch is active"
 
-        # Check max trades per day
-        if self._daily_state.trades_today >= self.config.max_trades_per_day:
-            return False, f"Max trades per day reached ({self.config.max_trades_per_day})"
+            # Check if daily blocked
+            if self._daily_state.blocked:
+                return False, self._daily_state.block_reason or "Trading blocked"
 
-        # Check consecutive losses
-        if self._daily_state.consecutive_losses >= self.config.max_consecutive_losses:
-            return False, f"Consecutive loss limit reached ({self.config.max_consecutive_losses})"
+            # Check max trades per day — in-flight claims reserve slots
+            if (self._daily_state.trades_today + pending_other
+                    >= self.config.max_trades_per_day):
+                return False, f"Max trades per day reached ({self.config.max_trades_per_day})"
 
-        # Check max concurrent positions
-        if len(self._open_positions) >= self.config.max_concurrent_positions:
-            return False, f"Max concurrent positions reached ({self.config.max_concurrent_positions})"
+            # Check consecutive losses
+            if self._daily_state.consecutive_losses >= self.config.max_consecutive_losses:
+                return False, f"Consecutive loss limit reached ({self.config.max_consecutive_losses})"
 
-        # Check daily loss limit (realized + open-position unrealized losses)
-        daily_loss_limit = self.config.intraday_capital * self.config.max_daily_loss_pct
-        unrealized_loss = sum(
-            min(p.unrealized_pnl, 0.0) for p in self._open_positions.values()
-        )
-        if (self._daily_state.realized_pnl + unrealized_loss) <= -daily_loss_limit:
-            self._daily_state.blocked = True
-            self._daily_state.block_reason = "Daily loss limit reached"
-            self._save_daily_state()
-            return False, f"Daily loss limit reached (₹{daily_loss_limit:.2f})"
+            # Check max concurrent positions — in-flight claims reserve slots
+            if (len(self._open_positions) + pending_other
+                    >= self.config.max_concurrent_positions):
+                return False, f"Max concurrent positions reached ({self.config.max_concurrent_positions})"
 
-        # Check minimum risk:reward
-        if signal.risk_reward < self.config.min_risk_reward:
-            return False, f"Risk:Reward below minimum ({signal.risk_reward} < {self.config.min_risk_reward})"
+            # Check daily loss limit (realized + open-position unrealized losses)
+            daily_loss_limit = self.config.intraday_capital * self.config.max_daily_loss_pct
+            unrealized_loss = sum(
+                min(p.unrealized_pnl, 0.0) for p in self._open_positions.values()
+            )
+            if (self._daily_state.realized_pnl + unrealized_loss) <= -daily_loss_limit:
+                self._daily_state.blocked = True
+                self._daily_state.block_reason = "Daily loss limit reached"
+                self._save_daily_state()
+                return False, f"Daily loss limit reached (₹{daily_loss_limit:.2f})"
 
-        # Check signal classification
-        if signal.classification.value == "NO_TRADE":
-            return False, "Signal classification is NO_TRADE"
+            # Check minimum risk:reward
+            if signal.risk_reward < self.config.min_risk_reward:
+                return False, f"Risk:Reward below minimum ({signal.risk_reward} < {self.config.min_risk_reward})"
 
-        # Check for duplicate position
-        if signal.symbol in self._open_positions:
-            return False, f"Position already exists for {signal.symbol}"
+            # Check signal classification
+            if signal.classification.value == "NO_TRADE":
+                return False, "Signal classification is NO_TRADE"
 
-        # Check for duplicate pending order / already-executed signal
-        if idempotency_key and idempotency_key in self._pending_keys:
-            return False, f"Duplicate signal suppressed for {signal.symbol}"
+            # Check for duplicate position
+            if signal.symbol in self._open_positions:
+                return False, f"Position already exists for {signal.symbol}"
 
-        return True, None
+            # Check for duplicate pending order / already-executed signal
+            if idempotency_key and idempotency_key in self._pending_keys:
+                return False, f"Duplicate signal suppressed for {signal.symbol}"
+
+            # Atomic claim: a successful check registers the idempotency key
+            # (day-long dedup) and reserves a slot counted by the limits above
+            # until record_trade_entry() or release_pending() resolves it.
+            if idempotency_key:
+                self._pending_keys.add(idempotency_key)
+                self._pending_entry_slots.add(idempotency_key)
+            return True, None
 
     def register_pending(self, idempotency_key: str):
         """Register an idempotency key before executing an entry."""
         if idempotency_key:
-            self._pending_keys.add(idempotency_key)
+            with self._entry_lock:
+                self._pending_keys.add(idempotency_key)
+                self._pending_entry_slots.add(idempotency_key)
 
     def release_pending(self, idempotency_key: str):
         """
@@ -198,7 +227,9 @@ class IntradayRiskManager:
         Only call this when the entry attempt did not produce a position.
         """
         if idempotency_key:
-            self._pending_keys.discard(idempotency_key)
+            with self._entry_lock:
+                self._pending_keys.discard(idempotency_key)
+                self._pending_entry_slots.discard(idempotency_key)
 
     def record_trade_entry(self, signal: IntradaySignal,
                            idempotency_key: Optional[str] = None):
@@ -209,10 +240,21 @@ class IntradayRiskManager:
             signal: IntradaySignal instance
             idempotency_key: Optional dedup key to keep registered
         """
-        self._daily_state.trades_today += 1
-        if idempotency_key:
-            self._pending_keys.add(idempotency_key)
-        self._save_daily_state()
+        with self._entry_lock:
+            self._daily_state.trades_today += 1
+            key = idempotency_key
+            if key is None:
+                try:
+                    from .validators import signal_idempotency_key
+                    key = signal_idempotency_key(signal)
+                except Exception:
+                    key = None
+            if key:
+                self._pending_keys.add(key)
+                # Slot converts from in-flight claim to a recorded entry —
+                # frees the reservation without losing day-long dedup.
+                self._pending_entry_slots.discard(key)
+            self._save_daily_state()
         logger.info(f"[INTRADAY RISK] Trade entry recorded: {signal.symbol}, Total trades: {self._daily_state.trades_today}")
 
     def record_trade_exit(self, position: IntradayPosition):

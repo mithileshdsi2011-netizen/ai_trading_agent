@@ -1661,18 +1661,18 @@ class TestPositionRefresh:
         assert trade.exit_reason == 'EOD_SQUARE_OFF'
         assert trade.exit_price == 2530.0
 
-    def test_eod_square_off_without_quotes_warns_and_exits(self, tmp_path, monkeypatch):
-        """EOD still closes positions but surfaces missing data clearly."""
+    def test_eod_square_off_without_quotes_retains_unresolved(self, tmp_path, monkeypatch):
+        """EOD never exits at last-known prices — with no fresh valid quote
+        the position is retained unresolved, flagged via incident, and
+        retried by the next square-off cycle."""
         engine = self._engine(tmp_path)
         self._open(engine)
         monkeypatch.setattr(engine.validator, 'is_square_off_window', lambda *a, **k: True)
         engine.market_data = MagicMock()
         engine.market_data.get_quotes.return_value = {}
         engine._maybe_square_off()
-        assert engine.paper_executor.get_open_positions() == []
-        trade = engine.trade_manager.get_trades()[0]
-        assert trade.exit_reason == 'EOD_SQUARE_OFF'
-        assert trade.exit_price == 2500.0  # last known price, not fabricated
+        assert len(engine.paper_executor.get_open_positions()) == 1
+        assert engine.trade_manager.get_trades() == []
 
 
 class TestQuoteFailureMonitoring:

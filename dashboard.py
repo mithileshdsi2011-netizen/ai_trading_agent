@@ -7185,14 +7185,19 @@ async function loadIntradayData(){
       histBody.innerHTML=d.history.map(trade=>{
         const carry=trade.carryover?` <span style="background:#78350f;color:#fbbf24;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;margin-left:4px">CARRYOVER</span>`:'';
         const provenance=trade.exit_price_source==='LIVE'?'':`<div style="color:#6b7280;font-size:10px">price ${trade.exit_price_source||'UNVERIFIED'}</div>`;
+        const entryProv=trade.entry_price_source?`<div style="color:#6b7280;font-size:10px">price ${trade.entry_price_source}</div>`:'';
+        // Legacy rows with the negative-charges bug: show corrected net as a
+        // separate indicator — the stored net stays as the ledger value.
+        const corrected=trade.pnl_corrected&&trade.net_pnl_corrected!=null
+          ?`<div style="color:#f59e0b;font-size:10px">corrected ₹${trade.net_pnl_corrected.toFixed(2)}</div>`:'';
         const dirColor=trade.direction==='SHORT'?'#f59e0b':'#38bdf8';
         return `<tr style="border-bottom:1px solid #1f293744">
           <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}${carry}</td>
           <td style="padding:10px 8px;color:${dirColor};font-weight:600">${trade.direction||'—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">${trade.quantity ?? '—'}</td>
-          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.entry_price.toFixed(2)}</td>
+          <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.entry_price.toFixed(2)}${entryProv}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${trade.exit_price.toFixed(2)}${provenance}</td>
-          <td style="padding:10px 8px;text-align:right;color:${pnlClass(trade.net_pnl)}">${pnlStr(trade.net_pnl)}</td>
+          <td style="padding:10px 8px;text-align:right;color:${pnlClass(trade.net_pnl)}">${pnlStr(trade.net_pnl)}${corrected}</td>
           <td style="padding:10px 8px;color:#9ca3af">${trade.exit_reason}</td>
           <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.entry_time||'—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#9ca3af;font-size:12px">${trade.exit_time||'—'}</td>

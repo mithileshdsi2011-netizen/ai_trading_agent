@@ -44,10 +44,11 @@ def _add_position(eng, pos):
 
 
 def _quotes(ltp, stale=False):
-    """Fake get_quotes — optionally carries an (unused-by-engine) stale
-    exchange timestamp to prove it is ignored today."""
+    """Fake get_quotes — `stale` gives the quote a 3-day-old exchange_ts
+    (the key the engine reads), modelling broker data that arrived fresh
+    but whose exchange feed stopped updating."""
     return {'TEST': {'ltp': ltp, 'fetched_at': datetime.now(),
-                     'exchFeedTime': datetime.now() - timedelta(days=3)
+                     'exchange_ts': datetime.now() - timedelta(days=3)
                      if stale else datetime.now()}}
 
 
@@ -115,42 +116,48 @@ def test_hung_scan_blocks_eod_indefinitely(tmp_path):
     assert done.wait(2)
 
 
-# ── 4. Stale exchange timestamps are silently accepted today ─────────
+# ── 4. Stale exchange timestamps: quote unusable, position retained ────
 
-def test_stale_quote_priced_exit_without_warning(tmp_path):
-    """Documents the defect: EOD exits at ltp regardless of exchFeedTime
-    age — no freshness check, no incident."""
+def test_stale_exchange_ts_quote_rejected_position_retained(tmp_path):
+    """A fresh receipt carrying a 3-day-old exchange stamp is NOT a fresh
+    valid quote — the position stays open (unresolved), an incident is
+    raised, and no fictitious P&L is booked."""
     eng, incidents = _engine(tmp_path)
     _add_position(eng, _position())
     eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(
-        return_value=_quotes(999.0, stale=True))   # 3-day-old exchange stamp
+        return_value=_quotes(999.0, stale=True))
     eng._maybe_square_off()
-    trade = eng.trade_manager.get_trades()[0]
-    assert trade.exit_price == 999.0         # stale ltp used, unflagged
-    assert not any(k for _, k, _ in incidents
-                   if 'eod' in k.lower())    # no incident raised
+    assert eng.trade_manager.get_trades() == []          # no exit booked
+    assert len(eng.paper_executor.get_open_positions()) == 1  # retained
+    assert any('eod' in k.lower() for _, k, _ in incidents)
 
 
-# ── 5. Quote API failure → last-known fallback + incident ────────────
+# ── 5. Quote API failure / empty → retained unresolved + incident ─────
 
-def test_quote_failure_falls_back_with_incident(tmp_path):
+def test_quote_failure_retains_position_with_incident(tmp_path):
     eng, incidents = _engine(tmp_path)
     pos = _position(price=100.0)
-    pos.current_price = 102.5                # last stored price
+    pos.current_price = 102.5
     _add_position(eng, pos)
     eng.validator.is_square_off_window = MagicMock(return_value=True)
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(
         side_effect=TimeoutError('angel timeout'))
     eng._maybe_square_off()
-    trade = eng.trade_manager.get_trades()[0]
-    assert trade.exit_price == 102.5         # last-known fallback
+    assert eng.trade_manager.get_trades() == []          # never last-known
+    assert len(eng.paper_executor.get_open_positions()) == 1
     assert any('eod' in k.lower() for _, k, _ in incidents)
+    # Retry once quotes return — same position exits on the fresh quote.
+    eng.market_data.get_quotes = MagicMock(return_value=_quotes(103.0))
+    eng._maybe_square_off()
+    trade = eng.trade_manager.get_trades()[0]
+    assert trade.exit_price == 103.0
+    assert trade.exit_reason == 'EOD_SQUARE_OFF'
 
 
-def test_empty_quotes_falls_back_with_incident(tmp_path):
+def test_empty_quotes_retains_position_with_incident(tmp_path):
     eng, incidents = _engine(tmp_path)
     pos = _position(price=100.0)
     pos.current_price = 101.0
@@ -159,7 +166,30 @@ def test_empty_quotes_falls_back_with_incident(tmp_path):
     eng.validator.is_market_open = MagicMock(return_value=False)
     eng.market_data.get_quotes = MagicMock(return_value={})
     eng._maybe_square_off()
-    assert eng.trade_manager.get_trades()[0].exit_price == 101.0
+    assert eng.trade_manager.get_trades() == []
+    assert len(eng.paper_executor.get_open_positions()) == 1
+    assert any('eod' in k.lower() for _, k, _ in incidents)
+
+
+def test_partial_quotes_exit_fresh_retains_stale(tmp_path):
+    """Mixed: TEST has a fresh quote, STALE1 only a stale-stamped one —
+    TEST squares off, STALE1 stays unresolved with an incident."""
+    eng, incidents = _engine(tmp_path)
+    _add_position(eng, _position('TEST'))
+    stale_pos = _position('STALE1', price=50.0, sl=45.0, tgt=60.0)
+    _add_position(eng, stale_pos)
+    eng.validator.is_square_off_window = MagicMock(return_value=True)
+    eng.validator.is_market_open = MagicMock(return_value=False)
+    eng.market_data.get_quotes = MagicMock(return_value={
+        'TEST': {'ltp': 105.0, 'exchange_ts': datetime.now()},
+        'STALE1': {'ltp': 55.0, 'exchange_ts': datetime.now() - timedelta(days=3)},
+    })
+    eng._maybe_square_off()
+    trades = eng.trade_manager.get_trades()
+    assert [t.symbol for t in trades] == ['TEST']
+    assert trades[0].exit_price == 105.0
+    remaining = [p.symbol for p in eng.paper_executor.get_open_positions()]
+    assert remaining == ['STALE1']
     assert any('eod' in k.lower() for _, k, _ in incidents)
 
 
@@ -389,7 +419,9 @@ class TestSchedulerTickSafety:
         eng.market_data.get_quotes = MagicMock(
             side_effect=TimeoutError('angel down'))
         eng._scheduler_tick_once()
-        assert eng.trade_manager.get_trades()[0].exit_price == 101.0
+        # Never exits at last-known price — retained unresolved + incident.
+        assert eng.trade_manager.get_trades() == []
+        assert len(eng.paper_executor.get_open_positions()) == 1
         assert any('eod' in k.lower() for _, k, _ in incidents)
 
 

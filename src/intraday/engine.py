@@ -38,7 +38,7 @@ from .scorer import IntradayScorer
 from .analyzer import IntradayAnalyzer
 from .risk_manager import IntradayRiskManager
 from .position_sizer import IntradayPositionSizer
-from .paper_executor import PaperTradeExecutor
+from .paper_executor import PaperTradeExecutor, EXIT_QUOTE_MAX_AGE_S
 from .live_executor import LiveTradeExecutor
 from .position_manager import IntradayPositionManager
 from .trade_manager import IntradayTradeManager
@@ -418,9 +418,8 @@ class IntradayEngine:
             self.journal.log_rejection(signal.symbol, reason)
             return
 
-        self.risk_manager.register_pending(key)
         try:
-            position = self.paper_executor.execute_entry(signal)
+            position = self.paper_executor.execute_entry(signal, quote_time=data_time)
         except Exception as e:
             # Failed entry must not hold the dedup key for the rest of the day
             self.risk_manager.release_pending(key)
@@ -459,7 +458,16 @@ class IntradayEngine:
             return 0
 
         symbols = [p.symbol for p in positions]
-        quotes = self.market_data.get_quotes(symbols)
+        # A quote-fetch failure (rate limit, auth, malformed response)
+        # counts as a failed refresh — positions preserved, alert after
+        # threshold — and must NOT skip the EOD square-off gate below.
+        try:
+            quotes = self.market_data.get_quotes(symbols) or {}
+        except Exception as e:
+            quotes = {}
+            logger.warning(
+                f"[INTRADAY] Position quote refresh failed ({e}) — "
+                "exits deferred, positions preserved")
         prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
         if not prices:
             self._quote_fail_streak += 1
@@ -519,30 +527,60 @@ class IntradayEngine:
         if not self.validator.is_square_off_window():
             return
         self._eod_last_attempt = datetime.now()
-        # Refresh prices once more so EOD exits use live data where possible
+        # Refresh prices once more. A quote counts as fresh/valid only when
+        # it carries an ltp AND — when the broker supplies an exchange
+        # timestamp — that stamp is within EXIT_QUOTE_MAX_AGE_S of now.
+        # Positions WITHOUT a fresh valid quote are NOT exited at last-known
+        # prices: they stay open in the ledger (unresolved state), an
+        # incident is raised, and the next square-off cycle retries them —
+        # exiting on a stale price would book fictitious P&L.
+        open_syms = [p.symbol for p in self.paper_executor.get_open_positions()]
         try:
-            open_syms = [p.symbol for p in self.paper_executor.get_open_positions()]
-            quotes = self.market_data.get_quotes(open_syms)
-            prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
-            if prices:
-                self.paper_executor.update_positions(prices, quotes=quotes)
-            else:
-                logger.warning(
-                    "[INTRADAY] EOD square-off: no fresh quotes — "
-                    "exiting at last known prices")
-                self._incident(
-                    'notify', EOD_QUOTE_INCIDENT_KEY,
-                    "EOD square-off executed at last-known prices — live "
-                    "quotes unavailable at close.")
+            quotes = self.market_data.get_quotes(open_syms) or {}
         except Exception as e:
             logger.warning(
                 f"[INTRADAY] EOD square-off: quote refresh failed ({e}) — "
-                "exiting at last known prices")
+                "positions retained unresolved")
             self._incident(
                 'notify', EOD_QUOTE_INCIDENT_KEY,
-                f"EOD square-off executed at last-known prices — quote "
-                f"refresh raised {e!r} at close.")
-        trades = self.paper_executor.eod_square_off()
+                f"EOD square-off deferred — quote refresh raised {e!r}; "
+                "positions retained unresolved for retry.")
+            return
+        now = datetime.now()
+        usable = {}
+        for sym, q in quotes.items():
+            if not (q and q.get('ltp')):
+                continue
+            exch_ts = q.get('exchange_ts')
+            if exch_ts is not None:
+                try:
+                    exch_age = (now - exch_ts).total_seconds()
+                except Exception:
+                    exch_age = None
+                if exch_age is None or not (0 <= exch_age <= EXIT_QUOTE_MAX_AGE_S):
+                    continue
+            usable[sym] = q['ltp']
+        missing = set(open_syms) - set(usable)
+        if not usable:
+            logger.warning(
+                "[INTRADAY] EOD square-off: no fresh valid quotes — "
+                f"positions retained unresolved: {sorted(missing)}")
+            self._incident(
+                'notify', EOD_QUOTE_INCIDENT_KEY,
+                "EOD square-off deferred — no fresh valid market quotes; "
+                f"positions retained unresolved for retry: {sorted(missing)}.")
+            return
+        if missing:
+            logger.warning(
+                f"[INTRADAY] EOD square-off: partial — no fresh quotes for "
+                f"{sorted(missing)}; those positions retained unresolved")
+            self._incident(
+                'notify', EOD_QUOTE_INCIDENT_KEY,
+                "EOD square-off partial — no fresh valid quotes for "
+                f"{sorted(missing)}; those positions retained unresolved.")
+        self.paper_executor.update_positions(
+            usable, quotes={s: quotes[s] for s in usable})
+        trades = self.paper_executor.eod_square_off(symbols=set(usable))
         for trade in trades:
             self.trade_manager.add_trade(trade)
         if trades:
@@ -903,6 +941,8 @@ class IntradayEngine:
                     'entry_price': trade.entry_price,
                     'exit_price': trade.exit_price,
                     'quantity': trade.quantity,
+                    'gross_pnl': trade.gross_pnl,
+                    'charges': trade.charges,
                     'net_pnl': trade.net_pnl,
                     'exit_reason': trade.exit_reason,
                     'entry_time': entry_dt.strftime('%Y-%m-%d %H:%M:%S') if entry_dt else None,
@@ -920,6 +960,18 @@ class IntradayEngine:
                     'exit_quote_age_s': trade.exit_quote_age_s,
                     'exit_quote_symbol': trade.exit_quote_symbol,
                     'exit_quote_exchange': trade.exit_quote_exchange,
+                    'entry_price_source': trade.entry_price_source or 'UNVERIFIED',
+                    'entry_quote_received_at': trade.entry_quote_received_at.isoformat()
+                        if isinstance(trade.entry_quote_received_at, datetime) else None,
+                    # Legacy rows booked charges with the gross-sign bug
+                    # (negative charge => net overstated). Stored values are
+                    # preserved; these fields report the corrected figures
+                    # separately — nothing is silently rewritten.
+                    'pnl_corrected': bool(trade.charges is not None and trade.charges < 0),
+                    'charges_corrected': (round(abs(trade.charges), 4)
+                                          if trade.charges is not None and trade.charges < 0 else None),
+                    'net_pnl_corrected': (round(trade.gross_pnl - abs(trade.charges), 4)
+                                          if trade.charges is not None and trade.charges < 0 else None),
                 })
             except Exception as e:
                 logger.error(f"[INTRADAY] History serialize error: {e}")

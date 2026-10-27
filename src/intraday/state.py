@@ -52,6 +52,8 @@ def _serialize_position(pos: IntradayPosition) -> Dict[str, Any]:
         'current_price_exchange_ts': pos.current_price_exchange_ts.isoformat() if isinstance(pos.current_price_exchange_ts, datetime) else None,
         'current_price_quote_symbol': pos.current_price_quote_symbol,
         'current_price_quote_exchange': pos.current_price_quote_exchange,
+        'entry_price_source': pos.entry_price_source,
+        'entry_quote_received_at': pos.entry_quote_received_at.isoformat() if isinstance(pos.entry_quote_received_at, datetime) else None,
     }
 
 
@@ -90,6 +92,8 @@ def _deserialize_position(data: Dict[str, Any]) -> IntradayPosition:
         current_price_exchange_ts=_dt(data.get('current_price_exchange_ts')),
         current_price_quote_symbol=data.get('current_price_quote_symbol'),
         current_price_quote_exchange=data.get('current_price_quote_exchange'),
+        entry_price_source=data.get('entry_price_source'),
+        entry_quote_received_at=_dt(data.get('entry_quote_received_at')),
     )
 
 

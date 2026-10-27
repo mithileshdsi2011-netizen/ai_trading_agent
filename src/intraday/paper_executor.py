@@ -46,12 +46,16 @@ class PaperTradeExecutor:
         self._paper_positions: Dict[str, IntradayPosition] = {}
         self._paper_trades: list = []
     
-    def execute_entry(self, signal: IntradaySignal) -> Optional[IntradayPosition]:
+    def execute_entry(self, signal: IntradaySignal,
+                      quote_time: Optional[datetime] = None) -> Optional[IntradayPosition]:
         """
         Execute a paper trade entry.
         
         Args:
             signal: IntradaySignal instance
+            quote_time: Local receipt time of the quote the entry price
+                derives from — recorded as entry provenance (VERIFIED only
+                when 0–30s old at commit)
             
         Returns:
             IntradayPosition or None
@@ -89,10 +93,22 @@ class PaperTradeExecutor:
                     f"{signal.symbol} — window/session closed")
                 return None
 
+            # Entry-price provenance — VERIFIED only when the quote behind
+            # the entry price has a receipt time 0–30s old at commit.
+            entry_age = ((datetime.now() - quote_time).total_seconds()
+                         if quote_time else None)
+            entry_source = (
+                'VERIFIED'
+                if entry_age is not None and 0 <= entry_age <= EXIT_QUOTE_MAX_AGE_S
+                else 'UNVERIFIED'
+            )
+
             # Create paper position
             position_id = str(uuid.uuid4())
             position = IntradayPosition(
                 id=position_id,
+                entry_price_source=entry_source,
+                entry_quote_received_at=quote_time,
                 symbol=signal.symbol,
                 direction=signal.direction,
                 entry_price=signal.entry_price,
@@ -141,16 +157,16 @@ class PaperTradeExecutor:
             IntradayTrade or None
         """
         try:
-            # Calculate P&L
+            # Calculate P&L — rounded to 4dp so FP noise never persists
             if position.direction == SignalDirection.LONG:
-                gross_pnl = (exit_price - position.entry_price) * position.quantity
+                gross_pnl = round((exit_price - position.entry_price) * position.quantity, 4)
             else:
-                gross_pnl = (position.entry_price - exit_price) * position.quantity
+                gross_pnl = round((position.entry_price - exit_price) * position.quantity, 4)
             
             # Estimate charges (simplified) — always a cost, never a credit
-            charges = abs(gross_pnl) * 0.001  # 0.1% estimate
-            net_pnl = gross_pnl - charges
-            pnl_pct = (net_pnl / (position.entry_price * position.quantity)) * 100
+            charges = round(abs(gross_pnl) * 0.001, 4)  # 0.1% estimate
+            net_pnl = round(gross_pnl - charges, 4)
+            pnl_pct = round((net_pnl / (position.entry_price * position.quantity)) * 100, 4)
             
             # Update position
             position.exit_price = exit_price
@@ -174,6 +190,13 @@ class PaperTradeExecutor:
                 quote_symbol is not None
                 and quote_symbol.split('-')[0] == position.symbol
             )
+            # A genuine but stale exchange timestamp means the FEED data is
+            # old — the quote is not 'fresh valid' even if receipt was just now.
+            exch_age = (
+                (received_at - exchange_ts).total_seconds()
+                if (received_at and exchange_ts) else None
+            )
+            exch_ok = exch_age is None or 0 <= exch_age <= EXIT_QUOTE_MAX_AGE_S
             verified = (
                 received_at is not None
                 and age_s is not None
@@ -181,6 +204,7 @@ class PaperTradeExecutor:
                 and exit_price == position.current_price  # exit derives from that quote
                 and symbol_ok
                 and quote_exchange == 'NSE'
+                and exch_ok
             )
             exit_price_source = 'VERIFIED' if verified else 'UNVERIFIED'
 
@@ -213,6 +237,8 @@ class PaperTradeExecutor:
                 exit_quote_age_s=age_s,
                 exit_quote_symbol=quote_symbol,
                 exit_quote_exchange=quote_exchange,
+                entry_price_source=position.entry_price_source,
+                entry_quote_received_at=position.entry_quote_received_at,
             )
             
             # Update risk manager
@@ -315,9 +341,14 @@ class PaperTradeExecutor:
         """Get all closed paper trades."""
         return self._paper_trades.copy()
     
-    def eod_square_off(self) -> list:
+    def eod_square_off(self, symbols: Optional[set] = None) -> list:
         """
-        Square off all positions at end of day.
+        Square off positions at end of day.
+
+        Args:
+            symbols: when provided, only positions whose symbol is in this
+                set (typically symbols with a fresh quote) are squared off —
+                positions without a fresh valid quote are retained.
         
         Returns:
             List of IntradayTrade for squared off positions
@@ -325,6 +356,11 @@ class PaperTradeExecutor:
         squared_off = []
         
         for position in list(self._paper_positions.values()):
+            if symbols is not None and position.symbol not in symbols:
+                logger.warning(
+                    f"[INTRADAY PAPER] EOD square-off skipped for {position.symbol} "
+                    f"— no fresh valid quote; position retained")
+                continue
             trade = self.execute_exit(position, position.current_price, "EOD_SQUARE_OFF")
             if trade:
                 squared_off.append(trade)
