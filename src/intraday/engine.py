@@ -480,7 +480,7 @@ class IntradayEngine:
             self._incident('resolve', QUOTE_INCIDENT_KEY, '')
             self._quote_fail_streak = 0
 
-        self.paper_executor.update_positions(prices)
+        self.paper_executor.update_positions(prices, quotes=quotes)
         self._record_data_time()
         for pos in positions:
             self.risk_manager.update_position(pos)
@@ -525,7 +525,7 @@ class IntradayEngine:
             quotes = self.market_data.get_quotes(open_syms)
             prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
             if prices:
-                self.paper_executor.update_positions(prices)
+                self.paper_executor.update_positions(prices, quotes=quotes)
             else:
                 logger.warning(
                     "[INTRADAY] EOD square-off: no fresh quotes — "
@@ -910,8 +910,14 @@ class IntradayEngine:
                     'carryover': bool(entry_dt and exit_dt
                                       and entry_dt.date() != exit_dt.date()),
                     # Existing ledger rows carry no quote-timestamp metadata —
-                    # freshness of the exit price cannot be proven.
-                    'exit_price_source': 'UNVERIFIED',
+                    # freshness of the exit price cannot be proven. New rows
+                    # carry real provenance from execution time.
+                    'exit_price_source': trade.exit_price_source or 'UNVERIFIED',
+                    'exit_exchange_ts': trade.exit_exchange_ts.isoformat()
+                        if isinstance(trade.exit_exchange_ts, datetime) else None,
+                    'exit_quote_received_at': trade.exit_quote_received_at.isoformat()
+                        if isinstance(trade.exit_quote_received_at, datetime) else None,
+                    'exit_quote_age_s': trade.exit_quote_age_s,
                 })
             except Exception as e:
                 logger.error(f"[INTRADAY] History serialize error: {e}")

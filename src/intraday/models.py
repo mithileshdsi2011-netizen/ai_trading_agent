@@ -118,6 +118,12 @@ class IntradayPosition:
     strategy: str = "UNKNOWN"
     is_paper: bool = True
 
+    # Quote provenance for the price currently held in current_price —
+    # local receipt timestamp and genuine exchange timestamp when the
+    # broker quote carries one. None means provenance unknown.
+    current_price_updated_at: Optional[datetime] = None
+    current_price_exchange_ts: Optional[datetime] = None
+
 
 @dataclass
 class IntradayTrade:
@@ -153,6 +159,16 @@ class IntradayTrade:
     
     # Duration
     duration_minutes: Optional[float] = None
+
+    # Exit-price provenance. 'VERIFIED' only when the exit price came
+    # from a genuine broker quote whose receipt time is acceptably
+    # fresh at decision time; otherwise 'UNVERIFIED' or None (legacy
+    # rows). Exchange timestamp is stored only when the broker quote
+    # actually carries one — never fabricated.
+    exit_price_source: Optional[str] = None
+    exit_exchange_ts: Optional[datetime] = None
+    exit_quote_received_at: Optional[datetime] = None
+    exit_quote_age_s: Optional[float] = None
 
 
 @dataclass

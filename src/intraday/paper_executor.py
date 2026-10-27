@@ -18,6 +18,10 @@ from .position_sizer import IntradayPositionSizer
 
 logger = logging.getLogger(__name__)
 
+# Max age of the broker quote that produced an exit price for the exit
+# to be labelled VERIFIED — matches the per-symbol entry freshness gate.
+EXIT_QUOTE_MAX_AGE_S = 30.0
+
 
 class PaperTradeExecutor:
     """Paper trading executor for intraday."""
@@ -143,8 +147,8 @@ class PaperTradeExecutor:
             else:
                 gross_pnl = (position.entry_price - exit_price) * position.quantity
             
-            # Estimate charges (simplified)
-            charges = gross_pnl * 0.001  # 0.1% estimate
+            # Estimate charges (simplified) — always a cost, never a credit
+            charges = abs(gross_pnl) * 0.001  # 0.1% estimate
             net_pnl = gross_pnl - charges
             pnl_pct = (net_pnl / (position.entry_price * position.quantity)) * 100
             
@@ -155,6 +159,19 @@ class PaperTradeExecutor:
             position.realized_pnl = net_pnl
             position.status = PositionStatus.CLOSED
             
+            # Exit-price provenance — the quote behind position.current_price.
+            # VERIFIED only when a broker quote receipt time exists and is
+            # fresh at decision time; anything missing/stale stays UNVERIFIED.
+            received_at = position.current_price_updated_at
+            exchange_ts = position.current_price_exchange_ts
+            age_s = ((position.exit_time - received_at).total_seconds()
+                     if received_at else None)
+            exit_price_source = (
+                'VERIFIED'
+                if age_s is not None and 0 <= age_s <= EXIT_QUOTE_MAX_AGE_S
+                else 'UNVERIFIED'
+            )
+
             # Create trade record
             trade = IntradayTrade(
                 id=str(uuid.uuid4()),
@@ -177,7 +194,11 @@ class PaperTradeExecutor:
                 signal_classification=position.signal_classification,
                 strategy=position.strategy,
                 is_paper=True,
-                duration_minutes=(position.exit_time - position.entry_time).total_seconds() / 60
+                duration_minutes=(position.exit_time - position.entry_time).total_seconds() / 60,
+                exit_price_source=exit_price_source,
+                exit_exchange_ts=exchange_ts,
+                exit_quote_received_at=received_at,
+                exit_quote_age_s=age_s,
             )
             
             # Update risk manager
@@ -202,17 +223,27 @@ class PaperTradeExecutor:
             logger.error(f"[INTRADAY PAPER] Exit execution error: {e}")
             return None
     
-    def update_positions(self, market_data: Dict[str, float]):
+    def update_positions(self, market_data: Dict[str, float],
+                         quotes: Optional[Dict[str, Dict]] = None):
         """
         Update all paper positions with current market data.
-        
+
         Args:
             market_data: Dict mapping symbols to current prices
+            quotes: Optional dict mapping symbols to the raw quote objects the
+                prices came from — used to stamp quote provenance (local
+                receipt time and genuine exchange timestamp when present)
         """
+        now = datetime.now()
         for position in self._paper_positions.values():
             if position.symbol in market_data:
                 current_price = market_data[position.symbol]
                 position.current_price = current_price
+                position.current_price_updated_at = now
+                quote = quotes.get(position.symbol) if quotes else None
+                position.current_price_exchange_ts = (
+                    quote.get('exchange_ts') if isinstance(quote, dict) else None
+                )
                 
                 # Calculate unrealized P&L
                 if position.direction == SignalDirection.LONG:

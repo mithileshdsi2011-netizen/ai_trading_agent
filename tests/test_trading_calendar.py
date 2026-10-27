@@ -95,9 +95,12 @@ class TestSharedSourceConsistency:
             def strptime(s, fmt):
                 return real_dt.strptime(s, fmt)
 
-        # market_data.is_market_open does `from datetime import datetime`
-        # at call time → patch the module attribute it resolves.
-        monkeypatch.setattr('datetime.datetime', _FrozenDT)
+        # market_data re-exports market_data_optimized.MarketDataFetcher,
+        # whose is_market_open uses a module-bound `datetime` — patch the
+        # attribute where the method actually resolves it. Patching both
+        # module paths keeps the test correct if the alias flips back.
+        monkeypatch.setattr('market_data_optimized.datetime', _FrozenDT)
+        monkeypatch.setattr('market_data.datetime', _FrozenDT)
         assert f.is_market_open() is False
 
     def test_intraday_validator_uses_shared_calendar(self):

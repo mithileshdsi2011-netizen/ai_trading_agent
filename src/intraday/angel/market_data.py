@@ -50,8 +50,19 @@ class AngelMarketData:
             'symbol_token': raw.get('symbolToken'),
             'trading_symbol': raw.get('tradingSymbol'),
             'exchange': raw.get('exchange'),
+            'exchange_ts': AngelMarketData._parse_exchange_ts(raw),
             'fetched_at': datetime.now(),
         }
+
+    @staticmethod
+    def _parse_exchange_ts(raw: Dict[str, Any]) -> Optional[datetime]:
+        """Genuine exchange timestamp from the Angel quote payload — only
+        when the broker actually sends one (epoch millis). Never inferred."""
+        ms = raw.get('exchangeFeedTimeEpochMillis') or raw.get('exchFeedTime')
+        try:
+            return datetime.fromtimestamp(int(ms) / 1000.0)
+        except (TypeError, ValueError, OSError):
+            return None
 
     def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         """

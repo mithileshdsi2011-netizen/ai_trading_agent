@@ -48,6 +48,8 @@ def _serialize_position(pos: IntradayPosition) -> Dict[str, Any]:
         'signal_classification': pos.signal_classification.value if hasattr(pos.signal_classification, 'value') else str(pos.signal_classification),
         'strategy': pos.strategy,
         'is_paper': pos.is_paper,
+        'current_price_updated_at': pos.current_price_updated_at.isoformat() if isinstance(pos.current_price_updated_at, datetime) else None,
+        'current_price_exchange_ts': pos.current_price_exchange_ts.isoformat() if isinstance(pos.current_price_exchange_ts, datetime) else None,
     }
 
 
@@ -82,6 +84,8 @@ def _deserialize_position(data: Dict[str, Any]) -> IntradayPosition:
         signal_classification=SignalClassification(data.get('signal_classification', 'NO_TRADE')),
         strategy=data.get('strategy', 'UNKNOWN'),
         is_paper=bool(data.get('is_paper', True)),
+        current_price_updated_at=_dt(data.get('current_price_updated_at')),
+        current_price_exchange_ts=_dt(data.get('current_price_exchange_ts')),
     )
 
 
