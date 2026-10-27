@@ -344,3 +344,94 @@ class TestEodUnresolvedLifecycle:
         eng2, _ = _engine(tmp_path)
         assert eng2.paper_executor.get_open_positions() == []
         assert len(eng2.trade_manager.get_trades()) == 1
+
+    def test_crash_before_journal_keeps_position_retriable(self, tmp_path):
+        """Journal-first ordering: execute_exit removes the position in
+        memory only (persist=False). A crash before add_trade leaves the
+        position in positions.json — restart reloads it and the exit can
+        be retried. The position is never silently closed."""
+        eng1, _ = _engine(tmp_path)
+        pos = _position()
+        _add_position(eng1, pos)
+        eng1.state_store.save_positions([pos])
+        trade = eng1.paper_executor.execute_exit(pos, 110.0, 'STOP_LOSS')
+        assert trade is not None
+        # crash — add_trade never ran; positions.json still lists position
+
+        eng2, _ = _engine(tmp_path)                 # restart
+        reopened = eng2.paper_executor.get_open_positions()
+        assert len(reopened) == 1                   # not silently closed
+        assert eng2.trade_manager.get_trades() == []
+        # daily P&L self-healed from the journal — the unjournaled exit's
+        # P&L was rolled back, so the retry counts it exactly once
+        assert eng2.risk_manager.get_daily_state()['realized_pnl'] == 0
+        # Retry exits it exactly once
+        t2 = eng2.paper_executor.execute_exit(reopened[0], 110.0, 'STOP_LOSS')
+        eng2.trade_manager.add_trade(t2)
+        assert len(eng2.trade_manager.get_trades()) == 1
+        assert eng2.risk_manager.get_daily_state()['realized_pnl'] > 0
+
+
+# ══════════ Atomic-write failure injection ═══════════════════════════
+
+class TestAtomicWrites:
+
+    def test_replace_failure_preserves_live_file(self, tmp_path):
+        """os.replace failing mid-write must leave the previous live file
+        byte-identical — the tmp file is simply abandoned."""
+        from intraday.state import IntradayStateStore
+        store = IntradayStateStore(str(tmp_path))
+        store.save_daily_state({'trades_today': 3})
+        live = open(tmp_path / 'daily_state.json', 'rb').read()
+        import intraday.state as state_mod
+        orig = state_mod.os.replace
+        state_mod.os.replace = MagicMock(side_effect=OSError('disk full'))
+        try:
+            store.save_daily_state({'trades_today': 999})
+        finally:
+            state_mod.os.replace = orig
+        assert open(tmp_path / 'daily_state.json', 'rb').read() == live
+        assert store.load_daily_state()['trades_today'] == 3
+
+    def test_corrupt_live_file_recovers_safe_default(self, tmp_path):
+        """A truncated/corrupt live file reads as None — engine boots with
+        safe defaults rather than crashing on startup."""
+        p = tmp_path / 'daily_state.json'
+        p.write_text('{"trades_today": 5, "date": "2026-10-27', encoding='utf-8')
+        eng, _ = _engine(tmp_path)
+        ds = eng.risk_manager.get_daily_state()
+        assert ds['trades_today'] == 0              # fresh safe default
+
+    def test_orphaned_tmp_file_ignored(self, tmp_path):
+        """A leftover .tmp from an interrupted write is never read."""
+        from intraday.state import IntradayStateStore
+        store = IntradayStateStore(str(tmp_path))
+        store.save_daily_state({'trades_today': 2})
+        (tmp_path / 'daily_state.json.tmp').write_text(
+            '{"trades_today": 999}', encoding='utf-8')
+        assert store.load_daily_state()['trades_today'] == 2
+
+    def test_concurrent_writers_last_wins_cleanly(self, tmp_path):
+        """Two engines sharing a state dir write daily_state concurrently
+        — atomic replace means readers never see a torn file."""
+        eng1, _ = _engine(tmp_path)
+        eng2, _ = _engine(tmp_path)
+        errors = []
+
+        def writer(eng, n):
+            try:
+                for _ in range(20):
+                    eng.risk_manager._save_daily_state()
+            except Exception as e:
+                errors.append(e)
+
+        ts = [threading.Thread(target=writer, args=(eng1, i))
+              for i in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+        assert not errors
+        import json
+        data = json.loads(open(tmp_path / 'daily_state.json').read())
+        assert data['date'] is not None             # well-formed JSON

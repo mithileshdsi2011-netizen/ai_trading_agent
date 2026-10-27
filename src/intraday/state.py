@@ -132,6 +132,10 @@ class IntradayStateStore:
             tmp = f"{path}.tmp"
             with open(tmp, 'w') as f:
                 json.dump(payload, f, indent=2)
+                # Flush Python + OS buffers before the atomic rename so an
+                # interrupted write never leaves a half-written live file.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
         except Exception as e:
             logger.error(f"[INTRADAY STATE] Write error {path}: {e}")

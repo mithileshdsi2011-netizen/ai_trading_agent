@@ -225,9 +225,13 @@ class IntradayEngine:
 
         # Resolve any durable entry claims left by a dead process —
         # completes entries whose position persisted but count was lost,
-        # releases claims that never produced a position.
+        # releases claims that never produced a position. Then rebuild the
+        # day's P&L counters from the journal — self-heals exits whose
+        # daily-state write and journal write were split by a crash.
         self.risk_manager.reconcile_pending_claims(
             self.paper_executor.get_open_positions())
+        self.risk_manager.reconcile_daily_pnl(
+            self.trade_manager.get_today_trades())
 
         logger.info("[INTRADAY] Engine initialized (mode=%s, universe=%s)",
                     "PAPER" if self.config.paper_trading else "LIVE",
@@ -544,6 +548,11 @@ class IntradayEngine:
                 'net_pnl': trade.net_pnl,
                 'exit_reason': trade.exit_reason,
             })
+        if exited:
+            # Journal-first: trades are written before positions.json loses
+            # them — a crash here is recovered by phantom-position dedup.
+            self.state_store.save_positions(
+                self.paper_executor.get_open_positions())
         return len(exited)
 
     def _maybe_square_off(self):

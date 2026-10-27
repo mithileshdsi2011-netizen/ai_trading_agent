@@ -243,7 +243,10 @@ class PaperTradeExecutor:
             
             # Update risk manager
             self.risk_manager.record_trade_exit(position)
-            self.risk_manager.remove_position(position.symbol)
+            # persist=False: the caller journals the trade BEFORE the
+            # position leaves positions.json — journal-first ordering makes
+            # the crash window recoverable via phantom-position dedup.
+            self.risk_manager.remove_position(position.symbol, persist=False)
             
             # Remove from local storage
             if position.id in self._paper_positions:

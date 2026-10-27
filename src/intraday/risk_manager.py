@@ -307,6 +307,37 @@ class IntradayRiskManager:
                 f"[INTRADAY RISK] Pending-claim reconciliation: "
                 f"{recovered} completed, {released} released")
 
+    def reconcile_daily_pnl(self, today_trades: List):
+        """
+        Ledger-derived rebuild of daily P&L counters, called once at engine
+        init. Self-heals the crash window where record_trade_exit persisted
+        P&L but the journal write was lost (or the reverse) — the trade
+        ledger is the source of truth for realized P&L, wins and losses.
+        """
+        if not self._daily_state:
+            return
+        realized = round(sum((t.net_pnl or 0.0) for t in today_trades), 4)
+        wins = sum(1 for t in today_trades if (t.net_pnl or 0.0) > 0)
+        losses = len(today_trades) - wins
+        consec = 0
+        for t in reversed(today_trades):
+            if (t.net_pnl or 0.0) <= 0:
+                consec += 1
+            else:
+                break
+        if (realized != round(self._daily_state.realized_pnl, 4)
+                or wins != self._daily_state.wins_today
+                or losses != self._daily_state.losses_today):
+            logger.warning(
+                f"[INTRADAY RISK] Daily P&L reconciled from journal: "
+                f"{self._daily_state.realized_pnl} -> {realized} "
+                f"({wins}W/{losses}L)")
+            self._daily_state.realized_pnl = realized
+            self._daily_state.wins_today = wins
+            self._daily_state.losses_today = losses
+            self._daily_state.consecutive_losses = consec
+            self._save_daily_state()
+
     def record_trade_entry(self, signal: IntradaySignal,
                            idempotency_key: Optional[str] = None):
         """
@@ -376,16 +407,22 @@ class IntradayRiskManager:
             self._open_positions[position.symbol] = position
             self._save_positions()
 
-    def remove_position(self, symbol: str):
+    def remove_position(self, symbol: str, persist: bool = True):
         """
         Remove an open position.
 
         Args:
             symbol: Symbol to remove
+            persist: persist positions.json immediately. Callers that have
+                not yet journaled the exit trade pass persist=False — the
+                journal MUST be written before the position disappears from
+                disk, otherwise a crash silently loses the position
+                (journal-first leaves a phantom that load_positions dedups).
         """
         if symbol in self._open_positions:
             del self._open_positions[symbol]
-            self._save_positions()
+            if persist:
+                self._save_positions()
             logger.info(f"[INTRADAY RISK] Position removed: {symbol}, Open positions: {len(self._open_positions)}")
 
     def get_open_positions(self) -> List[IntradayPosition]:
