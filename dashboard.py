@@ -3411,11 +3411,14 @@ tr:last-child td{border:none}
   </div>
   <div id="ipo-counts" style="font-size:12px;color:#9ca3af;margin-bottom:12px"></div>
 
+  <!-- IPO view tabs — persistent across all views; must NOT live inside a
+       toggleable card or they disappear when the card is hidden -->
+  <div id="ipo-filter-bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px"></div>
+
   <!-- IPO Summary Table -->
   <div class="card mb-4">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
       <div style="font-size:13px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.06em">IPO Summary</div>
-      <div id="ipo-filter-bar" style="display:flex;gap:6px"></div>
     </div>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -6938,7 +6941,7 @@ async function loadIPOData(){
     };
 
     // Filter bar — main view prioritises Open + Upcoming; HISTORY is a separate view
-    const flt=window._ipoFilter||'CURRENT';
+    const flt=window._ipoFilter||(function(){try{return sessionStorage.getItem('ipoFilter')||'CURRENT'}catch(e){return 'CURRENT'}})();
     const filterBar=document.getElementById('ipo-filter-bar');
     if(filterBar){
       const filters=['CURRENT','OPEN','UPCOMING','ALL','HISTORY'];
@@ -7280,7 +7283,7 @@ async function toggleIntradayKillSwitch(){
   }
 }
 
-function setIPOFilter(f){window._ipoFilter=f;if(f==='HISTORY'){window._ipoHistPage=1;}loadIPOData();}
+function setIPOFilter(f){window._ipoFilter=f;try{sessionStorage.setItem('ipoFilter',f)}catch(e){}if(f==='HISTORY'){window._ipoHistPage=1;}loadIPOData();}
 
 // IPO History — client-side search + pagination (25/page) over Closed + Listed
 function renderIPOHistory(){
