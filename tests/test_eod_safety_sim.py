@@ -25,6 +25,11 @@ def _engine(tmp_path, **kw):
         state_dir=str(tmp_path),
         alert_hook=lambda action, key, detail: incidents.append(
             (action, key, detail)))
+    # Default entry gates open — tests must not depend on the real clock.
+    # is_square_off_time stays REAL: is_square_off_window() calls it
+    # internally and the weekend/holiday tests exercise the real window.
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=True)
     return eng, incidents
 
 

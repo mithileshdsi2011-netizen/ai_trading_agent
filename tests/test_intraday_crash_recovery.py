@@ -28,6 +28,11 @@ def _engine(tmp_path):
     eng = IntradayEngine(
         state_dir=str(tmp_path),
         alert_hook=lambda a, k, d: incidents.append((a, k, d)))
+    # Default time gates open — tests must not depend on the real clock.
+    # Individual tests override these as needed.
+    eng.validator.is_market_open = MagicMock(return_value=True)
+    eng.validator.is_entry_window_open = MagicMock(return_value=True)
+    eng.validator.is_square_off_time = MagicMock(return_value=False)
     return eng, incidents
 
 

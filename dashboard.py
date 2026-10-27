@@ -7069,7 +7069,11 @@ async function loadIntradayData(){
     const tradingStatus=document.getElementById('intraday-trading-status');
     if(tradingStatus){
       const es=d.engine_state||(d.trading_blocked?'BLOCKED':'ACTIVE');
-      tradingStatus.textContent=es;
+      const db0=d.daily_breakdown||{};
+      // Entry limit is an entries-only gate — monitoring/exits stay live,
+      // so the engine state is preserved alongside the limit banner.
+      const limitHit=(db0.entries_today!=null&&db0.max_entries!=null&&db0.entries_today>=db0.max_entries);
+      tradingStatus.innerHTML=es+(limitHit?' <span style="color:#f59e0b;font-size:12px">— ENTRY LIMIT REACHED — NO NEW TRADES</span>':'');
       tradingStatus.style.color=es==='ACTIVE'?'#10b981':es==='SCANNING'?'#3b82f6':es==='MARKET CLOSED'?'#9ca3af':'#ef4444';
     }
 
@@ -7131,7 +7135,8 @@ async function loadIntradayData(){
     const pnlEl=document.getElementById('intraday-pnl');
     if(pnlEl){
       const total=db.realized_pnl ?? d.daily_state.realized_pnl;
-      pnlEl.textContent=pnlStr(total);
+      const corrected=db.realized_pnl_corrected;
+      pnlEl.innerHTML=pnlStr(total)+((corrected!=null&&Math.abs(corrected-total)>0.004)?` <span style="font-size:11px;color:#f59e0b">corrected ${pnlStr(corrected)}</span>`:'');
       pnlEl.style.color=pnlClass(total);
     }
     
@@ -7190,7 +7195,7 @@ async function loadIntradayData(){
         // Legacy rows with the negative-charges bug: show corrected net as a
         // separate indicator — the stored net stays as the ledger value.
         const corrected=trade.pnl_corrected&&trade.net_pnl_corrected!=null
-          ?`<div style="color:#f59e0b;font-size:10px">corrected ₹${trade.net_pnl_corrected.toFixed(2)}</div>`:'';
+          ?`<div style="color:#f59e0b;font-size:10px">corrected ${pnlStr(trade.net_pnl_corrected)}</div>`:'';
         const dirColor=trade.direction==='SHORT'?'#f59e0b':'#38bdf8';
         return `<tr style="border-bottom:1px solid #1f293744">
           <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${trade.symbol}${carry}</td>

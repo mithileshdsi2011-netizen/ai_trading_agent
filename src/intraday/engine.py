@@ -105,6 +105,14 @@ def daily_breakdown(trades: List, entries_today: int,
             bucket['wins'] += 1
         else:
             bucket['losses'] += 1
+    corrected_pnl = 0.0
+    for t in trades or []:
+        chg = getattr(t, 'charges', None)
+        gross = getattr(t, 'gross_pnl', 0.0) or 0.0
+        net = getattr(t, 'net_pnl', 0.0) or 0.0
+        # Legacy negative-charge rows: corrected = gross - |charges|.
+        # Computed from full-precision ledger values — stored rows untouched.
+        corrected_pnl += (gross - abs(chg)) if (chg is not None and chg < 0) else net
     for b in (same, carry):
         b['pnl'] = round(b['pnl'], 2)
     return {
@@ -114,6 +122,7 @@ def daily_breakdown(trades: List, entries_today: int,
         'same_day': same,
         'carryover': carry,
         'realized_pnl': round(same['pnl'] + carry['pnl'], 2),
+        'realized_pnl_corrected': round(corrected_pnl, 2),
     }
 
 
