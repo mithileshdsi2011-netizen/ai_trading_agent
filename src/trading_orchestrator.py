@@ -1215,14 +1215,55 @@ class TradingOrchestrator:
 
         self.market_data.get_cycle_metrics(); return cycle_result
     
+    SCHEDULER_HEARTBEAT_INTERVAL_SECONDS = 30
+
+    def _scheduler_heartbeat_loop(self):
+        """Daemon thread: stamp scheduler_heartbeat so the system monitor can
+        verify scheduler liveness even while a long trading cycle holds the
+        main loop. Carries cycle-activity timestamps so a hung run_once()
+        cannot keep the heartbeat looking healthy. Never raises — heartbeat
+        failure must not kill scheduling."""
+        self._heartbeat_started = datetime.now().isoformat()
+        while self.is_running:
+            try:
+                self._store.save_broker_state('scheduler_heartbeat', {
+                    'timestamp': datetime.now().isoformat(),
+                    'source': 'run_scheduled',
+                    'interval_minutes': getattr(self, '_sched_interval_minutes', None),
+                    'heartbeat_started': self._heartbeat_started,
+                    'last_cycle_started': getattr(self, '_last_cycle_started', None),
+                    'last_cycle_completed': getattr(self, '_last_cycle_completed', None),
+                    'last_cycle_status': getattr(self, '_last_cycle_status', None),
+                })
+            except Exception as hb_err:
+                logger.debug(f"Scheduler heartbeat write failed: {hb_err}")
+            time.sleep(self.SCHEDULER_HEARTBEAT_INTERVAL_SECONDS)
+
     def _run_once_wrapper(self):
         """Non-reentrant wrapper so long cycles cannot overlap and don't schedule twice."""
         if not self._run_once_lock.acquire(blocking=False):
             logger.warning("Previous trading cycle still running — skipping scheduled cycle")
             return {}
+        cycle_start = time.time()
+        cycle_status = 'ok'
+        self._last_cycle_started = datetime.now().isoformat()
         try:
             return self.run_once()
+        except Exception:
+            cycle_status = 'error'
+            raise
         finally:
+            self._last_cycle_completed = datetime.now().isoformat()
+            self._last_cycle_status = cycle_status
+            try:
+                self._store.save_heartbeat_log({
+                    'timestamp': datetime.now().isoformat(),
+                    'source': 'scheduler_cycle',
+                    'status': cycle_status,
+                    'latency_ms': (time.time() - cycle_start) * 1000,
+                })
+            except Exception:
+                pass
             self._run_once_lock.release()
     
     def run_scheduled(self, interval_minutes: int = 15):
@@ -1238,6 +1279,12 @@ class TradingOrchestrator:
         self._scheduler_started = True
         logger.info(f"Starting scheduled trading with {interval_minutes} minute intervals")
         self.is_running = True
+        self._sched_interval_minutes = interval_minutes
+        if not getattr(self, '_heartbeat_thread', None) or not self._heartbeat_thread.is_alive():
+            self._heartbeat_thread = threading.Thread(
+                target=self._scheduler_heartbeat_loop,
+                name='scheduler-heartbeat', daemon=True)
+            self._heartbeat_thread.start()
 
         # Daily reset (before anything else)
         schedule.every().day.at("08:45").do(self.daily_reset)

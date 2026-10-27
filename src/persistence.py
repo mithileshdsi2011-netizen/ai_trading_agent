@@ -1262,7 +1262,10 @@ class TradingStore:
                     """
                     SELECT timestamp, date, fii_buy, fii_sell, dii_buy, dii_sell,
                            fii_net, dii_net, net_flow, sentiment
-                    FROM fii_dii ORDER BY timestamp DESC LIMIT 1
+                    -- 'timestamp' holds display-format strings ('27-Oct-2026')
+                    -- that do not sort chronologically; 'date' is always ISO
+                    -- and 'id' breaks same-date ties by insertion order.
+                    FROM fii_dii ORDER BY date DESC, id DESC LIMIT 1
                     """
                 ).fetchone()
                 if not row:

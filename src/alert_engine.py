@@ -343,7 +343,11 @@ class EnterpriseAlertEngine:
 
         hb = metrics.get('scheduler_heartbeat', {})
         if not hb.get('ok', True):
-            self.alert('CRITICAL', 'Scheduler', 'Scheduler heartbeat missing', hb,
+            reason = hb.get('reason', '')
+            msg = ('Scheduler cycle stalled — no trading-cycle activity within expected window'
+                   if reason == 'cycle_stalled' else
+                   'Scheduler heartbeat missing')
+            self.alert('CRITICAL', 'Scheduler', msg, hb,
                        incident_key='scheduler:heartbeat')
         else:
             self.resolve_incident('scheduler:heartbeat')

@@ -144,15 +144,37 @@ class EnterpriseSystemMonitor:
             return False
 
     def _scheduler_heartbeat(self) -> Dict[str, Any]:
+        """Scheduler liveness + cycle-activity check. The heartbeat proves the
+        thread is alive; last_cycle_started/completed prove trading cycles are
+        actually progressing — a hung run_once() must report as stalled, not OK."""
         try:
             hb = self.store.get_broker_state('scheduler_heartbeat') if hasattr(self.store, 'get_broker_state') else None
             if not hb or 'timestamp' not in hb:
-                return {'ok': False, 'age_seconds': 9999}
+                return {'ok': False, 'age_seconds': 9999, 'reason': 'missing'}
             last = pd.to_datetime(hb['timestamp'])
-            age = (datetime.now() - last).total_seconds()
-            return {'ok': age < self.HEALTH_THRESHOLDS['heartbeat_age_seconds'], 'age_seconds': round(age, 1)}
+            hb_age = (datetime.now() - last).total_seconds()
+            if hb_age >= self.HEALTH_THRESHOLDS['heartbeat_age_seconds']:
+                return {'ok': False, 'age_seconds': round(hb_age, 1), 'reason': 'heartbeat_stale'}
+            out = {'ok': True, 'age_seconds': round(hb_age, 1), 'reason': 'ok',
+                   'last_cycle_completed': hb.get('last_cycle_completed'),
+                   'last_cycle_status': hb.get('last_cycle_status')}
+            # Cycle-activity gate: no cycle start/finish within 2 scan
+            # intervals of the most recent activity ⇒ scheduler is stalled.
+            interval_min = hb.get('interval_minutes') or 15
+            cycle_window = max(2 * interval_min * 60,
+                               2 * self.HEALTH_THRESHOLDS['heartbeat_age_seconds'])
+            activity_ts = [t for t in (hb.get('last_cycle_started'),
+                                       hb.get('last_cycle_completed'),
+                                       hb.get('heartbeat_started')) if t]
+            if activity_ts:
+                activity_age = (datetime.now() - max(pd.to_datetime(t) for t in activity_ts)).total_seconds()
+                out['cycle_age_seconds'] = round(activity_age, 1)
+                if activity_age > cycle_window:
+                    out['ok'] = False
+                    out['reason'] = 'cycle_stalled'
+            return out
         except Exception:
-            return {'ok': False, 'age_seconds': 9999}
+            return {'ok': False, 'age_seconds': 9999, 'reason': 'missing'}
 
     def _background_threads(self) -> List[str]:
         try:
