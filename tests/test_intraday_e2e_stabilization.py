@@ -162,17 +162,18 @@ class TestMonitorExits:
         assert eng.paper_executor.get_open_positions()[0].current_price == 100.0
         assert eng.trade_manager.get_trades() == []
 
-    def test_stale_exchange_stamp_exit_unverified(self, tmp_path):
-        """Quote whose exchange stamp is 3 days old: exit still executes on
-        the refreshed price but its provenance is UNVERIFIED, not VERIFIED."""
+    def test_stale_exchange_stamp_blocks_exit_position_held(self, tmp_path):
+        """Quote whose exchange stamp is 3 days old fails the unified
+        execution-quote policy — NO fictitious fill: position held at last
+        price, no trade, incident streak counts it."""
         eng, _ = _engine(tmp_path)
         _add_position(eng, _position(price=100.0, sl=95.0, tgt=110.0))
         eng.market_data.get_quotes = MagicMock(
             return_value=_quote(ltp=111.0, exch_age_s=3 * 86400))
-        assert eng._refresh_positions() == 1
-        t = eng.trade_manager.get_trades()[0]
-        assert t.exit_price == 111.0
-        assert t.exit_price_source == 'UNVERIFIED'
+        assert eng._refresh_positions() == 0
+        assert eng.trade_manager.get_trades() == []
+        pos = eng.paper_executor.get_open_positions()[0]
+        assert pos.current_price == 100.0      # invalid quote never applied
 
     def test_rate_limit_error_preserves_positions(self, tmp_path):
         eng, incidents = _engine(tmp_path)

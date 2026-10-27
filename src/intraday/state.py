@@ -54,6 +54,7 @@ def _serialize_position(pos: IntradayPosition) -> Dict[str, Any]:
         'current_price_quote_exchange': pos.current_price_quote_exchange,
         'entry_price_source': pos.entry_price_source,
         'entry_quote_received_at': pos.entry_quote_received_at.isoformat() if isinstance(pos.entry_quote_received_at, datetime) else None,
+        'eod_pending': bool(getattr(pos, 'eod_pending', False)),
     }
 
 
@@ -94,6 +95,7 @@ def _deserialize_position(data: Dict[str, Any]) -> IntradayPosition:
         current_price_quote_exchange=data.get('current_price_quote_exchange'),
         entry_price_source=data.get('entry_price_source'),
         entry_quote_received_at=_dt(data.get('entry_quote_received_at')),
+        eod_pending=bool(data.get('eod_pending', False)),
     )
 
 
@@ -159,6 +161,32 @@ class IntradayStateStore:
                 positions.append(_deserialize_position(item))
             except Exception as e:
                 logger.error(f"[INTRADAY STATE] Position decode error: {e}")
+        # Crash-recovery dedup: an exit writes the trade to the journal
+        # before positions.json is rewritten — a crash in between leaves a
+        # phantom 'open' position that would exit a second time on reload.
+        # If the journal already holds a trade with the same symbol AND
+        # entry timestamp, the position is closed reality — drop it.
+        try:
+            trades_path = os.path.join(self.state_dir, "trades.json")
+            closed = {
+                (t.get('symbol'), t.get('entry_time'))
+                for t in (self._read_json(trades_path) or [])
+            }
+            if closed:
+                kept = []
+                for p in positions:
+                    et = (p.entry_time.isoformat()
+                          if isinstance(p.entry_time, datetime)
+                          else str(p.entry_time))
+                    if (p.symbol, et) in closed:
+                        logger.warning(
+                            f"[INTRADAY STATE] Dropping phantom position "
+                            f"{p.symbol} — journal already has its exit trade")
+                        continue
+                    kept.append(p)
+                positions = kept
+        except Exception as e:
+            logger.error(f"[INTRADAY STATE] Phantom-position dedup failed: {e}")
         return positions
 
     def save_positions(self, positions: List[IntradayPosition]):

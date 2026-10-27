@@ -31,14 +31,15 @@ from .models import (
     MarketRegime, SignalClassification, PositionStatus,
 )
 from .config import get_intraday_config
-from .validators import IntradayValidator, signal_idempotency_key
+from .validators import (
+    IntradayValidator, signal_idempotency_key, quote_usable_for_execution)
 from .state import IntradayStateStore
 from .scanner import IntradayScanner
 from .scorer import IntradayScorer
 from .analyzer import IntradayAnalyzer
 from .risk_manager import IntradayRiskManager
 from .position_sizer import IntradayPositionSizer
-from .paper_executor import PaperTradeExecutor, EXIT_QUOTE_MAX_AGE_S
+from .paper_executor import PaperTradeExecutor
 from .live_executor import LiveTradeExecutor
 from .position_manager import IntradayPositionManager
 from .trade_manager import IntradayTradeManager
@@ -221,6 +222,12 @@ class IntradayEngine:
         for pos in self.state_store.load_positions():
             if pos.status == PositionStatus.OPEN:
                 self.paper_executor.restore_position(pos)
+
+        # Resolve any durable entry claims left by a dead process —
+        # completes entries whose position persisted but count was lost,
+        # releases claims that never produced a position.
+        self.risk_manager.reconcile_pending_claims(
+            self.paper_executor.get_open_positions())
 
         logger.info("[INTRADAY] Engine initialized (mode=%s, universe=%s)",
                     "PAPER" if self.config.paper_trading else "LIVE",
@@ -411,6 +418,18 @@ class IntradayEngine:
             self.journal.log_rejection(signal.symbol, reason)
             return
 
+        # Shared execution-quote policy — the same chain used for exits.
+        # The entry quote must be a real, fresh (0-30s) broker quote;
+        # a stale or missing receipt rejects the entry outright.
+        qok, qreason = quote_usable_for_execution(
+            {'ltp': signal.entry_price}, signal.symbol,
+            receipt_time=data_time)
+        if not qok:
+            signal.validation_passed = False
+            signal.rejection_reason = f"Quote unusable for entry: {qreason}"
+            self.journal.log_rejection(signal.symbol, signal.rejection_reason)
+            return
+
         ok, reason = self.risk_manager.can_enter_trade(signal, idempotency_key=key)
         if not ok:
             signal.validation_passed = False
@@ -461,32 +480,53 @@ class IntradayEngine:
         # A quote-fetch failure (rate limit, auth, malformed response)
         # counts as a failed refresh — positions preserved, alert after
         # threshold — and must NOT skip the EOD square-off gate below.
+        fetch_error = None
         try:
             quotes = self.market_data.get_quotes(symbols) or {}
         except Exception as e:
             quotes = {}
+            fetch_error = e
             logger.warning(
                 f"[INTRADAY] Position quote refresh failed ({e}) — "
                 "exits deferred, positions preserved")
-        prices = {s: q['ltp'] for s, q in quotes.items() if q and q.get('ltp')}
-        if not prices:
+        fetch_time = datetime.now()
+        # Shared execution-quote policy: only quotes passing it may update
+        # current_price or trigger an automated exit. An invalid quote must
+        # never produce a fictitious fill — position held at last price.
+        prices, invalid_syms = {}, []
+        for p in positions:
+            q = quotes.get(p.symbol)
+            ok, qreason = quote_usable_for_execution(
+                q, p.symbol, receipt_time=fetch_time, now=fetch_time)
+            if ok:
+                prices[p.symbol] = q['ltp']
+            else:
+                invalid_syms.append(f"{p.symbol}({qreason})")
+        if invalid_syms:
+            logger.warning(
+                f"[INTRADAY] Quotes unusable for execution: "
+                f"{invalid_syms} — those positions held")
+        if not prices or invalid_syms:
             self._quote_fail_streak += 1
             logger.warning(
-                f"[INTRADAY] No fresh quotes for {len(positions)} open position(s) "
-                f"— exits deferred, positions preserved "
+                f"[INTRADAY] {len(invalid_syms)}/{len(positions)} open "
+                f"position(s) without a usable quote — exits deferred, "
+                f"positions preserved "
                 f"(failure {self._quote_fail_streak}/{QUOTE_FAIL_ALERT_THRESHOLD})")
             if self._quote_fail_streak >= QUOTE_FAIL_ALERT_THRESHOLD:
                 self._incident(
                     'notify', QUOTE_INCIDENT_KEY,
-                    f"{len(positions)} open PAPER position(s); "
-                    f"{self._quote_fail_streak} consecutive quote-refresh failures.")
-            return 0
-
-        # Success — even if prices are identical to the previous values,
-        # a non-empty quote response is a healthy refresh, not a failure.
-        if self._quote_fail_streak:
-            self._incident('resolve', QUOTE_INCIDENT_KEY, '')
-            self._quote_fail_streak = 0
+                    f"{len(positions)} open PAPER position(s); unusable "
+                    f"quotes for {invalid_syms or symbols}; "
+                    f"{self._quote_fail_streak} consecutive refresh failures.")
+            if not prices:
+                return 0
+        else:
+            # Full success — even if prices are identical to the previous
+            # values, an all-valid quote response is a healthy refresh.
+            if self._quote_fail_streak:
+                self._incident('resolve', QUOTE_INCIDENT_KEY, '')
+                self._quote_fail_streak = 0
 
         self.paper_executor.update_positions(prices, quotes=quotes)
         self._record_data_time()
@@ -529,7 +569,7 @@ class IntradayEngine:
         self._eod_last_attempt = datetime.now()
         # Refresh prices once more. A quote counts as fresh/valid only when
         # it carries an ltp AND — when the broker supplies an exchange
-        # timestamp — that stamp is within EXIT_QUOTE_MAX_AGE_S of now.
+        # timestamp — that stamp passes the shared execution-quote policy.
         # Positions WITHOUT a fresh valid quote are NOT exited at last-known
         # prices: they stay open in the ledger (unresolved state), an
         # incident is raised, and the next square-off cycle retries them —
@@ -549,22 +589,21 @@ class IntradayEngine:
         now = datetime.now()
         usable = {}
         for sym, q in quotes.items():
-            if not (q and q.get('ltp')):
-                continue
-            exch_ts = q.get('exchange_ts')
-            if exch_ts is not None:
-                try:
-                    exch_age = (now - exch_ts).total_seconds()
-                except Exception:
-                    exch_age = None
-                if exch_age is None or not (0 <= exch_age <= EXIT_QUOTE_MAX_AGE_S):
-                    continue
-            usable[sym] = q['ltp']
+            ok, _reason = quote_usable_for_execution(
+                q, sym, receipt_time=now, now=now)
+            if ok:
+                usable[sym] = q['ltp']
         missing = set(open_syms) - set(usable)
+        # Mark unresolved positions explicitly — visible as EOD PENDING,
+        # persisted, never silently closed.
+        for p in self.paper_executor.get_open_positions():
+            p.eod_pending = p.symbol in missing
         if not usable:
             logger.warning(
                 "[INTRADAY] EOD square-off: no fresh valid quotes — "
                 f"positions retained unresolved: {sorted(missing)}")
+            self.state_store.save_positions(
+                self.paper_executor.get_open_positions())
             self._incident(
                 'notify', EOD_QUOTE_INCIDENT_KEY,
                 "EOD square-off deferred — no fresh valid market quotes; "
@@ -841,6 +880,8 @@ class IntradayEngine:
             'stop_loss': pos.stop_loss,
             'target': pos.target,
             'unrealized_pnl': pos.unrealized_pnl,
+            'eod_pending': bool(getattr(pos, 'eod_pending', False)),
+            'entry_price_source': pos.entry_price_source or 'UNVERIFIED',
         }
 
     def _engine_state(self) -> str:

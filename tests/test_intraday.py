@@ -1178,6 +1178,9 @@ class TestPendingKeyRelease:
         engine = IntradayEngine(config=IntradayConfig(), state_dir=str(tmp_path))
         # Bypass market-hours/freshness gates — this test isolates dedup lifecycle
         engine.validator.validate_entry_conditions = lambda *a, **k: (True, None)
+        # Shared execution-quote policy needs a fresh receipt stamp.
+        engine._last_data_time = datetime.now()
+        engine.market_data.symbol_last_update = MagicMock(return_value=None)
         return engine
 
     def test_failed_execution_releases_pending_key(self, tmp_path):

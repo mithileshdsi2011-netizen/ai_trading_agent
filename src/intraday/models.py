@@ -134,6 +134,11 @@ class IntradayPosition:
     entry_price_source: Optional[str] = None
     entry_quote_received_at: Optional[datetime] = None
 
+    # Set when the EOD square-off could not obtain a fresh valid quote —
+    # the position is explicitly UNRESOLVED (open, awaiting square-off),
+    # never silently closed. Cleared when a fresh quote finally exits it.
+    eod_pending: bool = False
+
 
 @dataclass
 class IntradayTrade:

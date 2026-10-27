@@ -7164,8 +7164,9 @@ async function loadIntradayData(){
     if(posBody && d.positions && d.positions.length){
       posBody.innerHTML=d.positions.map(pos=>{
         const dirColor=pos.direction==='LONG'?'#22c55e':'#ef4444';
+        const eodBadge=pos.eod_pending?` <span style="background:#78350f;color:#fbbf24;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;margin-left:4px">EOD PENDING — no fresh quote</span>`:'';
         return `<tr style="border-bottom:1px solid #1f293744">
-          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${pos.symbol}</td>
+          <td style="padding:10px 8px;font-weight:600;color:#f9fafb">${pos.symbol}${eodBadge}</td>
           <td style="padding:10px 8px;color:${dirColor};font-weight:600">${pos.direction}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">${pos.quantity ?? '—'}</td>
           <td style="padding:10px 8px;text-align:right;color:#f9fafb">₹${pos.entry_price.toFixed(2)}</td>

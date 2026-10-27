@@ -36,6 +36,54 @@ def ist_now() -> datetime:
     return datetime.now(IST)
 
 
+# ── Shared execution-quote policy ────────────────────────────────────
+# One validation chain for EVERY quote that will drive a simulated paper
+# execution — new entries, automated SL/target exits and EOD square-off.
+# A quote is usable only when:
+#   - it carries an ltp
+#   - its symbol (when supplied) matches the target symbol ('-EQ' suffix ok)
+#   - its exchange (when supplied) is NSE
+#   - a local receipt timestamp exists and is 0-30s old (future rejected)
+#   - an exchange timestamp, when supplied, is 0-30s old (fresh-receipt
+#     plus stale exchange stamp is NOT a fresh valid quote)
+# VERIFIED provenance ≠ an executable broker fill — paper exits only ever
+# simulate against this chain; nothing here asserts a real fill occurred.
+EXEC_QUOTE_MAX_AGE_S = 30.0
+
+
+def quote_usable_for_execution(quote, symbol: str,
+                               receipt_time: Optional[datetime],
+                               now: Optional[datetime] = None,
+                               max_age_s: float = EXEC_QUOTE_MAX_AGE_S
+                               ) -> Tuple[bool, Optional[str]]:
+    """Return (usable, reason) for a quote about to drive a paper execution."""
+    now = now or datetime.now()
+    if not quote or quote.get('ltp') in (None, 0):
+        return False, "missing ltp"
+    qs = quote.get('trading_symbol') or quote.get('symbol')
+    if qs and qs.split('-')[0] != symbol:
+        return False, f"symbol mismatch ({qs} != {symbol})"
+    exch = quote.get('exchange')
+    if exch and exch != 'NSE':
+        return False, f"exchange mismatch ({exch})"
+    if receipt_time is None or not isinstance(receipt_time, datetime):
+        return False, "missing quote receipt timestamp"
+    try:
+        age = (now - receipt_time).total_seconds()
+    except Exception:
+        return False, "unparseable receipt timestamp"
+    if not (0 <= age <= max_age_s):
+        return False, f"receipt age {age:.1f}s outside 0-{max_age_s:.0f}s"
+    exch_ts = quote.get('exchange_ts')
+    if exch_ts is not None:
+        if not isinstance(exch_ts, datetime):
+            return False, "unparseable exchange timestamp"
+        eage = (now - exch_ts).total_seconds()
+        if not (0 <= eage <= max_age_s):
+            return False, f"exchange timestamp age {eage:.1f}s outside 0-{max_age_s:.0f}s"
+    return True, None
+
+
 class IntradayValidator:
     """Hard entry validation for intraday signals."""
 

@@ -8,7 +8,7 @@ and engine share the same view of risk.
 import logging
 import threading
 from typing import Dict, Any, List, Optional
-from datetime import date
+from datetime import date, datetime
 from dataclasses import dataclass
 
 from .models import IntradayConfig, IntradaySignal, IntradayPosition, PositionStatus
@@ -28,6 +28,20 @@ class DailyRiskState:
     consecutive_losses: int = 0
     blocked: bool = False
     block_reason: Optional[str] = None
+    # Durable entry-idempotency records — survive process restarts.
+    # pending_entry_claims: idempotency_key -> {'symbol', 'claimed_at'}
+    #   written when a check-and-claim succeeds, resolved by
+    #   record_trade_entry/release_pending/reconcile_pending_claims.
+    # used_idempotency_keys: keys of entries already recorded — day-long
+    #   duplicate suppression that does not die with the process.
+    pending_entry_claims: Dict[str, Dict[str, str]] = None
+    used_idempotency_keys: List[str] = None
+
+    def __post_init__(self):
+        if self.pending_entry_claims is None:
+            self.pending_entry_claims = {}
+        if self.used_idempotency_keys is None:
+            self.used_idempotency_keys = []
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -39,6 +53,8 @@ class DailyRiskState:
             'consecutive_losses': self.consecutive_losses,
             'blocked': self.blocked,
             'block_reason': self.block_reason,
+            'pending_entry_claims': self.pending_entry_claims,
+            'used_idempotency_keys': self.used_idempotency_keys,
         }
 
     @staticmethod
@@ -52,6 +68,8 @@ class DailyRiskState:
             consecutive_losses=int(data.get('consecutive_losses', 0)),
             blocked=bool(data.get('blocked', False)),
             block_reason=data.get('block_reason'),
+            pending_entry_claims=dict(data.get('pending_entry_claims') or {}),
+            used_idempotency_keys=list(data.get('used_idempotency_keys') or []),
         )
 
 
@@ -92,6 +110,10 @@ class IntradayRiskManager:
             persisted = self._state_store.load_daily_state()
             if persisted:
                 self._daily_state = DailyRiskState.from_dict(persisted)
+                # Durable dedup: keys of entries already recorded survive
+                # restarts — a re-scanned signal can never re-enter.
+                self._pending_keys |= set(
+                    self._daily_state.used_idempotency_keys)
                 return
 
         # Initialize new daily state
@@ -204,11 +226,18 @@ class IntradayRiskManager:
                 return False, f"Duplicate signal suppressed for {signal.symbol}"
 
             # Atomic claim: a successful check registers the idempotency key
-            # (day-long dedup) and reserves a slot counted by the limits above
-            # until record_trade_entry() or release_pending() resolves it.
+            # (day-long dedup), reserves a slot counted by the limits above,
+            # and persists the claim so a crash mid-entry is recoverable —
+            # until record_trade_entry(), release_pending() or
+            # reconcile_pending_claims() resolves it.
             if idempotency_key:
                 self._pending_keys.add(idempotency_key)
                 self._pending_entry_slots.add(idempotency_key)
+                self._daily_state.pending_entry_claims[idempotency_key] = {
+                    'symbol': signal.symbol,
+                    'claimed_at': datetime.now().isoformat(),
+                }
+                self._save_daily_state()
             return True, None
 
     def register_pending(self, idempotency_key: str):
@@ -230,6 +259,53 @@ class IntradayRiskManager:
             with self._entry_lock:
                 self._pending_keys.discard(idempotency_key)
                 self._pending_entry_slots.discard(idempotency_key)
+                if (self._daily_state
+                        and idempotency_key
+                        in self._daily_state.pending_entry_claims):
+                    del self._daily_state.pending_entry_claims[idempotency_key]
+                    self._save_daily_state()
+
+    def reconcile_pending_claims(self, open_positions: List[IntradayPosition]):
+        """
+        Crash-recovery for durable entry claims, called once at engine init
+        after positions are rehydrated.
+
+        Claim + matching open position  -> entry was created and persisted
+            but never counted: complete it (trades_today += 1, key moves to
+            used_idempotency_keys) so the entry is neither lost nor
+            counted twice.
+        Claim + NO open position          -> process died before persisting
+            the entry: release the claim so the signal may re-enter —
+            no lost entries, no permanently stuck reservations.
+        """
+        if not self._daily_state:
+            return
+        claims = dict(self._daily_state.pending_entry_claims)
+        if not claims:
+            return
+        open_syms = {p.symbol for p in open_positions}
+        recovered = released = 0
+        for key, info in claims.items():
+            if info.get('symbol') in open_syms:
+                self._daily_state.trades_today += 1
+                if key not in self._daily_state.used_idempotency_keys:
+                    self._daily_state.used_idempotency_keys.append(key)
+                self._pending_keys.add(key)
+                recovered += 1
+                logger.warning(
+                    f"[INTRADAY RISK] Completed recovered entry claim {key} "
+                    f"(position persisted, entry count was lost)")
+            else:
+                released += 1
+                logger.warning(
+                    f"[INTRADAY RISK] Released stale entry claim {key} — "
+                    "entry never persisted; signal may re-enter")
+            self._daily_state.pending_entry_claims.pop(key, None)
+        self._save_daily_state()
+        if recovered or released:
+            logger.info(
+                f"[INTRADAY RISK] Pending-claim reconciliation: "
+                f"{recovered} completed, {released} released")
 
     def record_trade_entry(self, signal: IntradaySignal,
                            idempotency_key: Optional[str] = None):
@@ -254,6 +330,9 @@ class IntradayRiskManager:
                 # Slot converts from in-flight claim to a recorded entry —
                 # frees the reservation without losing day-long dedup.
                 self._pending_entry_slots.discard(key)
+                self._daily_state.pending_entry_claims.pop(key, None)
+                if key not in self._daily_state.used_idempotency_keys:
+                    self._daily_state.used_idempotency_keys.append(key)
             self._save_daily_state()
         logger.info(f"[INTRADAY RISK] Trade entry recorded: {signal.symbol}, Total trades: {self._daily_state.trades_today}")
 
