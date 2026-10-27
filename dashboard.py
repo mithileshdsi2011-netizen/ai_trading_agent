@@ -1569,7 +1569,7 @@ tr:last-child td{border:none}
   <div class="flex items-center gap-3">
     <span style="font-size:22px">🤖</span>
     <div>
-      <div style="font-size:16px;font-weight:700;color:#f9fafb">AI Swing Trading Bot</div>
+      <div style="font-size:16px;font-weight:700;color:#f9fafb" id="page-title">AI Swing Trading Bot</div>
       <div style="font-size:11px;color:#4b5563" id="last-updated">Initializing...</div>
     </div>
     <div id="health-badge" style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;background:#1f2937;font-size:12px;font-weight:600">
@@ -2210,7 +2210,7 @@ tr:last-child td{border:none}
   <div class="card mb-4">
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">📈 Performance Statistics</div>
     <div class="grid grid-cols-2 md:grid-cols-3 gap-4" id="pos-performance-stats">
-      <div class="card-sm"><div class="stat-label">Win Rate</div><div class="stat-value" id="pos-win-rate">—</div></div>
+      <div class="card-sm"><div class="stat-label">Win Rate</div><div class="stat-value" id="pos-win-rate">—</div><div style="font-size:11px;color:#6b7280" id="pos-win-basis">—</div></div>
       <div class="card-sm"><div class="stat-label">Avg Profit</div><div class="stat-value" id="pos-avg-profit">₹—</div></div>
       <div class="card-sm"><div class="stat-label">Avg Loss</div><div class="stat-value" id="pos-avg-loss">₹—</div></div>
       <div class="card-sm"><div class="stat-label">Expectancy</div><div class="stat-value" id="pos-expectancy">₹—</div></div>
@@ -3883,7 +3883,33 @@ function _navSyncTab(id){
     const s=_secByTab(id);if(s)NAV_STATE.sec=s;
     _wsLast.swing={sec:NAV_STATE.sec,tab:id};
   }
-  _renderNav();_persistNav();_updateHdrWorkspace();
+  _renderNav();_persistNav();_updateHdrWorkspace();_updatePageTitle();
+}
+
+// Dynamic page title — single source is NAV itself so labels can't drift.
+// Swing: "<Section> / <Tab> — Swing Trading" (single-tab sections collapse
+// to "<Section> — Swing Trading"; the IPO pane appends its active filter).
+// Intraday: "<Section> — Intraday Trading".
+function _pageTitle(){
+  const wsName=NAV_STATE.ws==='intraday'?'Intraday Trading':'Swing Trading';
+  if(NAV_STATE.ws==='intraday'){
+    const sec=NAV.intraday.sections.find(s=>s.id===NAV_STATE.sec);
+    return `${sec?sec.label:'Overview'} — ${wsName}`;
+  }
+  const sec=NAV.swing.sections.find(s=>s.id===NAV_STATE.sec);
+  if(!sec)return wsName;
+  if(NAV_STATE.tab==='ipo'){
+    const f=String(window._ipoFilter||'CURRENT').toUpperCase();
+    return `IPO Intelligence / ${f} — ${wsName}`;
+  }
+  const tab=(sec.tabs||[]).find(t=>t[0]===NAV_STATE.tab);
+  const base=(sec.tabs.length>1&&tab)?`${sec.label} / ${tab[1]}`:sec.label;
+  return `${base} — ${wsName}`;
+}
+function _updatePageTitle(){
+  const t=_pageTitle();
+  document.title=t;
+  const el=document.getElementById('page-title');if(el)el.textContent=t;
 }
 
 function navWorkspace(ws){
@@ -4567,12 +4593,16 @@ function renderPositionsTab(d){
     }
   }
 
-  // 5. Performance Statistics
+  // 5. Performance Statistics — win rate uses the journal's closed
+  // BUY→SELL round-trips (same basis as Analytics), not raw SELL events:
+  // broker-synced sells (GESHIP) and merged buys (MANYAVAR) make the two
+  // datasets disagree on membership even at equal counts.
   const completedSells=(d.trade_events||[]).filter(t=>t.type==='SELL');
   const pnls=completedSells.map(t=>parseFloat(t.pnl||0));
   const wins=pnls.filter(x=>x>0);
   const losses=pnls.filter(x=>x<0);
-  const winRate=pnls.length?wins.length/pnls.length*100:0;
+  const closedCount=parseInt(d.total_trades||d.closed_trade_count||0);
+  const winRate=d.win_rate!=null?d.win_rate*100:(pnls.length?wins.length/pnls.length*100:0);
   const avgProfit=wins.length?wins.reduce((a,b)=>a+b,0)/wins.length:0;
   const avgLoss=losses.length?losses.reduce((a,b)=>a+b,0)/losses.length:0;
   const grossProfit=wins.reduce((a,b)=>a+b,0);
@@ -4583,6 +4613,7 @@ function renderPositionsTab(d){
   const worst=Math.min(0,...pnls);
   const ss=d.strategy_stats||{};
   setText('pos-win-rate', winRate.toFixed(0)+'%');
+  setText('pos-win-basis', d.win_rate!=null?`${closedCount} closed ${closedCount===1?'trade':'trades'} (journal)`:`${pnls.length} sell events`);
   setText('pos-avg-profit', rupee(ss.avg_win || avgProfit));
   setText('pos-avg-loss', rupee(ss.avg_loss || Math.abs(avgLoss)));
   setText('pos-expectancy', rupee(ss.expectancy!=null ? ss.expectancy : expectancy));
@@ -4913,16 +4944,21 @@ function renderPortfolio(d){
   setH('p-health','<div style="grid-column:1/-1" class="card-sm"><div class="stat-label">Portfolio Health</div><div style="font-size:22px;font-weight:800;color:'+healthColor+'">'+healthGrade+'</div>'+healthReasonsHtml+'</div>');
   setH('p-header-health','<span style="color:'+healthColor+'">'+healthGrade+'</span>');
 
-  // Portfolio Risk
-  const riskLevel=portRR>=3?'Low':portRR>=1.5?'Medium':'High';
-  const riskLevelColor=portRR>=3?'#22c55e':portRR>=1.5?'#eab308':'#ef4444';
-  const dailyLossLimit=totalValue*0.05;
-  const remDailyRisk=Math.max(0,dailyLossLimit-Math.abs(dailyPnl));
+  // Portfolio Risk — R:R of open positions; empty book has no position risk.
+  const hasBook=items.length>0;
+  const riskLevel=!hasBook?'N/A':portRR>=3?'Low':portRR>=1.5?'Medium':'High';
+  const riskLevelColor=!hasBook?'#6b7280':portRR>=3?'#22c55e':portRR>=1.5?'#eab308':'#ef4444';
+  // Authoritative daily loss limit = cfg_daily_loss% of configured trading
+  // capital (engine: TRADING_AMOUNT × DAILY_MAX_LOSS_PCT) — not broker cash.
+  const cfgCap=parseFloat(d.cfg_trading_amount||0), cfgLossPct=parseFloat(d.cfg_daily_loss||0);
+  const dailyLossLimit=(cfgCap>0&&cfgLossPct>0)?cfgCap*cfgLossPct:totalValue*0.05;
+  // Only a negative day consumes the allowance — profit doesn't reduce it.
+  const remDailyRisk=Math.max(0,dailyLossLimit+Math.min(0,dailyPnl));
   const rewardRemainingPct=potReward+openRisk>0?potReward/(potReward+openRisk)*100:0;
   const trailOn=items.some(p=>parseFloat(p.trailing_stop||0)>0)?'ON':'OFF';
   const worst=items.length?items.slice().map(p=>{const avg=parseFloat(p.average_price||0); const ltp=parseFloat(p.last_price||avg); const qty=parseInt(p.quantity||0); return {s:p.tradingsymbol,pnl:(ltp-avg)*qty};}).sort((a,b)=>a.pnl-b.pnl)[0]:null;
   const worstName=worst?worst.s:'—';
-  setH('p-risk','<div style="grid-column:1/-1" class="card-sm"><div class="stat-label" style="font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#9ca3af;margin-bottom:10px">Portfolio Risk</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;font-size:13px"><div><div style="font-size:11px;color:#9ca3af">Open Risk</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rupee(openRisk)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Potential Reward</div><div style="font-size:16px;font-weight:700;color:#22c55e">'+rupee(potReward)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Reward Remaining</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rewardRemainingPct.toFixed(0)+'%</div></div><div><div style="font-size:11px;color:#9ca3af">Trail Protection</div><div style="font-size:16px;font-weight:700;color:'+(trailOn==='ON'?'#22c55e':'#6b7280')+'">'+trailOn+'</div></div><div><div style="font-size:11px;color:#9ca3af">Portfolio R:R</div><div style="font-size:16px;font-weight:700;color:'+riskLevelColor+'">1 : '+portRR.toFixed(1)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Risk Level</div><div style="font-size:16px;font-weight:700;color:'+riskLevelColor+'">'+riskLevel+'</div></div><div><div style="font-size:11px;color:#9ca3af">Remaining Daily Risk</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rupee(remDailyRisk)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Worst Position</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+worstName+'</div></div></div></div>');
+  setH('p-risk','<div style="grid-column:1/-1" class="card-sm"><div class="stat-label" style="font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#9ca3af;margin-bottom:10px">Portfolio Risk</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;font-size:13px"><div><div style="font-size:11px;color:#9ca3af">Open Risk</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rupee(openRisk)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Potential Reward</div><div style="font-size:16px;font-weight:700;color:#22c55e">'+rupee(potReward)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Reward Remaining</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rewardRemainingPct.toFixed(0)+'%</div></div><div><div style="font-size:11px;color:#9ca3af">Trail Protection</div><div style="font-size:16px;font-weight:700;color:'+(trailOn==='ON'?'#22c55e':'#6b7280')+'">'+trailOn+'</div></div><div><div style="font-size:11px;color:#9ca3af">Portfolio R:R</div><div style="font-size:16px;font-weight:700;color:'+riskLevelColor+'">1 : '+portRR.toFixed(1)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Position Risk (R:R)</div><div style="font-size:16px;font-weight:700;color:'+riskLevelColor+'">'+riskLevel+'</div></div><div><div style="font-size:11px;color:#9ca3af">Remaining Daily Risk</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+rupee(remDailyRisk)+'</div></div><div><div style="font-size:11px;color:#9ca3af">Worst Position</div><div style="font-size:16px;font-weight:700;color:#f9fafb">'+worstName+'</div></div></div></div>');
   setH('p-risk-meter','');
 
   // Performance time-range buttons
@@ -7124,8 +7160,20 @@ async function loadMonitoring(){
     const sql=m.sqlite||{};
     const hb=m.scheduler_heartbeat||{};
     const rh=m.reconciliation||{};
-    const k=m.kite||{};
+    // metrics.kite arrives as a bare boolean (or {ok}); treating a bool as
+    // {ok} always renders DOWN — read both shapes.
+    const kiteOk=typeof m.kite==='boolean'?m.kite:!!(m.kite&&m.kite.ok);
     const inet=m.internet;
+    // Engine heartbeat — the orchestrator's real liveness signal is the
+    // reconciliation sync stamp (same source as the top-bar Bot Status).
+    let engHb='—',engHbCls='';
+    if(rh.last_sync){
+      try{
+        const age=(Date.now()-new Date(String(rh.last_sync).replace(' ','T')).getTime())/1000;
+        if(age<300){engHb='OK · just now';engHbCls='green';}
+        else{engHb=Math.round(age/60)+'m ago';engHbCls='yellow';}
+      }catch(e){}
+    }
 
     const score=document.getElementById('mon-score');
     if(score){
@@ -7150,8 +7198,11 @@ async function loadMonitoring(){
         add('SQLite', sql.ok?'OK':'FAIL', sql.ok?'green':'red'),
         add('SQLite Latency', (sql.response_ms||0).toFixed(1)+'ms'),
         add('Internet', inet?'UP':'DOWN', inet?'green':'red'),
-        add('Kite', k.ok?'UP':'DOWN', k.ok?'green':'red'),
-        add('Scheduler', hb.ok?'OK':'MISSING', hb.ok?'green':'red'),
+        add('Kite', kiteOk?'UP':'DOWN', kiteOk?'green':'red'),
+        // The scheduler_heartbeat record has no writer in this build — say
+        // so instead of implying the scheduler itself is missing.
+        add('Scheduler', hb.ok?'OK':((hb.age_seconds||0)>=9999?'NOT INSTRUMENTED':'STALE'), hb.ok?'green':((hb.age_seconds||0)>=9999?'':'red')),
+        add('Engine Heartbeat', engHb, engHbCls),
         add('Reconciliation', rh.ok?'OK':'FAIL', rh.ok?'green':'red'),
         add('Data Quality', dqScore!=null?dqScore+'/100':'—', dqScore!=null?(dqScore>=70?'green':dqScore>=40?'yellow':'red'):'')
       ].join('');
@@ -7174,7 +7225,7 @@ async function loadMonitoring(){
       status.innerHTML=[
         row('SQLite', sql.ok),
         row('Internet', inet),
-        row('Kite', k.ok||k),
+        row('Kite', kiteOk),
         row('Scheduler Heartbeat', hb.ok),
         row('Reconciliation', rh.ok),
         row('AI Engine', m.ai_engine&&m.ai_engine.ok),
@@ -7186,7 +7237,9 @@ async function loadMonitoring(){
     const hblog=document.getElementById('mon-heartbeat');
     if(hblog){
       const logs=d.heartbeat_logs||[];
-      if(!logs.length){hblog.innerHTML='No data';}
+      // heartbeat_log has no writer in this build — say that plainly rather
+      // than implying the engine emits no liveness signal.
+      if(!logs.length){hblog.innerHTML='<span style="color:#6b7280">No heartbeat records — heartbeat writer not instrumented. Engine liveness is tracked via Reconciliation sync.</span>';}
       else{
         let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Source</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th><th style="padding:4px;text-align:right;color:#f9fafb">ms</th></tr></thead><tbody>';
         logs.forEach(h=>{
@@ -7699,7 +7752,7 @@ async function toggleIntradayKillSwitch(){
   }
 }
 
-function setIPOFilter(f){window._ipoFilter=f;try{sessionStorage.setItem('ipoFilter',f)}catch(e){}if(f==='HISTORY'){window._ipoHistPage=1;}loadIPOData();}
+function setIPOFilter(f){window._ipoFilter=f;try{sessionStorage.setItem('ipoFilter',f)}catch(e){}if(f==='HISTORY'){window._ipoHistPage=1;}_updatePageTitle();loadIPOData();}
 
 // IPO History — client-side search + pagination (25/page) over Closed + Listed
 function renderIPOHistory(){
@@ -10063,6 +10116,35 @@ def api_ai_learning():
         return jsonify({'error': str(e)}), 500
 
 
+def _correct_fii_dii_feed(metrics: dict, store) -> None:
+    """Fix the fii_dii freshness entry in a monitoring metrics payload.
+
+    get_latest_fii_dii orders by the free-text 'timestamp' column where
+    '31-Aug-2026' lexically outranks '27-Oct-2026', so it can report a
+    months-old row while a fresh observation exists. Re-derive this one
+    feed's age from the newest observation date and rescore data_quality.
+    """
+    try:
+        feeds = metrics.get('data_quality') or {}
+        f = feeds.get('fii_dii')
+        if f is None:
+            return
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT date FROM fii_dii ORDER BY date DESC, id DESC LIMIT 1"
+            ).fetchone()
+        if not row or not row[0]:
+            return
+        age = (datetime.now() - datetime.fromisoformat(str(row[0])[:10])).total_seconds() / 3600
+        f['age_hours'] = round(age, 1)
+        f['status'] = 'OK' if age <= (f.get('max_age_hours') or 72) else 'STALE'
+        metrics['data_quality_score'] = max(0, 100 + sum(
+            0 if x.get('status') == 'OK' else (-25 if x.get('critical') else -10)
+            for x in feeds.values()))
+    except Exception:
+        pass
+
+
 @app.route('/api/monitoring')
 def api_monitoring():
     """Latest system health snapshot and alert counts."""
@@ -10074,6 +10156,16 @@ def api_monitoring():
         alert_eng = EnterpriseAlertEngine(store=mon.store)
         metrics = mon.collect()
         mon.save_snapshot(metrics)
+        # Engine heartbeat — reconciliation.last_sync is the orchestrator's
+        # real cycle stamp; surface it so the monitor can show actual engine
+        # liveness next to the uninstrumented scheduler_heartbeat record.
+        try:
+            _rc = mon.store.get_broker_state('reconciliation') or {}
+            if _rc.get('last_sync'):
+                metrics.setdefault('reconciliation', {})['last_sync'] = _rc['last_sync']
+        except Exception:
+            pass
+        _correct_fii_dii_feed(metrics, mon.store)
         counts = alert_eng.daily_summary().get('counts', {'CRITICAL': 0, 'WARNING': 0, 'INFO': 0})
         return jsonify({
             'metrics': metrics,
