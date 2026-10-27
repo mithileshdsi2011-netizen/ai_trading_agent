@@ -122,3 +122,91 @@ class TestWorkspaceChip:
         body = _fn('_updateHdrWorkspace')
         assert 'INTRADAY' in body and 'PAPER' in body
         assert 'SWING' in body and 'LIVE' in body
+
+
+class TestNoFabricatedValues:
+    """Production financial/config values must come from API fields —
+    missing data renders N/A rather than a guessed constant."""
+
+    def test_no_hardcoded_paper_capital(self):
+        assert '₹10,000 configured' not in SRC
+        assert '₹10,000' not in SRC
+
+    def test_intraday_capital_from_api(self):
+        body = _fn('_intradayHdr')
+        assert 'paper_capital' in body
+        assert "rupee(d.paper_capital)" in body
+
+    def test_api_publishes_paper_capital(self):
+        m = re.search(r"def api_intraday_data", SRC)
+        assert m
+        seg = SRC[m.start():m.start() + 1500]
+        assert "paper_capital" in seg
+        assert "intraday_capital" in seg
+
+    def test_static_goal_placeholders_not_fabricated(self):
+        # Pre-load placeholders must not show invented rupee targets.
+        assert 'id="d-goal-profit-val">₹' not in SRC
+        assert 'id="d-goal-loss-val">₹' not in SRC
+        assert 'id="intraday-loss-limit">₹' not in SRC
+        assert 'id="intraday-pnl">₹' not in SRC
+
+    def test_config_cells_na_when_missing(self):
+        start = SRC.index("getElementById('bs-cfg-amount')")
+        end = SRC.index("bs-cfg-reentry')", start)
+        seg = SRC[start:end]
+        assert "N/A" in seg
+        for fabricated in ('||0.52', '||0.05)*100', '||0.10)*100', '||15', '||5000'):
+            assert fabricated not in seg, f'guessed default {fabricated}'
+
+    def test_goals_guarded_when_config_missing(self):
+        m = re.search(r'goalsKnown', SRC)
+        assert m
+        seg = SRC[m.start():m.start() + 2000]
+        assert 'N/A' in seg and 'goalsKnown' in seg
+
+    def test_journal_stats_na_without_closed_trades(self):
+        m = re.search(r"j-pf'\)\.textContent=hasClosed", SRC)
+        assert m, 'journal PF/avg cells must gate on hasClosed'
+
+
+class TestExecutionQueueIntegrity:
+    """Order queue must split working orders from terminal history, and
+    measurement KPIs must show N/A when no orders exist."""
+
+    def test_queue_splits_active_and_terminal(self):
+        m = re.search(r"getElementById\('exec-queue'\)", SRC)
+        assert m
+        seg = SRC[m.start():m.start() + 2500]
+        assert 'TERMINAL' in seg
+        assert 'REJECTED' in seg and 'FILLED' in seg and 'CANCELLED' in seg
+        assert 'Terminal — historical' in seg
+        assert 'No active queued orders' in seg
+
+    def test_exec_kpis_na_without_orders(self):
+        m = re.search(r"getElementById\('exec-kpi'\)", SRC)
+        assert m
+        seg = SRC[m.start():m.start() + 2000]
+        assert 'hasOrders' in seg and 'N/A' in seg
+
+    def test_no_phantom_fill_ratio(self):
+        # fill_ratio is not an API field — rendering it showed a fake 0%.
+        assert 'fill_ratio' not in SRC
+
+    def test_rejected_status_colored(self):
+        m = re.search(r"getElementById\('exec-queue'\)", SRC)
+        seg = SRC[m.start():m.start() + 2500]
+        assert '#f87171' in seg  # red for REJECTED
+
+
+class TestRefreshLifecycle:
+    def test_intraday_polling_gated_to_workspace(self):
+        m = re.search(
+            r"setInterval\(\(\)=>\{if\(typeof NAV_STATE!=='undefined'&&NAV_STATE\.ws==='intraday'\)loadIntradayData\(\);\},60000\)",
+            SRC)
+        assert m, 'intraday poll must only run while workspace is active'
+
+    def test_existing_polling_unchanged(self):
+        assert "setInterval(load,60000)" in SRC
+        assert "setInterval(loadJournal,120000)" in SRC
+        assert "setInterval(loadHealthBadge,60000)" in SRC

@@ -2012,7 +2012,7 @@ tr:last-child td{border:none}
     <div style="font-size:13px;font-weight:600;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">🎯 Daily Goals</div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div>
-        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Current P&L / Daily Target (of configured capital)</span><span style="font-size:12px" id="d-goal-profit-val">₹0 / ₹100</span></div>
+        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Current P&L / Daily Target (of configured capital)</span><span style="font-size:12px" id="d-goal-profit-val">—</span></div>
         <div class="progress-bar"><div class="progress-fill" id="d-goal-profit-bar" style="width:0%;background:#22c55e"></div></div>
       </div>
       <div>
@@ -2020,7 +2020,7 @@ tr:last-child td{border:none}
         <div class="progress-bar"><div class="progress-fill" id="d-goal-capital-bar" style="width:0%;background:#60a5fa"></div></div>
       </div>
       <div>
-        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Daily Loss Limit (of configured capital)</span><span style="font-size:12px" id="d-goal-loss-val">₹0 / ₹250</span></div>
+        <div class="flex justify-between mb-1"><span style="font-size:12px;color:#9ca3af">Daily Loss Limit (of configured capital)</span><span style="font-size:12px" id="d-goal-loss-val">—</span></div>
         <div class="progress-bar"><div class="progress-fill" id="d-goal-loss-bar" style="width:0%;background:#ef4444"></div></div>
       </div>
     </div>
@@ -3589,15 +3589,15 @@ tr:last-child td{border:none}
       </div>
       <div>
         <div style="color:#9ca3af;font-size:12px">Carryover P&L</div>
-        <div id="intraday-carryover-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
+        <div id="intraday-carryover-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">—</div>
       </div>
       <div>
         <div style="color:#9ca3af;font-size:12px">Total realized (today)</div>
-        <div id="intraday-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">₹0</div>
+        <div id="intraday-pnl" style="color:#f9fafb;font-size:18px;font-weight:700">—</div>
       </div>
       <div>
-        <div style="color:#9ca3af;font-size:12px" title="2% of configured PAPER capital ₹10,000">Daily Loss Limit</div>
-        <div id="intraday-loss-limit" style="color:#f9fafb;font-size:18px;font-weight:700">₹200</div>
+        <div style="color:#9ca3af;font-size:12px" id="intraday-loss-limit-label" title="Configured PAPER capital">Daily Loss Limit</div>
+        <div id="intraday-loss-limit" style="color:#f9fafb;font-size:18px;font-weight:700">—</div>
       </div>
     </div>
   </div>
@@ -3963,7 +3963,7 @@ function _initNav(){
 function _swingHdrCashPos(d){
   const cl=document.getElementById('hdr-cash-label');
   if(cl)cl.textContent='Available Cash';
-  const c=document.getElementById('hdr-cash');if(c)c.textContent=rupee(d.cash||0);
+  const c=document.getElementById('hdr-cash');if(c)c.textContent=d.cash!=null?rupee(d.cash):'N/A';
   const p=document.getElementById('hdr-positions');if(p)p.textContent=String(d.open_positions||0);
 }
 
@@ -4019,7 +4019,13 @@ function _intradayHdr(d){
   const cl=document.getElementById('hdr-cash-label');
   if(cl)cl.textContent='PAPER Capital';
   const c=document.getElementById('hdr-cash');
-  if(c)c.textContent='₹10,000 configured';  // actual configured PAPER capital
+  if(c)c.textContent=d.paper_capital!=null?rupee(d.paper_capital)+' configured':'—';
+  const ll=document.getElementById('intraday-loss-limit-label');
+  if(ll&&d.paper_capital!=null){
+    const pct=(d.daily_state&&d.daily_state.daily_loss_limit&&d.paper_capital)
+      ?Math.round(d.daily_state.daily_loss_limit/d.paper_capital*1000)/10:null;
+    ll.title=(pct!=null?pct+'% of configured ':'Configured ')+'PAPER capital '+rupee(d.paper_capital);
+  }
   const p=document.getElementById('hdr-positions');
   if(p)p.textContent=String((d.positions||[]).length);
   const ls=document.getElementById('hdr-last-scan');
@@ -4075,7 +4081,7 @@ function _renderIntradaySections(d){
     const pf=m.profit_factor!=null?Number(m.profit_factor).toFixed(2):'N/A';
     const wr=m.win_rate!=null?Number(m.win_rate).toFixed(1)+'%':'N/A';
     mg.innerHTML=[
-      _intradayCell('Net P&L', pnlStr(m.net_pnl||0), (m.net_pnl||0)>=0?'#22c55e':'#ef4444'),
+      _intradayCell('Net P&L (all-time)', pnlStr(m.net_pnl||0), (m.net_pnl||0)>=0?'#22c55e':'#ef4444'),
       _intradayCell('Gross Profit', rupee(m.gross_profit||0), '#22c55e'),
       _intradayCell('Gross Loss', rupee(m.gross_loss||0), '#ef4444'),
       _intradayCell('Trades', String(m.total_trades||0)),
@@ -5291,10 +5297,9 @@ async function load(){
 
     // ── TAB: DASHBOARD ────────────────────────────────────────────────────────
     const ph=d.portfolio_health||{};
-    const portVal=parseFloat(ph.account_value||0);
-    const budget=parseFloat(d.budget||5000);
+    const portVal=ph.account_value!=null?parseFloat(ph.account_value):NaN;
     const dpnl=parseFloat(d.daily_pnl||0);
-    document.getElementById('d-portfolio-value').textContent=rupee(portVal);
+    document.getElementById('d-portfolio-value').textContent=isNaN(portVal)?'N/A':rupee(portVal);
     const dret=portVal>0?(dpnl/portVal*100).toFixed(2):0;
     const dpnlEl=document.getElementById('d-daily-pnl');
     dpnlEl.textContent=pnlStr(dpnl);dpnlEl.className='stat-value '+(dpnl>=0?'green':'red');
@@ -5302,11 +5307,11 @@ async function load(){
     const retEl=document.getElementById('d-portfolio-return');
     retEl.innerHTML='<span class="'+(dpnl>=0?'green':'red')+'">'+pct(dret)+' today</span>';
     const cashEl=document.getElementById('d-cash');
-    cashEl.textContent=rupee(d.cash||0);
-    document.getElementById('d-cash-pct').textContent=Math.round((d.cash||0)/(d.cfg_trading_amount||15000)*100)+'% of budget';
+    cashEl.textContent=d.cash!=null?rupee(d.cash):'N/A';
+    document.getElementById('d-cash-pct').textContent=(d.cfg_trading_amount?Math.round((d.cash||0)/d.cfg_trading_amount*100)+'% of budget':'— of budget');
     const op=parseInt(d.open_positions||0);
     document.getElementById('d-open-pos').textContent=op;
-    document.getElementById('d-pos-detail').textContent=op+' / '+(d.cfg_max_positions||5)+' max';
+    document.getElementById('d-pos-detail').textContent=op+' / '+(d.cfg_max_positions!=null?d.cfg_max_positions:'N/A')+' max';
 
     // Risk monitor
     const an=d.analytics||{};
@@ -5461,9 +5466,10 @@ async function load(){
     document.getElementById('cu-pct').textContent=usedPct.toFixed(1)+'% used';
     const cuFunds=document.getElementById('cu-funds-vs-cfg');
     if(cuFunds){
-      const cfgCap=parseFloat(d.cfg_trading_amount||d.budget||0);
-      const gap=cash<cfgCap;
-      cuFunds.textContent=`Broker funds ${rupee(cash)} · Configured capital ${rupee(cfgCap)}`;
+      const cfgCap=d.cfg_trading_amount!=null?parseFloat(d.cfg_trading_amount)
+        :(d.budget!=null?parseFloat(d.budget):null);
+      const gap=cfgCap!=null&&cash<cfgCap;
+      cuFunds.textContent=`Broker funds ${rupee(cash)} · Configured capital ${cfgCap!=null?rupee(cfgCap):'N/A'}`;
       cuFunds.style.color=gap?'#facc15':'#9ca3af';
       if(gap) cuFunds.textContent+=' — broker below configured, BUY sizing limited';
     }
@@ -5474,7 +5480,8 @@ async function load(){
     document.getElementById('ai-rec-regime').className='stat-value-sm '+(regime==='BULL'?'green':regime==='BEAR'?'red':'yellow');
     // UNAVAILABLE regime = detection failed — fail-safe: never invite new buys
     const canBuyNew=!(d.economic_event_risk||{}).no_new_buy && openPos<maxPos && (d.market_open||false) && regime!=='BEAR' && regime!=='UNAVAILABLE' && !(d.cfg_volatile_block_buys!==false && regime==='VOLATILE');
-    const confidence=Math.min(100,Math.round(parseFloat(d.confidence||(d.portfolio_health||{}).confidence||70)));
+    const confSrc=d.confidence!=null?d.confidence:(d.portfolio_health||{}).confidence;
+    const confidence=confSrc!=null?Math.min(100,Math.round(parseFloat(confSrc))):null;
     const action=canBuyNew?'LOOK FOR BUY SETUPS':regime==='BEAR'?'STAY DEFENSIVE':regime==='UNAVAILABLE'?'REGIME UNAVAILABLE — STAND BY':'HOLD / WATCH';
     const advice=(dpnl||0)>=0?'Let winners run with trailing SLs':(dpnl||0)<-250?'Daily loss rising - reduce risk':'Hold existing positions';
     document.getElementById('ai-rec-action').textContent=action;
@@ -5482,7 +5489,7 @@ async function load(){
     document.getElementById('ai-rec-advice').textContent=advice;
     document.getElementById('ai-rec-new-buy').textContent=canBuyNew?'Yes':'No';
     document.getElementById('ai-rec-new-buy').className='stat-value-sm '+(canBuyNew?'green':'red');
-    document.getElementById('ai-rec-confidence').textContent=confidence+'%';
+    document.getElementById('ai-rec-confidence').textContent=confidence!=null?confidence+'%':'N/A';
 
     // Global Markets (simplified) — server-computed freshness verdict
     // (12h gate + all-zero check) wins over the local age fallback.
@@ -5646,18 +5653,28 @@ async function load(){
       ordEl.innerHTML='<div style="color:#4b5563;font-size:13px;padding:20px;text-align:center">No completed orders today</div>';
     }
 
-    // Daily goals
-    const tradeBudget=parseFloat(d.cfg_trading_amount||d.budget||15000);
-    const dailyTarget=Math.round(tradeBudget*(d.cfg_tgt_pct||0.10));
-    const dailyLossLimit=Math.round(tradeBudget*(d.cfg_daily_loss||0.05));
+    // Daily goals — only when the configured capital and pct are known;
+    // guessed defaults would fabricate targets that were never configured.
+    const tradeBudget=d.cfg_trading_amount!=null?parseFloat(d.cfg_trading_amount)
+      :(d.budget!=null?parseFloat(d.budget):NaN);
+    const goalsKnown=!isNaN(tradeBudget)&&d.cfg_tgt_pct!=null&&d.cfg_daily_loss!=null;
+    const dailyTarget=goalsKnown?Math.round(tradeBudget*d.cfg_tgt_pct):NaN;
+    const dailyLossLimit=goalsKnown?Math.round(tradeBudget*d.cfg_daily_loss):NaN;
     const currentPnl=dpnl;
-    const remaining=Math.max(0,dailyTarget-currentPnl);
-    document.getElementById('d-goal-profit-val').textContent=rupee(currentPnl)+' / '+rupee(dailyTarget);
-    document.getElementById('d-goal-profit-bar').style.width=Math.min(100,Math.max(0,currentPnl/dailyTarget*100))+'%';
-    document.getElementById('d-goal-capital-val').textContent=rupee(remaining)+' remaining';
-    document.getElementById('d-goal-capital-bar').style.width=Math.min(100,Math.max(0,(1-remaining/dailyTarget)*100))+'%';
-    document.getElementById('d-goal-loss-val').textContent=rupee(Math.abs(Math.min(0,currentPnl)))+' / '+rupee(dailyLossLimit);
-    document.getElementById('d-goal-loss-bar').style.width=Math.min(100,Math.abs(Math.min(0,currentPnl))/dailyLossLimit*100)+'%';
+    if(goalsKnown){
+      const remaining=Math.max(0,dailyTarget-currentPnl);
+      document.getElementById('d-goal-profit-val').textContent=rupee(currentPnl)+' / '+rupee(dailyTarget);
+      document.getElementById('d-goal-profit-bar').style.width=Math.min(100,Math.max(0,currentPnl/dailyTarget*100))+'%';
+      document.getElementById('d-goal-capital-val').textContent=rupee(remaining)+' remaining';
+      document.getElementById('d-goal-capital-bar').style.width=Math.min(100,Math.max(0,(1-remaining/dailyTarget)*100))+'%';
+      document.getElementById('d-goal-loss-val').textContent=rupee(Math.abs(Math.min(0,currentPnl)))+' / '+rupee(dailyLossLimit);
+      document.getElementById('d-goal-loss-bar').style.width=Math.min(100,Math.abs(Math.min(0,currentPnl))/dailyLossLimit*100)+'%';
+    }else{
+      for(const id of ['d-goal-profit-val','d-goal-capital-val','d-goal-loss-val'])
+        document.getElementById(id).textContent='N/A — target not configured';
+      for(const id of ['d-goal-profit-bar','d-goal-capital-bar','d-goal-loss-bar'])
+        document.getElementById(id).style.width='0%';
+    }
 
     // Notifications: detect changes
     if(prevData){
@@ -5932,39 +5949,43 @@ async function load(){
     const lk=d.market_regime_last_known;
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
     if(d.market_regime==='UNAVAILABLE'&&lk&&lk.value)bsrEl.innerHTML='UNAVAILABLE<br><span style="font-size:11px;color:#9ca3af">last: '+lk.value+' @ '+fmtDateTime(lk.at)+'</span>';
-    document.getElementById('bs-budget').textContent=rupee(d.budget||0);
+    document.getElementById('bs-budget').textContent=d.budget!=null?rupee(d.budget):'N/A';
     const bsLastScan=(d.last_scan&&d.last_scan!=='—')?d.last_scan:(d.market_open?'Awaiting first scan':'No completed scan');
     document.getElementById('bs-last-scan').textContent=bsLastScan+(d.scan_running?' · engine running':'');
     document.getElementById('bs-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Market closed');
     document.getElementById('bs-scanned').textContent=d.stocks_scanned?d.stocks_scanned.toLocaleString('en-IN'):(d.market_open?'No scan yet':'Market closed');
     document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
     document.getElementById('bs-orders-exec').textContent=d.orders_executed||0;
-    document.getElementById('bs-cfg-amount').textContent=rupee(d.cfg_trading_amount||d.budget||5000);
+    // Config display — N/A when the API omits a field; guessing a default
+    // would present an unconfigured value as the live configuration.
+    const _pct=(v,dp,unit)=>v==null?'N/A':(v*100).toFixed(dp)+unit;
+    document.getElementById('bs-cfg-amount').textContent=
+      d.cfg_trading_amount!=null?rupee(d.cfg_trading_amount):(d.budget!=null?rupee(d.budget):'N/A');
     const bsCash=document.getElementById('bs-cfg-broker-cash');
     if(bsCash)bsCash.textContent=d.cash!=null?rupee(d.cash):'N/A';
-    document.getElementById('bs-cfg-maxpos').textContent=(d.cfg_max_positions||5);
-    document.getElementById('bs-cfg-conf').textContent=((d.cfg_min_confidence||0.52)*100).toFixed(0)+'%';
-    document.getElementById('bs-cfg-sl').textContent=((d.cfg_sl_pct||0.05)*100).toFixed(1)+'%';
-    document.getElementById('bs-cfg-tgt').textContent=((d.cfg_tgt_pct||0.10)*100).toFixed(1)+'%';
-    document.getElementById('bs-cfg-cap').textContent=((d.cfg_max_capital||0.95)*100).toFixed(0)+'%';
-    document.getElementById('bs-cfg-loss').textContent=((d.cfg_daily_loss||0.05)*100).toFixed(1)+'%';
-    document.getElementById('bs-cfg-risk').textContent=((d.cfg_risk_per_trade||0.02)*100).toFixed(1)+'% of capital';
-    document.getElementById('bs-cfg-holddays').textContent=(d.cfg_swing_max_hold_days||15)+' days';
-    document.getElementById('bs-cfg-reentry').textContent=(d.cfg_reentry_cooldown_hours||4)+'h cooldown';
+    document.getElementById('bs-cfg-maxpos').textContent=d.cfg_max_positions!=null?d.cfg_max_positions:'N/A';
+    document.getElementById('bs-cfg-conf').textContent=_pct(d.cfg_min_confidence,0,'%');
+    document.getElementById('bs-cfg-sl').textContent=_pct(d.cfg_sl_pct,1,'%');
+    document.getElementById('bs-cfg-tgt').textContent=_pct(d.cfg_tgt_pct,1,'%');
+    document.getElementById('bs-cfg-cap').textContent=_pct(d.cfg_max_capital,0,'%');
+    document.getElementById('bs-cfg-loss').textContent=_pct(d.cfg_daily_loss,1,'%');
+    document.getElementById('bs-cfg-risk').textContent=d.cfg_risk_per_trade!=null?(d.cfg_risk_per_trade*100).toFixed(1)+'% of capital':'N/A';
+    document.getElementById('bs-cfg-holddays').textContent=d.cfg_swing_max_hold_days!=null?d.cfg_swing_max_hold_days+' days':'N/A';
+    document.getElementById('bs-cfg-reentry').textContent=d.cfg_reentry_cooldown_hours!=null?d.cfg_reentry_cooldown_hours+'h cooldown':'N/A';
 
     // Position capacity bar
     const posOpen=parseInt(d.open_positions||0);
-    const posMax=parseInt(d.cfg_max_positions||7);
+    const posMax=parseInt(d.cfg_max_positions||0);
     const posBarEl=document.getElementById('bs-pos-bar');
-    const posPct=Math.min(posOpen/posMax*100,100);
+    const posPct=posMax>0?Math.min(posOpen/posMax*100,100):0;
     if(posBarEl){
       posBarEl.style.width=posPct+'%';
       posBarEl.style.background=posPct>=100?'#ef4444':posPct>=80?'#eab308':'#3b82f6';
     }
     const posLbl=document.getElementById('bs-pos-label');
-    if(posLbl) posLbl.textContent=posOpen+' / '+posMax;
+    if(posLbl) posLbl.textContent=posMax>0?posOpen+' / '+posMax:posOpen+' / N/A';
     const posMaxLbl=document.getElementById('bs-pos-max');
-    if(posMaxLbl) posMaxLbl.textContent=posMax+' max slots';
+    if(posMaxLbl) posMaxLbl.textContent=posMax>0?posMax+' max slots':'max slots N/A';
 
     // Daily P&L in health section
     const bsDpnl=parseFloat(d.daily_pnl||0);
@@ -6055,10 +6076,10 @@ async function loadJournal(){
     npEl.className='stat-value '+(np>=0?'green':'red');
     const pfVal=parseFloat(j.profit_factor||0);
     const noLosses=(j.avg_loss||0)===0&&(j.avg_win||0)>0&&(j.total_trades||0)>0;
-    document.getElementById('j-pf').textContent=noLosses?'∞':pfVal.toFixed(2);
-    document.getElementById('j-avgwin').textContent=rupee(j.avg_win||0);
-    document.getElementById('j-avgloss').textContent=rupee(j.avg_loss||0);
-    document.getElementById('j-avgscore').textContent=(j.avg_score||0).toFixed(1)+'/100';
+    document.getElementById('j-pf').textContent=hasClosed?(noLosses?'∞':pfVal.toFixed(2)):'—';
+    document.getElementById('j-avgwin').textContent=hasClosed?rupee(j.avg_win||0):'—';
+    document.getElementById('j-avgloss').textContent=hasClosed?rupee(j.avg_loss||0):'—';
+    document.getElementById('j-avgscore').textContent=hasClosed?(j.avg_score||0).toFixed(1)+'/100':'—';
     const hs=j.holding_stats||{};
     const fmtHold=(v,h)=>{v=parseFloat(v)||0;h=parseFloat(h)||0;if(v>=1)return v.toFixed(1)+'d';if(h>0)return h.toFixed(1)+'h';return v+'d';};
     document.getElementById('j-avghold').textContent=fmtHold(j.avg_hold_days, (j.avg_hold_days||0)*24);
@@ -6872,6 +6893,7 @@ _initNav();
 setInterval(load,60000);
 setInterval(loadJournal,120000);
 setInterval(loadHealthBadge,60000);
+setInterval(()=>{if(typeof NAV_STATE!=='undefined'&&NAV_STATE.ws==='intraday')loadIntradayData();},60000);
 
 // ─── Ask AI Chat ──────────────────────────────────────────────────────────────
 function chipAsk(el){ document.getElementById('chat-input').value=el.textContent; sendChat(); }
@@ -7210,16 +7232,18 @@ async function loadSmartExecution(){
     const kpi=document.getElementById('exec-kpi');
     if(kpi){
       const add=(label,value,color='')=>`<div class="card-sm"><div class="stat-label">${label}</div><div class="stat-value-sm ${color}">${value}</div></div>`;
+      const hasOrders=(d.today_orders||0)>0;
+      // No measurements today — N/A is honest; 0% / 0 ms would be misleading.
       kpi.innerHTML=[
         add('Today Orders', d.today_orders||0),
         add('Filled', d.filled||0, 'green'),
         add('Partial', d.partial||0, 'orange'),
         add('Rejected', d.rejected||0, 'red'),
-        add('Avg Slippage', (d.avg_slippage_pct||0).toFixed(3)+'%'),
-        add('Avg Fill Time', (d.avg_fill_time_ms||0)+'ms'),
-        add('Broker Latency', (d.broker_latency_ms||0)+'ms'),
-        add('Success %', (d.success_rate_pct||0).toFixed(1)+'%', d.success_rate_pct>=80?'green':''),
-        add('Avg Retries', (d.avg_retry_count||0).toFixed(2))
+        add('Avg Slippage', hasOrders?(d.avg_slippage_pct||0).toFixed(3)+'%':'N/A'),
+        add('Avg Fill Time', hasOrders?(d.avg_fill_time_ms||0)+'ms':'N/A'),
+        add('Broker Latency', hasOrders?(d.broker_latency_ms||0)+'ms':'N/A'),
+        add('Success %', hasOrders?(d.success_rate_pct||0).toFixed(1)+'%':'N/A', d.success_rate_pct>=80?'green':''),
+        add('Avg Retries', hasOrders?(d.avg_retry_count||0).toFixed(2):'N/A')
       ].join('');
     }
     const orders=document.getElementById('exec-orders');
@@ -7239,19 +7263,27 @@ async function loadSmartExecution(){
     const queue=document.getElementById('exec-queue');
     if(queue){
       const list=d.queue||[];
-      if(!list.length){queue.innerHTML='No queued orders';}
-      else{
-        let rows='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
-        list.forEach(o=>{
-          rows+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.strategy}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.status}</td></tr>`;
+      // Queue rows persist permanently — split working orders from terminal
+      // (REJECTED/FILLED/CANCELLED) history so dead rows don't look live.
+      const TERMINAL={'REJECTED':1,'FILLED':1,'CANCELLED':1,'COMPLETE':1,'COMPLETED':1,'PERMANENT_REJECTED':1,'EXPIRED':1};
+      const active=list.filter(o=>!TERMINAL[(o.status||'').toUpperCase()]);
+      const terminal=list.filter(o=>TERMINAL[(o.status||'').toUpperCase()]);
+      const stColor=s=>{const u=(s||'').toUpperCase();
+        return u==='FILLED'||u==='COMPLETE'||u==='COMPLETED'?'#4ade80'
+          :u==='REJECTED'||u==='PERMANENT_REJECTED'?'#f87171'
+          :u==='CANCELLED'||u==='EXPIRED'?'#9ca3af':'#fbbf24';};
+      const tbl=rows=>{let h='<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#1f2937"><th style="padding:4px;text-align:left;color:#f9fafb">Time</th><th style="padding:4px;text-align:left;color:#f9fafb">Symbol</th><th style="padding:4px;text-align:left;color:#f9fafb">Side</th><th style="padding:4px;text-align:right;color:#f9fafb">Qty</th><th style="padding:4px;text-align:left;color:#f9fafb">Strategy</th><th style="padding:4px;text-align:left;color:#f9fafb">Status</th></tr></thead><tbody>';
+        rows.forEach(o=>{
+          h+=`<tr><td style="padding:4px;color:#9ca3af;border-bottom:1px solid #374151;font-size:11px">${fmtDateTime(o.timestamp,true)}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.symbol}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.side}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px;text-align:right">${o.quantity}</td><td style="padding:4px;color:#f9fafb;border-bottom:1px solid #374151;font-size:11px">${o.strategy}</td><td style="padding:4px;color:${stColor(o.status)};border-bottom:1px solid #374151;font-size:11px;font-weight:600">${o.status}</td></tr>`;
         });
-        rows+='</tbody></table>';
-        queue.innerHTML=rows;
-      }
+        return h+'</tbody></table>';};
+      queue.innerHTML=(active.length?tbl(active):'<div style="color:#4b5563;padding:8px">No active queued orders</div>')
+        +(terminal.length?`<div style="font-size:11px;color:#6b7280;margin:10px 0 4px;text-transform:uppercase;letter-spacing:.05em">Terminal — historical (${terminal.length})</div>`+tbl(terminal):'');
     }
     const analytics=document.getElementById('exec-analytics');
     if(analytics){
-      analytics.innerHTML=`<div class="grid grid-cols-2 md:grid-cols-3 gap-3"><div class="card-sm"><div class="stat-label">Fill Ratio</div><div class="stat-value-sm">${((d.fill_ratio||0)*100).toFixed(1)}%</div></div><div class="card-sm"><div class="stat-label">Avg Broker Latency</div><div class="stat-value-sm">${d.broker_latency_ms||0}ms</div></div><div class="card-sm"><div class="stat-label">Avg Retry Count</div><div class="stat-value-sm">${(d.avg_retry_count||0).toFixed(2)}</div></div></div>`;
+      const hasOrd=(d.today_orders||0)>0;
+      analytics.innerHTML=`<div class="grid grid-cols-2 md:grid-cols-3 gap-3"><div class="card-sm"><div class="stat-label">Filled / Today</div><div class="stat-value-sm">${hasOrd?(d.filled||0)+' / '+(d.today_orders||0):'N/A'}</div></div><div class="card-sm"><div class="stat-label">Avg Broker Latency</div><div class="stat-value-sm">${hasOrd?(d.broker_latency_ms||0)+'ms':'N/A'}</div></div><div class="card-sm"><div class="stat-label">Avg Retry Count</div><div class="stat-value-sm">${hasOrd?(d.avg_retry_count||0).toFixed(2):'N/A'}</div></div></div>`;
     }
   }catch(e){console.error('Smart execution load error:',e);}
 }
@@ -10262,7 +10294,13 @@ def api_intraday_data():
         except Exception as cycle_err:
             logger.error(f"Intraday cycle error: {cycle_err}")
 
-        return jsonify(engine.get_status())
+        status = engine.get_status()
+        try:
+            # Authoritative configured PAPER capital — never a UI constant.
+            status['paper_capital'] = float(getattr(engine.config, 'intraday_capital', 0) or 0)
+        except Exception:
+            status['paper_capital'] = None
+        return jsonify(status)
     except Exception as e:
         logger.error(f"Intraday data API error: {e}")
         import traceback
