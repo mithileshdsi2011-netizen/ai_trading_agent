@@ -3863,7 +3863,7 @@ function _updateHdrWorkspace(){
   }
   // Re-point the context fields at the active workspace's cached data.
   if(NAV_STATE.ws==='intraday'&&window._lastIntradayData)_intradayHdr(window._lastIntradayData);
-  if(NAV_STATE.ws==='swing'&&window._lastData)_swingHdrCashPos(window._lastData);
+  if(NAV_STATE.ws==='swing'&&window._lastData)_swingHdr(window._lastData);
 }
 
 function _persistNav(){
@@ -3967,6 +3967,46 @@ function _swingHdrCashPos(d){
   const p=document.getElementById('hdr-positions');if(p)p.textContent=String(d.open_positions||0);
 }
 
+function _swingHdr(d){
+  // Context-specific status bar for the Swing workspace — Zerodha Kite only.
+  // Paints EVERY swing-owned field so switching workspaces never leaves
+  // intraday values behind.
+  const mktEl=document.getElementById('hdr-market');
+  if(d.market_open){mktEl.innerHTML='<span class="green">🟢 OPEN</span>';}
+  else{mktEl.innerHTML='<span class="red">🔴 CLOSED</span>';}
+  const bMode=(d.broker_mode||(d.paper_trading?'PAPER':'UNKNOWN')).toUpperCase();
+  const bStart=d.broker_startup_timestamp&&d.broker_startup_timestamp!=='—'
+    ?' · '+new Date(d.broker_startup_timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+    :'';
+  const modeEl=document.getElementById('hdr-mode');
+  modeEl.textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
+  modeEl.style.color='#60a5fa';
+  const lastScanBase=(d.last_scan&&d.last_scan!=='—')?d.last_scan
+    :(d.market_open?'Awaiting first scan':'No completed scan');
+  document.getElementById('hdr-last-scan').textContent=lastScanBase+(d.scan_running?' · scanning now':'');
+  document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Paused — market closed');
+  // Bot status from the orchestrator's actual heartbeat — reconciliation
+  // last_sync is written every engine cycle, not inferred from broker auth.
+  const rs=d.reconciliation_status||{};
+  let hbAge=NaN;
+  if(rs.last_sync){try{hbAge=(Date.now()-new Date(String(rs.last_sync).replace(' ','T')).getTime())/1000;}catch(e){}}
+  const stEl=document.getElementById('hdr-status');
+  let stat,col;
+  if(d.scan_running){stat='🟢 Scanning';col='#22c55e';}
+  else if(!isNaN(hbAge)&&hbAge<300){stat='🟢 Running';col='#22c55e';}
+  else if(!isNaN(hbAge)){stat='🟠 Heartbeat '+Math.round(hbAge/60)+'m ago';col='#f59e0b';}
+  else{stat='🔴 Engine offline';col='#ef4444';}
+  if(!d.kite_ok)stat+=' · broker offline';
+  stEl.innerHTML='<span style="color:'+col+'">'+stat+'</span>';
+  const tk=document.getElementById('hdr-token');
+  let expTs=null;
+  try{expTs=new Date(d.token_expiry);}catch(e){}
+  const expired=expTs&&!isNaN(expTs)&&expTs.getTime()<Date.now();
+  tk.textContent=fmtDateTime(d.token_expiry,true)||'—';
+  if(expired)tk.innerHTML='<span style="color:#ef4444">'+(fmtDateTime(d.token_expiry,true)||'—')+' · EXPIRED</span>';
+  _swingHdrCashPos(d);
+}
+
 function _intradayHdr(d){
   // Context-specific status bar for the Intraday workspace — Angel PAPER only.
   const mktEl=document.getElementById('hdr-market');
@@ -3985,21 +4025,36 @@ function _intradayHdr(d){
   const ls=document.getElementById('hdr-last-scan');
   if(ls){
     const last=d.last_scan_time?fmtDateTime(d.last_scan_time,true):'No completed scan';
-    ls.textContent=last+(d.cycle_running?' · engine running':'');
+    ls.textContent=last+(d.cycle_running?' · scanning now':'');
   }
+  const sch=d.scheduler||{};
   const ns=document.getElementById('hdr-next-scan');
   if(ns){
-    const sch=d.scheduler||{};
-    ns.textContent=d.market_session==='OPEN'
-      ? (sch.next_scan||sch.next_run||'Awaiting schedule')
-      : 'Paused — market closed';
+    // Next scheduler wake-up, computed from the last tick when the backend
+    // does not publish an explicit next_scan/next_run.
+    let nxt=sch.next_scan||sch.next_run;
+    if(!nxt&&sch.last_tick&&sch.expected_interval_seconds){
+      try{
+        const t=new Date(String(sch.last_tick).replace(' ','T')).getTime()+sch.expected_interval_seconds*1000;
+        nxt=new Date(t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+      }catch(e){}
+    }
+    if(nxt){ns.textContent=nxt+(d.market_session==='OPEN'?'':' · idle (market closed)');}
+    else{ns.textContent=d.market_session==='OPEN'?'Awaiting schedule':'Paused — market closed';}
   }
   const st=document.getElementById('hdr-status');
   if(st){
-    const es=d.engine_state_display||'—';
-    st.innerHTML=es==='SCANNING'?'<span class="green">🟢 '+es+'</span>'
-      :es==='MONITORING'?'<span style="color:#3b82f6">🔵 '+es+'</span>'
-      :'<span class="red">🔴 '+es+'</span>';
+    // Distinguish kill switch / engine failure / idle-closed / auth wait —
+    // engine_state_display='STOPPED' alone conflates them.
+    const schAlive=!(sch.running===false||sch.thread_alive===false);
+    let stat,col;
+    if(d.kill_switch){stat='🔴 STOPPED (kill switch)';col='#ef4444';}
+    else if(!schAlive){stat='🔴 Engine down';col='#ef4444';}
+    else if(d.cycle_running){stat='🟢 Scanning';col='#22c55e';}
+    else if(d.market_session==='CLOSED'){stat='⚪ Idle — market closed';col='#9ca3af';}
+    else if((d.engine_state||'').startsWith('AUTH')){stat='🟠 Awaiting auth';col='#f59e0b';}
+    else{stat='🟢 Monitoring';col='#22c55e';}
+    st.innerHTML='<span style="color:'+col+'">'+stat+'</span>';
   }
   const tk=document.getElementById('hdr-token');
   if(tk)tk.textContent='Angel: '+(d.auth_status||'—');
@@ -5232,25 +5287,7 @@ async function load(){
     // ── HEADER (Swing context — skipped while viewing the Intraday workspace
     // so the two engines' states never overwrite each other) ─────────────────
     document.getElementById('last-updated').textContent='Last updated: '+now.toLocaleTimeString('en-IN');
-    if(typeof NAV_STATE!=='undefined'&&NAV_STATE.ws==='swing'){
-    const mktEl=document.getElementById('hdr-market');
-    if(d.market_open){mktEl.innerHTML='<span class="green">🟢 OPEN</span>';}
-    else{mktEl.innerHTML='<span class="red">🔴 CLOSED</span>';}
-    const bMode = (d.broker_mode || (d.paper_trading ? 'PAPER' : 'UNKNOWN')).toUpperCase();
-    const bStart = d.broker_startup_timestamp && d.broker_startup_timestamp !== '—'
-        ? ' · ' + new Date(d.broker_startup_timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
-        : '';
-    document.getElementById('hdr-mode').textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
-    // Distinguish: engine activity vs market scanning vs paused.
-    const lastScanBase=(d.last_scan&&d.last_scan!=='—')?d.last_scan
-      :(d.market_open?'Awaiting first scan':'No completed scan');
-    document.getElementById('hdr-last-scan').textContent=lastScanBase+(d.scan_running?' · engine running':'');
-    document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Paused — market closed');
-    const stEl=document.getElementById('hdr-status');
-    stEl.innerHTML=d.kite_ok?'<span class="green">🟢 Running</span>':'<span class="red">🔴 Offline</span>';
-    document.getElementById('hdr-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
-    _swingHdrCashPos(d);
-    }
+    if(typeof NAV_STATE!=='undefined'&&NAV_STATE.ws==='swing')_swingHdr(d);
 
     // ── TAB: DASHBOARD ────────────────────────────────────────────────────────
     const ph=d.portfolio_health||{};
@@ -5883,8 +5920,13 @@ async function load(){
     // ── TAB: BOT STATUS ───────────────────────────────────────────────────────
     document.getElementById('bs-kite').innerHTML=d.kite_ok?'<span class="green">✅ Connected</span>':'<span class="red">❌ Offline</span>';
     document.getElementById('bs-mode').textContent=(d.trading_mode||'swing').toUpperCase();
-    document.getElementById('bs-token').textContent=fmtDateTime(d.token_expiry,true)||'—';
-    document.getElementById('bs-token2').textContent=fmtDateTime(d.token_expiry,true)||'—';
+    let _tokExp=null;try{_tokExp=new Date(d.token_expiry);}catch(e){}
+    const _tokExpired=_tokExp&&!isNaN(_tokExp)&&_tokExp.getTime()<Date.now();
+    const _tokLbl=(fmtDateTime(d.token_expiry,true)||'—')+(_tokExpired?' · EXPIRED':'');
+    const bsTokEl=document.getElementById('bs-token');
+    bsTokEl.textContent=_tokLbl;bsTokEl.style.color=_tokExpired?'#ef4444':'';
+    const bsTok2El=document.getElementById('bs-token2');
+    bsTok2El.textContent=_tokLbl;bsTok2El.style.color=_tokExpired?'#ef4444':'';
     document.getElementById('bs-paper').innerHTML=d.paper_trading?'<span class="yellow">⚠️ Paper Mode</span>':'<span class="green">✅ Live Trading</span>';
     const bsrEl=document.getElementById('bs-regime');
     const lk=d.market_regime_last_known;
@@ -5960,7 +6002,12 @@ async function load(){
     const rsHealthyEl=document.getElementById('rs-healthy');
     if(rsHealthyEl){rsHealthyEl.innerHTML=rs.healthy?'<span class="green">✅ Synced</span>':'<span class="red">❌ Out of sync</span>';}
     const rsLastEl=document.getElementById('rs-last-sync');
-    if(rsLastEl){rsLastEl.textContent=fmtDateTime(rs.last_sync)||'—';}
+    if(rsLastEl){
+      let rsAge=NaN;
+      try{rsAge=(Date.now()-new Date(String(rs.last_sync).replace(' ','T')).getTime())/60000;}catch(e){}
+      rsLastEl.textContent=(fmtDateTime(rs.last_sync)||'—')+(rs.last_sync&&!isNaN(rsAge)&&rsAge>10?' (stale '+Math.round(rsAge)+'m)':'');
+      rsLastEl.style.color=(rs.last_sync&&(isNaN(rsAge)||rsAge>10))?'#f59e0b':'';
+    }
     const rsObjEl=document.getElementById('rs-objects');
     if(rsObjEl){
       const oc=rs.objects_checked||{};
@@ -7434,9 +7481,12 @@ async function loadIntradayData(){
     if(tradingStatus){
       // Engine activity only — SCANNING / MONITORING / STOPPED. Entry
       // permission is its own box now; the limit banner moved there.
-      const es=d.engine_state_display||d.engine_state||(d.trading_blocked?'STOPPED':'MONITORING');
+      const schAlive2=!(d.scheduler&&(d.scheduler.running===false||d.scheduler.thread_alive===false));
+      let es=d.engine_state_display||d.engine_state||(d.trading_blocked?'STOPPED':'MONITORING');
+      if(!schAlive2){es='ENGINE DOWN';}
+      else if(es==='STOPPED'&&d.market_session==='CLOSED'&&!d.kill_switch){es='IDLE — MARKET CLOSED';}
       tradingStatus.textContent=es;
-      tradingStatus.style.color=es==='MONITORING'?'#10b981':es==='SCANNING'?'#3b82f6':'#ef4444';
+      tradingStatus.style.color=es==='MONITORING'?'#10b981':es==='SCANNING'?'#3b82f6':es==='IDLE — MARKET CLOSED'?'#9ca3af':'#ef4444';
     }
 
     const permEl=document.getElementById('intraday-entry-permission');
