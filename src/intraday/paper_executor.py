@@ -159,18 +159,30 @@ class PaperTradeExecutor:
             position.realized_pnl = net_pnl
             position.status = PositionStatus.CLOSED
             
-            # Exit-price provenance — the quote behind position.current_price.
-            # VERIFIED only when a broker quote receipt time exists and is
-            # fresh at decision time; anything missing/stale stays UNVERIFIED.
+            # Exit-price provenance — VERIFIED only when every link in the
+            # chain is proven: a real Angel broker quote, for this symbol,
+            # on NSE, whose price is exactly the recorded exit price, with a
+            # local receipt timestamp 0–30s old at decision time. Any missing,
+            # mismatched, stale or future-dated link stays UNVERIFIED.
             received_at = position.current_price_updated_at
             exchange_ts = position.current_price_exchange_ts
+            quote_symbol = position.current_price_quote_symbol
+            quote_exchange = position.current_price_quote_exchange
             age_s = ((position.exit_time - received_at).total_seconds()
                      if received_at else None)
-            exit_price_source = (
-                'VERIFIED'
-                if age_s is not None and 0 <= age_s <= EXIT_QUOTE_MAX_AGE_S
-                else 'UNVERIFIED'
+            symbol_ok = (
+                quote_symbol is not None
+                and quote_symbol.split('-')[0] == position.symbol
             )
+            verified = (
+                received_at is not None
+                and age_s is not None
+                and 0 <= age_s <= EXIT_QUOTE_MAX_AGE_S   # future ts → age<0 → reject
+                and exit_price == position.current_price  # exit derives from that quote
+                and symbol_ok
+                and quote_exchange == 'NSE'
+            )
+            exit_price_source = 'VERIFIED' if verified else 'UNVERIFIED'
 
             # Create trade record
             trade = IntradayTrade(
@@ -199,6 +211,8 @@ class PaperTradeExecutor:
                 exit_exchange_ts=exchange_ts,
                 exit_quote_received_at=received_at,
                 exit_quote_age_s=age_s,
+                exit_quote_symbol=quote_symbol,
+                exit_quote_exchange=quote_exchange,
             )
             
             # Update risk manager
@@ -243,6 +257,13 @@ class PaperTradeExecutor:
                 quote = quotes.get(position.symbol) if quotes else None
                 position.current_price_exchange_ts = (
                     quote.get('exchange_ts') if isinstance(quote, dict) else None
+                )
+                position.current_price_quote_symbol = (
+                    (quote.get('trading_symbol') or position.symbol)
+                    if isinstance(quote, dict) else None
+                )
+                position.current_price_quote_exchange = (
+                    quote.get('exchange') if isinstance(quote, dict) else None
                 )
                 
                 # Calculate unrealized P&L

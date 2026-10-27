@@ -70,6 +70,8 @@ class IntradayTradeManager:
             data['exit_time'] = _dt(trade_data.get('exit_time'))
             data['exit_exchange_ts'] = _dt(trade_data.get('exit_exchange_ts'))
             data['exit_quote_received_at'] = _dt(trade_data.get('exit_quote_received_at'))
+            data['exit_quote_symbol'] = trade_data.get('exit_quote_symbol')
+            data['exit_quote_exchange'] = trade_data.get('exit_quote_exchange')
 
             return IntradayTrade(**data)
         except Exception as e:
@@ -111,6 +113,8 @@ class IntradayTradeManager:
                     'exit_quote_received_at': trade.exit_quote_received_at.isoformat()
                         if isinstance(trade.exit_quote_received_at, datetime) else trade.exit_quote_received_at,
                     'exit_quote_age_s': trade.exit_quote_age_s,
+                    'exit_quote_symbol': trade.exit_quote_symbol,
+                    'exit_quote_exchange': trade.exit_quote_exchange,
                 }
                 trade_dicts.append(trade_dict)
             

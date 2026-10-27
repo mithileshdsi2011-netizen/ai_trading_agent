@@ -119,10 +119,13 @@ class IntradayPosition:
     is_paper: bool = True
 
     # Quote provenance for the price currently held in current_price —
-    # local receipt timestamp and genuine exchange timestamp when the
-    # broker quote carries one. None means provenance unknown.
+    # local receipt timestamp, genuine exchange timestamp when the
+    # broker quote carries one, and the symbol/exchange the quote was
+    # for. None means provenance unknown.
     current_price_updated_at: Optional[datetime] = None
     current_price_exchange_ts: Optional[datetime] = None
+    current_price_quote_symbol: Optional[str] = None
+    current_price_quote_exchange: Optional[str] = None
 
 
 @dataclass
@@ -169,6 +172,8 @@ class IntradayTrade:
     exit_exchange_ts: Optional[datetime] = None
     exit_quote_received_at: Optional[datetime] = None
     exit_quote_age_s: Optional[float] = None
+    exit_quote_symbol: Optional[str] = None
+    exit_quote_exchange: Optional[str] = None
 
 
 @dataclass

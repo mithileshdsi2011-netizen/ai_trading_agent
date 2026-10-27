@@ -50,6 +50,8 @@ def _serialize_position(pos: IntradayPosition) -> Dict[str, Any]:
         'is_paper': pos.is_paper,
         'current_price_updated_at': pos.current_price_updated_at.isoformat() if isinstance(pos.current_price_updated_at, datetime) else None,
         'current_price_exchange_ts': pos.current_price_exchange_ts.isoformat() if isinstance(pos.current_price_exchange_ts, datetime) else None,
+        'current_price_quote_symbol': pos.current_price_quote_symbol,
+        'current_price_quote_exchange': pos.current_price_quote_exchange,
     }
 
 
@@ -86,6 +88,8 @@ def _deserialize_position(data: Dict[str, Any]) -> IntradayPosition:
         is_paper=bool(data.get('is_paper', True)),
         current_price_updated_at=_dt(data.get('current_price_updated_at')),
         current_price_exchange_ts=_dt(data.get('current_price_exchange_ts')),
+        current_price_quote_symbol=data.get('current_price_quote_symbol'),
+        current_price_quote_exchange=data.get('current_price_quote_exchange'),
     )
 
 

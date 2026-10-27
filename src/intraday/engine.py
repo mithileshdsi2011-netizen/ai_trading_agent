@@ -918,6 +918,8 @@ class IntradayEngine:
                     'exit_quote_received_at': trade.exit_quote_received_at.isoformat()
                         if isinstance(trade.exit_quote_received_at, datetime) else None,
                     'exit_quote_age_s': trade.exit_quote_age_s,
+                    'exit_quote_symbol': trade.exit_quote_symbol,
+                    'exit_quote_exchange': trade.exit_quote_exchange,
                 })
             except Exception as e:
                 logger.error(f"[INTRADAY] History serialize error: {e}")

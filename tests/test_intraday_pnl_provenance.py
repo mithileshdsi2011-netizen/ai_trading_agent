@@ -102,28 +102,40 @@ class TestChargesSign:
             assert t.net_pnl == pytest.approx(t.gross_pnl - abs(t.charges))
 
 
+def _provenanced(direction=SignalDirection.LONG, exit_price=101.0,
+                 symbol='TEST', **kw):
+    """Position whose current_price carries full VERIFIED-grade provenance."""
+    kw.setdefault('current_price_updated_at', datetime.now())
+    kw.setdefault('current_price_quote_symbol', symbol)
+    kw.setdefault('current_price_quote_exchange', 'NSE')
+    kw.setdefault('current_price', exit_price)
+    return _position(direction, symbol=symbol, **kw)
+
+
 class TestExitPriceProvenance:
     """VERIFIED only for a fresh broker-quote receipt; else UNVERIFIED."""
 
     def test_fresh_quote_is_verified(self):
         ex, rm = _executor()
-        pos = _position(current_price_updated_at=datetime.now())
-        t = _exit(ex, rm, pos, 101.0)
+        t = _exit(ex, rm, _provenanced(exit_price=101.0), 101.0)
         assert t.exit_price_source == 'VERIFIED'
         assert t.exit_quote_received_at is not None
         assert 0 <= t.exit_quote_age_s <= EXIT_QUOTE_MAX_AGE_S
+        assert t.exit_quote_symbol == 'TEST'
+        assert t.exit_quote_exchange == 'NSE'
 
     def test_stale_quote_is_unverified(self):
         ex, rm = _executor()
-        pos = _position(
-            current_price_updated_at=datetime.now() - timedelta(seconds=60))
+        pos = _provenanced(exit_price=101.0,
+                           current_price_updated_at=datetime.now()
+                           - timedelta(seconds=60))
         t = _exit(ex, rm, pos, 101.0)
         assert t.exit_price_source == 'UNVERIFIED'
         assert t.exit_quote_age_s == pytest.approx(60, abs=1)
 
     def test_missing_quote_time_is_unverified(self):
         ex, rm = _executor()
-        pos = _position()  # no current_price_updated_at
+        pos = _position()  # no provenance at all
         t = _exit(ex, rm, pos, 101.0)
         assert t.exit_price_source == 'UNVERIFIED'
         assert t.exit_quote_received_at is None
@@ -131,26 +143,72 @@ class TestExitPriceProvenance:
 
     def test_boundary_age_verified(self):
         ex, rm = _executor()
-        pos = _position(
-            current_price_updated_at=datetime.now()
-            - timedelta(seconds=EXIT_QUOTE_MAX_AGE_S - 1))
+        pos = _provenanced(exit_price=101.0,
+                           current_price_updated_at=datetime.now()
+                           - timedelta(seconds=EXIT_QUOTE_MAX_AGE_S - 1))
         t = _exit(ex, rm, pos, 101.0)
         assert t.exit_price_source == 'VERIFIED'
 
     def test_exchange_ts_preserved_only_when_real(self):
         ex, rm = _executor()
         exch = datetime.now() - timedelta(seconds=2)
-        pos = _position(current_price_updated_at=datetime.now(),
-                        current_price_exchange_ts=exch)
+        pos = _provenanced(exit_price=101.0, current_price_exchange_ts=exch)
         t = _exit(ex, rm, pos, 101.0)
         assert t.exit_exchange_ts == exch
 
-        pos2 = _position(id='p2', current_price_updated_at=datetime.now(),
-                         current_price_exchange_ts=None)
+        pos2 = _provenanced(id='p2', exit_price=101.0,
+                            current_price_exchange_ts=None)
         t2 = _exit(ex, rm, pos2, 101.0)
         assert t2.exit_exchange_ts is None
         # Absence of an exchange timestamp does NOT disqualify verification
         assert t2.exit_price_source == 'VERIFIED'
+
+    def test_mismatched_exit_price_is_unverified(self):
+        """Exit price must equal the price the quote produced."""
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0)
+        t = _exit(ex, rm, pos, 102.5)   # not the quote price
+        assert t.exit_price_source == 'UNVERIFIED'
+        assert t.exit_price == 102.5
+
+    def test_wrong_quote_symbol_is_unverified(self):
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0,
+                           current_price_quote_symbol='OTHER-EQ')
+        t = _exit(ex, rm, pos, 101.0)
+        assert t.exit_price_source == 'UNVERIFIED'
+
+    def test_wrong_exchange_is_unverified(self):
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0,
+                           current_price_quote_exchange='BSE')
+        t = _exit(ex, rm, pos, 101.0)
+        assert t.exit_price_source == 'UNVERIFIED'
+
+    def test_missing_symbol_or_exchange_is_unverified(self):
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0,
+                           current_price_quote_symbol=None,
+                           current_price_quote_exchange=None)
+        t = _exit(ex, rm, pos, 101.0)
+        assert t.exit_price_source == 'UNVERIFIED'
+
+    def test_future_quote_timestamp_is_unverified(self):
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0,
+                           current_price_updated_at=datetime.now()
+                           + timedelta(seconds=5))
+        t = _exit(ex, rm, pos, 101.0)
+        assert t.exit_price_source == 'UNVERIFIED'
+        assert t.exit_quote_age_s < 0
+
+    def test_suffixed_tradingsymbol_matches(self):
+        """Angel trading symbols like 'GRASIM-EQ' match base 'GRASIM'."""
+        ex, rm = _executor()
+        pos = _provenanced(exit_price=101.0, symbol='GRASIM',
+                           current_price_quote_symbol='GRASIM-EQ')
+        t = _exit(ex, rm, pos, 101.0)
+        assert t.exit_price_source == 'VERIFIED'
 
     def test_update_positions_stamps_provenance(self):
         ex, rm = _executor()
