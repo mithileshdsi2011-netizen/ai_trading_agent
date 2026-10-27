@@ -3522,12 +3522,16 @@ tr:last-child td{border:none}
       <div id="intraday-market-status" style="color:#f9fafb;font-size:16px;font-weight:700">UNAVAILABLE</div>
     </div>
     <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
-      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Mode</div>
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Execution Mode</div>
       <div id="intraday-mode" style="color:#10b981;font-size:16px;font-weight:700">PAPER</div>
     </div>
     <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
-      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Trading Status</div>
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Engine State</div>
       <div id="intraday-trading-status" style="color:#10b981;font-size:16px;font-weight:700">ACTIVE</div>
+    </div>
+    <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
+      <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Entry Permission</div>
+      <div id="intraday-entry-permission" style="color:#9ca3af;font-size:16px;font-weight:700">—</div>
     </div>
     <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px">
       <div style="color:#9ca3af;font-size:12px;margin-bottom:4px">Market Regime</div>
@@ -3586,7 +3590,7 @@ tr:last-child td{border:none}
 
   <!-- Top Opportunities -->
   <div style="background:#1f2937;border:1px solid #374151;border-radius:8px;padding:16px;margin-bottom:20px">
-    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Top Opportunities</h4>
+    <h4 style="color:#f9fafb;font-size:14px;margin:0 0 12px 0">Top Opportunities <span id="intraday-signals-only" style="display:none;background:#78350f;color:#fbbf24;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;margin-left:6px">SIGNALS ONLY — NEW ENTRIES BLOCKED</span></h4>
     <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead>
@@ -7062,20 +7066,30 @@ async function loadIntradayData(){
     
     const modeEl=document.getElementById('intraday-mode');
     if(modeEl){
-      modeEl.textContent=d.mode;
-      modeEl.style.color=d.mode==='PAPER'?'#10b981':'#ef4444';
+      // Three-way execution mode — PAPER, disarmed LIVE or armed LIVE.
+      const em=d.execution_mode||(d.mode==='PAPER'?'PAPER':'LIVE DISARMED');
+      modeEl.textContent=em;
+      modeEl.style.color=em==='PAPER'?'#10b981':em==='LIVE ARMED'?'#ef4444':'#f59e0b';
     }
     
     const tradingStatus=document.getElementById('intraday-trading-status');
     if(tradingStatus){
-      const es=d.engine_state||(d.trading_blocked?'BLOCKED':'ACTIVE');
-      const db0=d.daily_breakdown||{};
-      // Entry limit is an entries-only gate — monitoring/exits stay live,
-      // so the engine state is preserved alongside the limit banner.
-      const limitHit=(db0.entries_today!=null&&db0.max_entries!=null&&db0.entries_today>=db0.max_entries);
-      tradingStatus.innerHTML=es+(limitHit?' <span style="color:#f59e0b;font-size:12px">— ENTRY LIMIT REACHED — NO NEW TRADES</span>':'');
-      tradingStatus.style.color=es==='ACTIVE'?'#10b981':es==='SCANNING'?'#3b82f6':es==='MARKET CLOSED'?'#9ca3af':'#ef4444';
+      // Engine activity only — SCANNING / MONITORING / STOPPED. Entry
+      // permission is its own box now; the limit banner moved there.
+      const es=d.engine_state_display||d.engine_state||(d.trading_blocked?'STOPPED':'MONITORING');
+      tradingStatus.textContent=es;
+      tradingStatus.style.color=es==='MONITORING'?'#10b981':es==='SCANNING'?'#3b82f6':'#ef4444';
     }
+
+    const permEl=document.getElementById('intraday-entry-permission');
+    if(permEl){
+      const perm=d.entry_permission||'—';
+      permEl.textContent=perm;
+      permEl.style.color=perm==='ALLOWED'?'#22c55e':perm==='—'?'#9ca3af':'#f59e0b';
+    }
+
+    const sigOnly=document.getElementById('intraday-signals-only');
+    if(sigOnly){sigOnly.style.display=d.signals_only?'inline':'none';}
 
     const regimeEl=document.getElementById('intraday-regime');
     if(regimeEl){

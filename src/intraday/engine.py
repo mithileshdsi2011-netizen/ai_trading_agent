@@ -30,10 +30,13 @@ from .models import (
     IntradayConfig, IntradaySignal, IntradayPosition,
     MarketRegime, SignalClassification, PositionStatus,
 )
-from .config import get_intraday_config
+from .config import get_intraday_config, get_live_config, live_armed
 from .validators import (
     IntradayValidator, signal_idempotency_key, quote_usable_for_execution)
 from .state import IntradayStateStore
+from .live_risk import LiveRiskManager
+from .live_adapter import LiveExecutionAdapter
+from .angel.orders import AngelOrderGateway
 from .scanner import IntradayScanner
 from .scorer import IntradayScorer
 from .analyzer import IntradayAnalyzer
@@ -193,6 +196,21 @@ class IntradayEngine:
         self.websocket = AngelWebSocket(self.auth)
         self.live_executor = LiveTradeExecutor(self.client, self.config)  # always disabled in V1
 
+        # LIVE path (architected, DISARMED): independent risk controls,
+        # an arm-gated order gateway, and an intent-persistent execution
+        # adapter with broker reconciliation. Armed only when BOTH the
+        # config flag and the ANGEL_LIVE_ARMED=CONFIRM env token exist.
+        self.live_risk = LiveRiskManager(
+            get_live_config(), self.state_store.state_dir)
+        self.order_gateway = AngelOrderGateway(
+            self.client, armed=lambda: live_armed(self.config))
+        self.live_adapter = LiveExecutionAdapter(
+            self.order_gateway, self.live_risk,
+            instruments=self.instruments,
+            state_dir=self.state_store.state_dir,
+            alert_hook=self._incident,
+            armed=live_armed(self.config))
+
         # Runtime state
         self._lock = threading.Lock()
         self._alert_hook = alert_hook
@@ -221,6 +239,12 @@ class IntradayEngine:
         self._opportunities: List[IntradaySignal] = []
         self._instruments_loaded = False
 
+        # Cross-process singleton — exactly one TRADING engine per state
+        # dir. A second process acquires 'secondary' role: it may serve
+        # status reads but never runs cycles or schedulers.
+        self._process_lock_fd = None
+        self._singleton_role = self._acquire_process_lock()
+
         # Restore persisted kill switch / engine status
         status = self.state_store.load_engine_status()
         if status.get('kill_switch'):
@@ -245,6 +269,34 @@ class IntradayEngine:
         logger.info("[INTRADAY] Engine initialized (mode=%s, universe=%s)",
                     "PAPER" if self.config.paper_trading else "LIVE",
                     self.config.trading_universe)
+
+    def _acquire_process_lock(self) -> str:
+        """flock on <state_dir>/engine.lock — held for process life."""
+        try:
+            import fcntl
+            os.makedirs(self.state_store.state_dir, exist_ok=True)
+            lock_path = os.path.join(self.state_store.state_dir, "engine.lock")
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                logger.error(
+                    "[INTRADAY] Engine lock held by another process — "
+                    "running SECONDARY (status reads only, no trading)")
+                return 'secondary'
+            self._process_lock_fd = fd
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
+            return 'primary'
+        except ImportError:
+            logger.warning("[INTRADAY] fcntl unavailable — process "
+                           "singleton not enforced on this platform")
+            return 'primary'
+        except Exception as e:
+            logger.error(f"[INTRADAY] Engine lock failed ({e}) — "
+                         "failing closed as SECONDARY")
+            return 'secondary'
 
     # ── authentication ──────────────────────────────────────────────
     def credentials_configured(self) -> bool:
@@ -333,6 +385,12 @@ class IntradayEngine:
         summary = {'scanned': 0, 'signals': 0, 'entries': 0, 'exits': 0,
                    'skipped_reason': None}
         try:
+            # Gate 0: cross-process singleton — a secondary engine never
+            # trades; it exists only to serve status reads.
+            if self._singleton_role != 'primary':
+                summary['skipped_reason'] = "Secondary engine (no trading)"
+                return summary
+
             # Gate 1: credentials
             if not self.credentials_configured():
                 summary['skipped_reason'] = "Angel credentials not configured"
@@ -707,6 +765,9 @@ class IntradayEngine:
         the network overnight or on weekends."""
         if self._scheduler_started:
             return
+        if self._singleton_role != 'primary':
+            logger.warning("[INTRADAY] Secondary engine — scheduler not started")
+            return
         self._scheduler_started = True
         self._scheduler_stop.clear()
         self._scheduler_thread = None
@@ -902,6 +963,55 @@ class IntradayEngine:
             'entry_price_source': pos.entry_price_source or 'UNVERIFIED',
         }
 
+    def _execution_mode(self) -> str:
+        """PAPER / LIVE DISARMED / LIVE ARMED — the three-way mode the
+        dashboard displays. Arming requires config flag AND env token."""
+        if live_armed(self.config):
+            return 'LIVE ARMED'
+        return 'PAPER' if self.config.paper_trading else 'LIVE DISARMED'
+
+    def _engine_state_display(self) -> str:
+        """Coarse engine activity: SCANNING / MONITORING / STOPPED —
+        separated from entry permission and execution mode."""
+        if self.risk_manager.is_killed():
+            return 'STOPPED'
+        if self._cycle_running:
+            return 'SCANNING'
+        if self.paper_executor.get_open_positions():
+            return 'MONITORING'
+        if not self.validator.is_market_open():
+            return 'STOPPED'
+        return 'MONITORING'
+
+    def _entry_permission(self) -> str:
+        """Why a new entry would or would not be permitted right now —
+        independent of what the engine is doing (it may still scan and
+        monitor exits while entries are blocked)."""
+        if self.risk_manager.is_killed():
+            return 'KILL SWITCH'
+        if not self.validator.is_market_open():
+            return 'MARKET CLOSED'
+        if not self.validator.is_entry_window_open():
+            return 'ENTRY WINDOW CLOSED'
+        if not self.credentials_configured() or self._auth_state != 'CONNECTED':
+            return 'BROKER UNHEALTHY'
+        daily = self.risk_manager.get_daily_state()
+        if daily['blocked']:
+            reason = (daily.get('block_reason') or '').lower()
+            return ('LOSS LIMIT REACHED' if 'loss' in reason
+                    else 'DAILY LIMIT REACHED')
+        if daily['trades_today'] >= self.config.max_trades_per_day:
+            return 'DAILY LIMIT REACHED'
+        limit = daily['daily_loss_limit']
+        unrealized_loss = sum(
+            min(p.unrealized_pnl, 0.0)
+            for p in self.paper_executor.get_open_positions())
+        if (daily['realized_pnl'] + unrealized_loss) <= -limit:
+            return 'LOSS LIMIT REACHED'
+        if self.market_data_status() != 'LIVE':
+            return 'BROKER UNHEALTHY'
+        return 'ALLOWED'
+
     def _engine_state(self) -> str:
         """Human-readable engine state for the dashboard."""
         if self.risk_manager.is_killed():
@@ -961,6 +1071,15 @@ class IntradayEngine:
             'market_regime': self._market_regime.value if self._last_scan_time else 'UNKNOWN',
             'market_session': self._market_session(),
             'engine_state': self._engine_state(),
+            # Separated status concepts — engine activity, entry
+            # permission and execution mode are independent axes.
+            'engine_state_display': self._engine_state_display(),
+            'entry_permission': self._entry_permission(),
+            'execution_mode': self._execution_mode(),
+            'signals_only': bool(self._opportunities)
+                and self._entry_permission() != 'ALLOWED',
+            'singleton_role': self._singleton_role,
+            'live': self.live_adapter.get_status(),
             'cycle_running': self._cycle_running,
             'trading_blocked': daily['blocked'] or self.risk_manager.is_killed(),
             'kill_switch': self.risk_manager.is_killed(),

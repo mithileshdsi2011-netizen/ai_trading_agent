@@ -266,6 +266,20 @@ class AngelClient:
             'paper_mode': True
         }
 
+    def get_rms_limits(self) -> Dict[str, Any]:
+        """Get available funds/margin via rmsLimit (READ-ONLY).
+
+        Used by the LIVE pre-trade funds check; safe to call in any
+        mode — it submits nothing."""
+        err = self._require_auth()
+        if err:
+            return err
+        result = self._call('account', self._get_smartapi().rmsLimit)
+        if result.get('status') is False:
+            return {'success': False, 'error': result.get('message', 'rmsLimit failed')}
+        data = result.get('data') if isinstance(result, dict) else None
+        return {'success': True, 'data': data or {}}
+
     def get_order_book(self) -> Dict[str, Any]:
         """Get order book."""
         err = self._require_auth()
