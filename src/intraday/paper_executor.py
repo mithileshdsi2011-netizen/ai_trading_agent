@@ -235,7 +235,14 @@ class PaperTradeExecutor:
                 pnl_pct=pnl_pct,
                 stop_loss=position.stop_loss,
                 target=position.target,
-                risk_reward=position.stop_loss / position.target if position.target else 0,
+                risk_reward=(
+                    abs(position.target - position.entry_price)
+                    / abs(position.entry_price - position.stop_loss)
+                    if position.entry_price and position.stop_loss
+                    and position.target
+                    and position.entry_price != position.stop_loss
+                    else 0
+                ),
                 signal_score=position.signal_score,
                 signal_classification=position.signal_classification,
                 strategy=position.strategy,

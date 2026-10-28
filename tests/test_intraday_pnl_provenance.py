@@ -287,3 +287,32 @@ class TestProvenancePersistence:
         assert t.exit_price_source is None  # → history renders UNVERIFIED
         assert t.exit_exchange_ts is None
         assert t.net_pnl == pytest.approx(45.8541)
+
+
+class TestRiskRewardField:
+    """risk_reward must be the price-distance reward/risk ratio
+    abs(target-entry)/abs(entry-SL) — not the SL/T price ratio."""
+
+    def test_long_rr_value(self):
+        ex, rm = _executor()
+        t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10,
+                                    sl=95.0, tgt=110.0), 110.0)
+        assert t.risk_reward == pytest.approx(2.0)
+
+    def test_short_rr_value(self):
+        ex, rm = _executor()
+        t = _exit(ex, rm, _position(SignalDirection.SHORT, 1236.6, 8,
+                                    sl=1237.767857, tgt=1233.096428), 1240.5)
+        assert t.risk_reward == pytest.approx(3.0, abs=0.01)
+
+    def test_zero_risk_returns_zero(self):
+        ex, rm = _executor()
+        t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10,
+                                    sl=100.0, tgt=110.0), 105.0)
+        assert t.risk_reward == 0
+
+    def test_missing_levels_return_zero(self):
+        ex, rm = _executor()
+        t = _exit(ex, rm, _position(SignalDirection.LONG, 100.0, 10,
+                                    sl=0.0, tgt=0.0), 105.0)
+        assert t.risk_reward == 0
