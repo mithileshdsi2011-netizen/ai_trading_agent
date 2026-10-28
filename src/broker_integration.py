@@ -139,12 +139,17 @@ def get_error_policy(category_value: str) -> Dict:
 class BrokerIntegration:
     """Handles broker integration for order execution"""
     
-    def __init__(self, alert_engine=None):
+    def __init__(self, alert_engine=None, register_status: bool = True):
         self.kite = None
         self.paper_trading = config.PAPER_TRADING
         self.live_ready = False
         self.token_manager = None
         self.alert_engine = alert_engine
+        # Transient instances (dashboard helpers, ad-hoc readers) must not
+        # rewrite the engine-owned broker_state 'status' record — that would
+        # roll startup_timestamp and clobber fields written by the
+        # orchestrator/reconciler.
+        self._register_status = register_status
         self.paper_portfolio = {
             'cash': config.TRADING_AMOUNT,
             'positions': {},
@@ -164,7 +169,8 @@ class BrokerIntegration:
                 logger.info(f"Broker initialized in LIVE mode at {self.startup_timestamp}")
             else:
                 logger.info(f"Broker initialized in PAPER mode at {self.startup_timestamp}")
-            self._write_broker_status(mode, self.live_ready, None)
+            if self._register_status:
+                self._write_broker_status(mode, self.live_ready, None)
         except Exception as e:
             error = str(e)
             if self.alert_engine:
@@ -172,7 +178,8 @@ class BrokerIntegration:
                     self.alert_engine.critical('Kite', f'Broker initialization failed: {error}', {'error': error})
                 except Exception:
                     pass
-            self._write_broker_status('FAILED', False, error)
+            if self._register_status:
+                self._write_broker_status('FAILED', False, error)
             logger.error(f"Broker live initialization failed: {error}")
             raise
     

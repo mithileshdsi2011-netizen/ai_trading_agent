@@ -737,7 +737,7 @@ def _run_background_scan():
         # Step 3: get held symbols for bot_decision logic
         try:
             from broker_integration import BrokerIntegration
-            _b = BrokerIntegration()
+            _b = BrokerIntegration(register_status=False)
             _held = _b.get_holdings()
             _held_syms = {
                 p.get('tradingsymbol')
@@ -1480,6 +1480,7 @@ HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
 <meta http-equiv="Pragma" content="no-cache">
+<link rel="icon" href="data:,">
 <title>AI Swing Trading Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="/static/chart.umd.min.js?v=2"></script>
@@ -8733,8 +8734,10 @@ def api_data():
         w_sells = [o for o in week_orders if o.get('transaction_type') == 'SELL']
         m_buys = [o for o in month_orders if o.get('transaction_type') == 'BUY']
         m_sells = [o for o in month_orders if o.get('transaction_type') == 'SELL']
-        data['weekly_win_rate'] = len(w_sells) / len(w_buys) if w_buys else 0
-        data['monthly_win_rate'] = len(m_sells) / len(m_buys) if m_buys else 0
+        w_winners = [o for o in w_sells if (o.get('pnl') or 0) > 0]
+        m_winners = [o for o in m_sells if (o.get('pnl') or 0) > 0]
+        data['weekly_win_rate'] = len(w_winners) / len(w_sells) if w_sells else 0
+        data['monthly_win_rate'] = len(m_winners) / len(m_sells) if m_sells else 0
         data['weekly_pnl'] = sum(o.get('pnl', 0) for o in w_sells)
         data['monthly_pnl'] = sum(o.get('pnl', 0) for o in m_sells)
 
@@ -9661,7 +9664,7 @@ def api_journal():
         # ── Sync Kite completed SELL orders → close matching open journal entries ──
         try:
             from broker_integration import BrokerIntegration
-            _b = BrokerIntegration()
+            _b = BrokerIntegration(register_status=False)
             kite_orders = _b.kite.orders() or [] if _b.kite else []
             entries = j.all_entries()
             changed = False
@@ -9824,7 +9827,7 @@ def api_skipped_opportunities():
         today_str = datetime.now().strftime('%Y-%m-%d')
         try:
             from broker_integration import BrokerIntegration
-            broker = BrokerIntegration()
+            broker = BrokerIntegration(register_status=False)
             kite_orders = broker.kite.orders() if broker.kite else []
             if kite_orders:
                 summary['executed'] = len([

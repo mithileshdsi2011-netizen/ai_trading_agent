@@ -155,5 +155,37 @@ class TestBrokerIntegration:
         assert 'error' in status
 
 
+class TestBrokerStatusRegistration:
+    """Transient BrokerIntegration instances (dashboard helpers) must not
+    rewrite the engine-owned broker_state 'status' record — that would roll
+    startup_timestamp and clobber reconciler-written fields."""
+
+    def test_default_writes_status_record(self):
+        store = Mock()
+        with patch('src.broker_integration.get_store', return_value=store):
+            BrokerIntegration()
+        types = [c.args[0] for c in store.save_broker_state.call_args_list]
+        assert 'status' in types
+
+    def test_register_status_false_skips_write(self):
+        store = Mock()
+        with patch('src.broker_integration.get_store', return_value=store):
+            BrokerIntegration(register_status=False)
+        store.save_broker_state.assert_not_called()
+
+    def test_register_status_false_still_connects(self):
+        store = Mock()
+        with patch('src.broker_integration.get_store', return_value=store):
+            b = BrokerIntegration(register_status=False)
+        # Instance is fully usable (PAPER portfolio ready) — only the
+        # status-record write is suppressed.
+        assert b.paper_portfolio is not None
+
+    def test_dashboard_callsites_pass_register_status_false(self):
+        src = open(os.path.join(os.path.dirname(__file__), '..',
+                                'dashboard.py')).read()
+        assert 'BrokerIntegration()' not in src
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
