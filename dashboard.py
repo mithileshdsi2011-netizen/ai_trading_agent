@@ -909,6 +909,36 @@ def _maybe_trigger_background_scan():
         t.start()
 
 
+def _engine_cycle_payload():
+    """Orchestrator scheduler-cycle status from the scheduler_heartbeat record.
+
+    This is a different clock than the dashboard signal-scan cache above —
+    kept separate so an overdue signal scan is never presented as a missed
+    engine cycle. next_expected is a display estimate (last_completed +
+    interval), not a guaranteed scheduled execution.
+    """
+    try:
+        hb = get_store().get_broker_state('scheduler_heartbeat') or {}
+    except Exception:
+        return None
+    started   = hb.get('last_cycle_started')
+    completed = hb.get('last_cycle_completed')
+    interval  = hb.get('interval_minutes')
+    try:
+        nxt = (datetime.fromisoformat(str(completed)) + timedelta(minutes=interval)
+               ).isoformat() if completed and interval else None
+    except Exception:
+        nxt = None
+    return {
+        'last_cycle_started':   started,
+        'last_cycle_completed': completed,
+        'last_cycle_status':    hb.get('last_cycle_status'),
+        'interval_minutes':     interval,
+        'cycle_running':        bool(started and (not completed or started > completed)),
+        'next_expected':        nxt,
+    }
+
+
 # ── Morning Intelligence Report cache ─────────────────────────────────────────
 _MORNING_CACHE: dict = {"report": None, "date": None, "generating": False}
 _MORNING_CACHE_LOCK = threading.Lock()
@@ -1599,12 +1629,16 @@ tr:last-child td{border:none}
       <div id="hdr-positions" style="font-size:13px;font-weight:600">—</div>
     </div>
     <div class="text-center">
-      <div class="stat-label">Last Scan</div>
+      <div class="stat-label">Signal Scan</div>
       <div id="hdr-last-scan" style="font-size:13px;font-weight:600">—</div>
     </div>
     <div class="text-center">
-      <div class="stat-label">Next Scan</div>
+      <div class="stat-label">Next Signal Scan</div>
       <div id="hdr-next-scan" style="font-size:13px;font-weight:600">—</div>
+    </div>
+    <div class="text-center">
+      <div class="stat-label">Engine Cycle</div>
+      <div id="hdr-engine-cycle" style="font-size:13px;font-weight:600">—</div>
     </div>
     <div class="text-center">
       <div class="stat-label">Bot Status</div>
@@ -2814,7 +2848,7 @@ tr:last-child td{border:none}
     <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
       <div class="card-sm flex items-center gap-3">
         <span style="font-size:20px">🕐</span>
-        <div><div class="stat-label">Last Scan</div><div style="font-size:14px;font-weight:600" id="bs-last-scan">—</div></div>
+        <div><div class="stat-label">Last Signal Scan</div><div style="font-size:14px;font-weight:600" id="bs-last-scan">—</div></div>
       </div>
       <div class="card-sm flex items-center gap-3">
         <span style="font-size:20px">🔍</span>
@@ -2834,7 +2868,11 @@ tr:last-child td{border:none}
       </div>
       <div class="card-sm flex items-center gap-3">
         <span style="font-size:20px">⏭️</span>
-        <div><div class="stat-label">Next Scan</div><div style="font-size:14px;font-weight:600" id="bs-next-scan">—</div></div>
+        <div><div class="stat-label">Next Signal Scan</div><div style="font-size:14px;font-weight:600" id="bs-next-scan">—</div></div>
+      </div>
+      <div class="card-sm flex items-center gap-3">
+        <span style="font-size:20px">⚙️</span>
+        <div><div class="stat-label">Engine Cycle</div><div style="font-size:14px;font-weight:600" id="bs-engine-cycle">—</div></div>
       </div>
     </div>
   </div>
@@ -4007,10 +4045,23 @@ function _swingHdr(d){
   const modeEl=document.getElementById('hdr-mode');
   modeEl.textContent=(d.trading_mode||'swing').toUpperCase()+' '+bMode+bStart;
   modeEl.style.color='#60a5fa';
+  // Signal-scan fields describe the dashboard's own 150-stock display scan
+  // (_SIGNAL_CACHE) — next_scan is an estimate, not a guaranteed execution.
   const lastScanBase=(d.last_scan&&d.last_scan!=='—')?d.last_scan
     :(d.market_open?'Awaiting first scan':'No completed scan');
   document.getElementById('hdr-last-scan').textContent=lastScanBase+(d.scan_running?' · scanning now':'');
-  document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Paused — market closed');
+  document.getElementById('hdr-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?('~'+d.next_scan+' est'):(d.market_open?'Awaiting schedule':'Paused — market closed');
+  // Engine cycle — the orchestrator's real 15-min trading cycle, from the
+  // scheduler_heartbeat record. Independent of the signal-scan clock above.
+  const ec=d.engine_cycle||{};
+  let ecTxt='—';
+  if(ec.last_cycle_completed){
+    try{ecTxt=new Date(String(ec.last_cycle_completed).replace(' ','T')).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});}catch(e){ecTxt=String(ec.last_cycle_completed);}
+    ecTxt+=ec.last_cycle_status==='ok'?' ✓':(' '+ec.last_cycle_status);
+    if(ec.cycle_running)ecTxt+=' · cycle running';
+    if(ec.next_expected){try{ecTxt+=' · next ~'+new Date(String(ec.next_expected).replace(' ','T')).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+' est';}catch(e){}}
+  }else if(ec.last_cycle_status){ecTxt=String(ec.last_cycle_status);}
+  document.getElementById('hdr-engine-cycle').textContent=ecTxt;
   // Bot status from the orchestrator's actual heartbeat — reconciliation
   // last_sync is written every engine cycle, not inferred from broker auth.
   const rs=d.reconciliation_status||{};
@@ -4018,7 +4069,7 @@ function _swingHdr(d){
   if(rs.last_sync){try{hbAge=(Date.now()-new Date(String(rs.last_sync).replace(' ','T')).getTime())/1000;}catch(e){}}
   const stEl=document.getElementById('hdr-status');
   let stat,col;
-  if(d.scan_running){stat='🟢 Scanning';col='#22c55e';}
+  if(d.scan_running){stat='🟢 Scanning signals';col='#22c55e';}
   else if(!isNaN(hbAge)&&hbAge<300){stat='🟢 Running';col='#22c55e';}
   else if(!isNaN(hbAge)){stat='🟠 Heartbeat '+Math.round(hbAge/60)+'m ago';col='#f59e0b';}
   else{stat='🔴 Engine offline';col='#ef4444';}
@@ -5986,9 +6037,20 @@ async function load(){
     bsrEl.textContent=d.market_regime||'—';bsrEl.className='stat-value '+(d.market_regime==='BULL'?'green':d.market_regime==='BEAR'?'red':'yellow');
     if(d.market_regime==='UNAVAILABLE'&&lk&&lk.value)bsrEl.innerHTML='UNAVAILABLE<br><span style="font-size:11px;color:#9ca3af">last: '+lk.value+' @ '+fmtDateTime(lk.at)+'</span>';
     document.getElementById('bs-budget').textContent=d.budget!=null?rupee(d.budget):'N/A';
+    // Signal-scan fields describe the dashboard's display scan, not the
+    // orchestrator's engine cycle (see bs-engine-cycle / engine_cycle).
     const bsLastScan=(d.last_scan&&d.last_scan!=='—')?d.last_scan:(d.market_open?'Awaiting first scan':'No completed scan');
-    document.getElementById('bs-last-scan').textContent=bsLastScan+(d.scan_running?' · engine running':'');
-    document.getElementById('bs-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?d.next_scan:(d.market_open?'Awaiting schedule':'Market closed');
+    document.getElementById('bs-last-scan').textContent=bsLastScan+(d.scan_running?' · scanning now':'');
+    document.getElementById('bs-next-scan').textContent=(d.next_scan&&d.next_scan!=='—')?('~'+d.next_scan+' est'):(d.market_open?'Awaiting schedule':'Market closed');
+    const bsec=d.engine_cycle||{};
+    let bsecTxt='—';
+    if(bsec.last_cycle_completed){
+      try{bsecTxt=new Date(String(bsec.last_cycle_completed).replace(' ','T')).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});}catch(e){bsecTxt=String(bsec.last_cycle_completed);}
+      bsecTxt+=bsec.last_cycle_status==='ok'?' ✓':(' '+bsec.last_cycle_status);
+      if(bsec.cycle_running)bsecTxt+=' · cycle running';
+      if(bsec.next_expected){try{bsecTxt+=' · next ~'+new Date(String(bsec.next_expected).replace(' ','T')).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+' est';}catch(e){}}
+    }else if(bsec.last_cycle_status){bsecTxt=String(bsec.last_cycle_status);}
+    document.getElementById('bs-engine-cycle').textContent=bsecTxt;
     document.getElementById('bs-scanned').textContent=d.stocks_scanned?d.stocks_scanned.toLocaleString('en-IN'):(d.market_open?'No scan yet':'Market closed');
     document.getElementById('bs-ai-signals').textContent=(d.signals||[]).length;
     document.getElementById('bs-orders-exec').textContent=d.orders_executed||0;
@@ -9017,6 +9079,7 @@ def api_data():
     data['next_scan'] = (
         (_cache_ts + _SIGNAL_CACHE_TTL).strftime('%I:%M %p') if _cache_ts else '—'
     )
+    data['engine_cycle'] = _engine_cycle_payload()
 
     # ── IP status — served from cache, refreshed every 5 min in background ──
     import socket as _sock
