@@ -35,9 +35,14 @@ class TestAppBranding:
 
 
 class TestHeadingConvention:
-    def test_title_is_workspace_section(self):
-        assert "wsName=NAV_STATE.ws==='intraday'?'Intraday Trading':'Swing Trading'" in SRC
-        assert '`${wsName} / ${sec.label}`' in SRC
+    def test_title_is_workspace_arrow_section(self):
+        assert "wsName=NAV_STATE.ws==='intraday'?'Intraday':'Swing'" in SRC
+        assert '`${wsName} → ${sec.label}`' in SRC
+        assert '`${wsName} / ${sec.label}`' not in SRC
+
+    def test_default_heading_uses_arrow(self):
+        assert '>Swing → Overview<' in SRC
+        assert 'Swing Trading /' not in SRC
 
     def test_every_nav_section_has_subtitle(self):
         nav_block = _block('const NAV')

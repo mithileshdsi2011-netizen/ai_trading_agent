@@ -1668,7 +1668,7 @@ tr:last-child td{border:none}
 <!-- Page heading (Level 4): "<Workspace> / <Section>" + subtitle — updated
      by _updatePageTitle() from NAV so labels can't drift. -->
 <div id="page-heading" style="margin-bottom:14px">
-  <div id="page-heading-title" style="font-size:18px;font-weight:800;color:#f9fafb">Swing Trading / Overview</div>
+  <div id="page-heading-title" style="font-size:18px;font-weight:800;color:#f9fafb">Swing → Overview</div>
   <div id="page-heading-sub" style="font-size:12px;color:#4b5563">Portfolio Overview &amp; Trading Dashboard</div>
 </div>
 
@@ -3955,9 +3955,9 @@ const PAGE_SUBTITLES={
   }
 };
 function _pageTitle(){
-  const wsName=NAV_STATE.ws==='intraday'?'Intraday Trading':'Swing Trading';
+  const wsName=NAV_STATE.ws==='intraday'?'Intraday':'Swing';
   const sec=(NAV[NAV_STATE.ws].sections||[]).find(s=>s.id===NAV_STATE.sec);
-  return sec?`${wsName} / ${sec.label}`:wsName;
+  return sec?`${wsName} → ${sec.label}`:wsName;
 }
 function _updatePageTitle(){
   const t=_pageTitle();
