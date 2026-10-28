@@ -1481,7 +1481,7 @@ HTML = """<!DOCTYPE html>
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
 <meta http-equiv="Pragma" content="no-cache">
 <link rel="icon" href="data:,">
-<title>AI Swing Trading Bot</title>
+<title>SWINGPULSE TERMINAL</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="/static/chart.umd.min.js?v=2"></script>
 <script src="/static/ai_signals.js?v=2"></script>
@@ -1598,10 +1598,11 @@ tr:last-child td{border:none}
 <!-- HEADER -->
 <div style="background:#111827;border-bottom:1px solid #1f2937;padding:12px 20px" class="flex items-center justify-between flex-wrap gap-3">
   <div class="flex items-center gap-3">
-    <span style="font-size:22px">🤖</span>
+    <span style="font-size:22px">📈</span>
     <div>
-      <div style="font-size:16px;font-weight:700;color:#f9fafb" id="page-title">AI Swing Trading Bot</div>
-      <div style="font-size:11px;color:#4b5563" id="last-updated">Initializing...</div>
+      <div style="font-size:16px;font-weight:700;color:#f9fafb;letter-spacing:.04em">SWINGPULSE TERMINAL</div>
+      <div style="font-size:10px;color:#4b5563">AI-Powered Trading &amp; Portfolio Intelligence</div>
+      <div style="font-size:10px;color:#374151" id="last-updated">Initializing...</div>
     </div>
     <div id="health-badge" style="display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;background:#1f2937;font-size:12px;font-weight:600">
       <span id="health-dot" style="width:10px;height:10px;border-radius:50%;background:#9ca3af"></span>
@@ -1663,6 +1664,13 @@ tr:last-child td{border:none}
 <div id="ws-subtabs" style="background:#111827;border-bottom:1px solid #1f2937;padding:6px 16px;display:none;gap:8px;flex-wrap:wrap;align-items:center"></div>
 
 <div style="padding:16px 20px;max-width:1800px;margin:0 auto">
+
+<!-- Page heading (Level 4): "<Workspace> / <Section>" + subtitle — updated
+     by _updatePageTitle() from NAV so labels can't drift. -->
+<div id="page-heading" style="margin-bottom:14px">
+  <div id="page-heading-title" style="font-size:18px;font-weight:800;color:#f9fafb">Swing Trading / Overview</div>
+  <div id="page-heading-sub" style="font-size:12px;color:#4b5563">Portfolio Overview &amp; Trading Dashboard</div>
+</div>
 
 <!-- ===== TAB: MORNING INTELLIGENCE ===== -->
 <div id="tab-morning" class="tab-content">
@@ -3925,30 +3933,38 @@ function _navSyncTab(id){
   _renderNav();_persistNav();_updateHdrWorkspace();_updatePageTitle();
 }
 
-// Dynamic page title — single source is NAV itself so labels can't drift.
-// Swing: "<Section> / <Tab> — Swing Trading" (single-tab sections collapse
-// to "<Section> — Swing Trading"; the IPO pane appends its active filter).
-// Intraday: "<Section> — Intraday Trading".
+// Page heading — "<Workspace> / <Section>" + per-section subtitle, driven
+// entirely by NAV_STATE so labels can't drift across tabs or workspaces.
+const PAGE_SUBTITLES={
+  swing:{
+    overview:'Portfolio Overview & Trading Dashboard',
+    trading:'Trade Opportunities, Positions & Execution',
+    intelligence:'Market Intelligence & Signal Analysis',
+    performance:'Trading Performance & P&L Analytics',
+    ipo:'Live IPO Market Data, Subscription Trends & Risk Assessment',
+    assistant:'AI Insights & Trading Assistance',
+    system:'System Health, Connectivity & Monitoring'
+  },
+  intraday:{
+    ioverview:'Intraday Market Overview & PAPER Trading Dashboard',
+    itrading:'Trade Execution, Orders & Daily Activity',
+    isignals:'ORB/VWAP Signals & Trading Opportunities',
+    iperf:'Daily P&L, Win Rate & Strategy Analytics',
+    irisk:'Capital, Daily Limits & Risk Controls',
+    isystem:'Angel One Connectivity & Monitoring'
+  }
+};
 function _pageTitle(){
   const wsName=NAV_STATE.ws==='intraday'?'Intraday Trading':'Swing Trading';
-  if(NAV_STATE.ws==='intraday'){
-    const sec=NAV.intraday.sections.find(s=>s.id===NAV_STATE.sec);
-    return `${sec?sec.label:'Overview'} — ${wsName}`;
-  }
-  const sec=NAV.swing.sections.find(s=>s.id===NAV_STATE.sec);
-  if(!sec)return wsName;
-  if(NAV_STATE.tab==='ipo'){
-    const f=String(window._ipoFilter||'CURRENT').toUpperCase();
-    return `IPO Intelligence / ${f} — ${wsName}`;
-  }
-  const tab=(sec.tabs||[]).find(t=>t[0]===NAV_STATE.tab);
-  const base=(sec.tabs.length>1&&tab)?`${sec.label} / ${tab[1]}`:sec.label;
-  return `${base} — ${wsName}`;
+  const sec=(NAV[NAV_STATE.ws].sections||[]).find(s=>s.id===NAV_STATE.sec);
+  return sec?`${wsName} / ${sec.label}`:wsName;
 }
 function _updatePageTitle(){
   const t=_pageTitle();
-  document.title=t;
-  const el=document.getElementById('page-title');if(el)el.textContent=t;
+  document.title=`SWINGPULSE TERMINAL — ${t}`;
+  const h=document.getElementById('page-heading-title');if(h)h.textContent=t;
+  const s=document.getElementById('page-heading-sub');
+  if(s)s.textContent=(PAGE_SUBTITLES[NAV_STATE.ws]||{})[NAV_STATE.sec]||'';
 }
 
 function navWorkspace(ws){
