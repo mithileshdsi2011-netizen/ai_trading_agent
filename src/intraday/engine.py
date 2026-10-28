@@ -706,7 +706,92 @@ class IntradayEngine:
         remaining = self.paper_executor.get_open_positions()
         self.state_store.save_positions(remaining)
         if not remaining:
+            self._mark_eod_complete()
+
+    def _mark_eod_complete(self):
+        """Stamp EOD completion once and fire the daily PAPER report email.
+        Email delivery is fire-and-forget — it can never affect trading
+        or EOD bookkeeping.  Subsequent ticks keep nudging the
+        consolidated coordinator so a late Swing snapshot or a crashed
+        sender still resolves into exactly one daily email."""
+        if self._eod_completed_at is None:
             self._eod_completed_at = datetime.now()
+            self._send_eod_report()
+        else:
+            try:
+                from email_reports import EmailReporter
+                er = EmailReporter()
+                if er.consolidated_pending():
+                    er.attempt_consolidated()
+            except Exception:
+                pass
+
+    def _send_eod_report(self):
+        """Build the EOD report context from persisted records and hand it
+        to EmailReporter. Fails silently — report delivery must never
+        raise inside the scheduler tick."""
+        try:
+            from email_reports import EmailReporter
+            today = date.today()
+            def _td(t):
+                d = t.direction.value if hasattr(t.direction, 'value') else str(t.direction)
+                sc = t.signal_classification
+                sc = sc.value if hasattr(sc, 'value') else sc
+                return {
+                    'symbol': t.symbol, 'direction': d,
+                    'quantity': t.quantity,
+                    'entry_price': t.entry_price, 'exit_price': t.exit_price,
+                    'gross_pnl': t.gross_pnl, 'charges': t.charges,
+                    'net_pnl': t.net_pnl, 'exit_reason': t.exit_reason,
+                    'strategy': t.strategy or sc,
+                }
+            trades = [_td(t) for t in self.trade_manager.get_today_trades()]
+            daily = self.risk_manager.get_daily_state()
+            gross = sum(float(t.get('gross_pnl', 0) or 0) for t in trades)
+            charges = sum(float(t.get('charges', 0) or 0) for t in trades)
+            net = sum(float(t.get('net_pnl', 0) or 0) for t in trades)
+            wins = sum(1 for t in trades if float(t.get('net_pnl', 0) or 0) > 0)
+            losses = sum(1 for t in trades if float(t.get('net_pnl', 0) or 0) <= 0)
+            strat = {}
+            for t in trades:
+                key = t.get('strategy') or t.get('signal_classification') or '—'
+                strat[key] = strat.get(key, 0) + 1
+            open_pos = [
+                {'symbol': p.symbol, 'quantity': p.quantity,
+                 'entry_price': p.entry_price,
+                 'stop_loss': p.stop_loss, 'target': p.target}
+                for p in self.paper_executor.get_open_positions()
+            ]
+            notes = []
+            if not trades:
+                notes.append('No entries taken today — see entry-permission status below.')
+            if daily.get('blocked'):
+                notes.append(f"Daily risk block active: {daily.get('block_reason', '—')}.")
+            ctx = {
+                'trading_date': today.isoformat(),
+                'date': datetime.now().strftime('%d %b %Y'),
+                'generated_at': datetime.now().strftime('%I:%M %p IST'),
+                'capital': f"₹{self.config.intraday_capital:,.0f}",
+                'max_trades': self.config.max_trades_per_day,
+                'daily_loss_limit': f"₹{self.config.intraday_capital * self.config.max_daily_loss_pct:,.0f}",
+                'loss_limit_status': ('hit' if daily.get('blocked') else 'not hit'),
+                'entries_today': daily.get('trades_today', len(trades)),
+                'wins': wins, 'losses': losses,
+                'win_rate': (wins / len(trades) * 100) if trades else None,
+                'gross_pnl': gross, 'charges': charges, 'net_pnl': net,
+                'trades': trades,
+                'open_positions': open_pos,
+                'eod_pending_positions': len(open_pos),
+                'eod_completed_at': self._eod_completed_at.strftime('%I:%M %p IST'),
+                'entry_permission': self._entry_permission(),
+                'auth_status': self._effective_auth_state(),
+                'market_data_status': self.market_data_status(),
+                'strategy_breakdown': strat,
+                'notes': notes,
+            }
+            EmailReporter().intraday_daily_report(ctx)
+        except Exception as e:
+            logger.warning(f"[INTRADAY] EOD email report failed (non-fatal): {e}")
 
     def maybe_run_cycle(self):
         """Kick off a background cycle if the scan interval has elapsed.
@@ -835,8 +920,7 @@ class IntradayEngine:
                 # EOD confirmed complete — zero positions inside the
                 # square-off window. Stamp completion once (auditable
                 # "EOD done" marker) and resolve any delay state.
-                if self._eod_completed_at is None:
-                    self._eod_completed_at = datetime.now()
+                self._mark_eod_complete()
                 self._eod_pending_since = None
                 if self._eod_delay_alerted:
                     self._eod_delay_alerted = False

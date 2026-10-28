@@ -1304,6 +1304,12 @@ class TradingOrchestrator:
         # Daily email report at 3:30 PM IST
         schedule.every().day.at("15:30").do(self.daily_email_report)
 
+        # Consolidated EOD email retry — covers the case where the other
+        # workspace reports late or a restart killed an in-flight wait.
+        # The coordinator itself bounds this window (until 23:30) and is
+        # a cheap no-op once the day's email is delivered.
+        schedule.every(5).minutes.do(self._consolidated_eod_retry)
+
         # Run one cycle immediately on startup so we don't wait up to 15 min
         logger.info("Running immediate startup cycle...")
         try:
@@ -1990,6 +1996,20 @@ class TradingOrchestrator:
             self.email.daily_report(summary, positions, orders)
         except Exception as e:
             logger.error(f"Daily email report failed: {e}")
+
+    def _consolidated_eod_retry(self):
+        """Bounded retry for the consolidated EOD email.
+
+        The coordinator gates on trading day and a 15:00–23:30 window,
+        dedups via the persistent incident key, and sends INCOMPLETE
+        sections once its hard deadline passes — so this is safe to run
+        every few minutes and after restarts."""
+        try:
+            er = self.email
+            if er.consolidated_pending():
+                er.attempt_consolidated()
+        except Exception as e:
+            logger.warning(f"Consolidated EOD retry failed: {e}")
     
     def run_paper_trading_test(self, duration_minutes: int = 60) -> Dict:
         """
