@@ -249,7 +249,7 @@ class TestDurableEntryIdempotency:
                 _signal(f'NEW{i}'), quote_time=datetime.now())
             assert pos is not None, f'entry {i} blocked by stale claim'
             eng2.paper_executor.execute_exit(pos, 101.0, 'TARGET_HIT')
-        assert rm.get_daily_state()['trades_today'] == 5
+        assert rm.get_daily_state()['trades_today'] == rm.config.max_trades_per_day
         ok, _ = rm.can_enter_trade(_signal('EXTRA'), idempotency_key='kx')
         assert not ok                                 # limit still enforced
 

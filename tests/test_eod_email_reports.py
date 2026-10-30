@@ -288,10 +288,11 @@ class TestDedupAndRetry:
 
 
 def _trade(symbol='RELIANCE', net=-46.0):
+    today = datetime.now().replace(hour=9, minute=45, second=0, microsecond=0)
     return IntradayTrade(
         id='t1', symbol=symbol, direction=SignalDirection.LONG,
         entry_price=1743.0, exit_price=1734.4, quantity=6,
-        entry_time=datetime(2026, 10, 28, 9, 45), exit_time=datetime(2026, 10, 28, 9, 55),
+        entry_time=today, exit_time=today.replace(minute=55),
         exit_reason='STOP_LOSS', gross_pnl=-32.0, charges=14.0, net_pnl=net,
         pnl_pct=-0.5, stop_loss=1737.9, target=1748.0, risk_reward=3.0,
         signal_score=77.2,
